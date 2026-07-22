@@ -6,7 +6,7 @@ import (
 
 	"github.com/go-kratos/kratos/v2"
 	"github.com/go-kratos/kratos/v2/log"
-	kratoshttp "github.com/go-kratos/kratos/v2/transport/http"
+	"github.com/go-kratos/kratos/v2/transport"
 
 	"github.com/owndock/owndock/internal/platform/health"
 )
@@ -15,17 +15,17 @@ func NewServer(
 	name string,
 	version string,
 	instanceID string,
-	server *kratoshttp.Server,
 	healthChecker *health.Checker,
 	shutdownTimeout time.Duration,
 	logger log.Logger,
+	servers ...transport.Server,
 ) *kratos.App {
 	return kratos.New(
 		kratos.Name(name),
 		kratos.Version(version),
 		kratos.ID(instanceID),
 		kratos.Logger(logger),
-		kratos.Server(server),
+		kratos.Server(servers...),
 		kratos.StopTimeout(shutdownTimeout),
 		kratos.AfterStart(func(context.Context) error {
 			healthChecker.SetReady(true)

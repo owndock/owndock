@@ -5,31 +5,53 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
 
-	applicationmodule "github.com/owndock/owndock/internal/modules/application"
+	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
 	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
+	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
+	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
+	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
+	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
+	environmentbiz "github.com/owndock/owndock/internal/modules/environment/biz"
+	environmentdata "github.com/owndock/owndock/internal/modules/environment/data"
+	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
+	"github.com/owndock/owndock/internal/platform/observability"
 )
 
 func TestHTTPRoutes(t *testing.T) {
 	checker := health.NewChecker()
 	checker.SetReady(true)
+	applications := applicationdata.NewMemoryRepository()
+	environments := environmentdata.NewMemoryRepository()
+	newID := func() (string, error) { return "test-id", nil }
+	now := func() time.Time { return time.Unix(0, 0) }
 	srv, err := NewHTTPServer(
 		platformconfig.HTTP{Address: "127.0.0.1:0", Timeout: "1s"},
 		checker,
 		meta.NewService(meta.BuildInfo{Service: "owndock", Version: "test"}),
-		applicationmodule.NewService(applicationdata.NewMemoryRepository()),
+		applicationservice.NewHTTP(applicationbiz.NewUseCase(applications, newID, now)),
+		environmentservice.NewHTTP(environmentbiz.NewUseCase(environments, newID, now)),
+		deploymentservice.NewHTTP(deploymentbiz.NewUseCase(
+			deploymentdata.NewMemoryRepository(),
+			deploymentdata.NewApplicationLookup(applications),
+			deploymentdata.NewEnvironmentLookup(environments),
+			newID,
+			now,
+		)),
+		observability.NewMetrics(),
 		log.NewStdLogger(httptest.NewRecorder()),
 	)
 	if err != nil {
 		t.Fatalf("NewHTTPServer() error = %v", err)
 	}
 
-	for _, path := range []string{"/livez", "/readyz", "/api/meta/version", "/api/applications"} {
+	for _, path := range []string{"/livez", "/readyz", "/metrics", "/api/v1/meta/version", "/api/v1/applications", "/api/v1/environments", "/api/v1/deployments"} {
 		recorder := httptest.NewRecorder()
 		srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		if recorder.Code != http.StatusOK {
@@ -38,14 +60,22 @@ func TestHTTPRoutes(t *testing.T) {
 	}
 
 	create := httptest.NewRecorder()
-	srv.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/applications", strings.NewReader(`{"name":"demo"}`)))
+	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/applications", strings.NewReader(`{"name":"demo"}`))
+	createRequest.Header.Set("X-Request-ID", "test-request")
+	srv.ServeHTTP(create, createRequest)
 	if create.Code != http.StatusCreated {
-		t.Fatalf("POST /api/applications status = %d", create.Code)
+		t.Fatalf("POST /api/v1/applications status = %d", create.Code)
+	}
+	if got := create.Header().Get("X-Request-ID"); got != "test-request" {
+		t.Fatalf("request ID header = %q", got)
 	}
 
 	recorder := httptest.NewRecorder()
 	srv.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/missing", nil))
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing route status = %d, want %d", recorder.Code, http.StatusNotFound)
+	}
+	if !strings.Contains(recorder.Body.String(), `"code":"not_found"`) || !strings.Contains(recorder.Body.String(), `"request_id":`) {
+		t.Fatalf("missing route body = %s", recorder.Body.String())
 	}
 }

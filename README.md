@@ -13,7 +13,7 @@ OwnDock 是面向开发者和团队的自托管应用交付与运行平台，提
 - Kratos：v2.9.2
 - 依赖组装：composition root 手工组装，不使用 Google Wire
 - 主服务进程：`owndock`
-- 当前接口：`GET /livez`、`GET /readyz`、`GET /api/meta/version`
+- 当前接口：健康、Prometheus 指标与版本接口，以及 Application、Environment、Deployment 的首批 JSON API
 
 当前版本提供项目运行基线，业务能力会按领域模块逐步实现。
 
@@ -30,7 +30,9 @@ make run
 ```bash
 curl http://127.0.0.1:8000/livez
 curl http://127.0.0.1:8000/readyz
-curl http://127.0.0.1:8000/api/meta/version
+curl http://127.0.0.1:8000/metrics
+curl http://127.0.0.1:8000/api/v1/meta/version
+curl http://127.0.0.1:8000/api/v1/applications
 ```
 
 ## 目录约定
@@ -46,4 +48,4 @@ internal/platform/   配置、数据库、可观测性等平台能力
 internal/server/     HTTP/gRPC transport 装配
 ```
 
-项目架构约束见 [docs/architecture.md](docs/architecture.md)。
+项目架构约束见 [docs/architecture.md](docs/architecture.md)。`make check` 会执行格式、依赖完整性、架构边界、单元测试、静态检查和构建验证。

@@ -1,9 +1,10 @@
 package meta
 
 import (
-	"encoding/json"
 	"net/http"
 	"runtime"
+
+	"github.com/owndock/owndock/internal/platform/httpx"
 )
 
 type BuildInfo struct {
@@ -31,20 +32,14 @@ func NewService(info BuildInfo) *Service {
 
 func (s *Service) Version(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
-		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "method_not_allowed"})
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
 	}
-	writeJSON(w, http.StatusOK, versionResponse{
+	httpx.JSON(w, http.StatusOK, versionResponse{
 		Service:   s.info.Service,
 		Version:   s.info.Version,
 		Commit:    s.info.Commit,
 		BuildTime: s.info.BuildTime,
 		GoVersion: runtime.Version(),
 	})
-}
-
-func writeJSON(w http.ResponseWriter, status int, value any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(value)
 }

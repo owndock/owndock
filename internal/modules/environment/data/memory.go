@@ -5,37 +5,37 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/owndock/owndock/internal/modules/application/biz"
+	"github.com/owndock/owndock/internal/modules/environment/biz"
 )
 
 type MemoryRepository struct {
 	mu    sync.RWMutex
-	items []biz.Application
+	items []biz.Environment
 }
 
 func NewMemoryRepository() *MemoryRepository { return &MemoryRepository{} }
 
-func (r *MemoryRepository) List(context.Context) ([]biz.Application, error) {
+func (r *MemoryRepository) List(context.Context) ([]biz.Environment, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	items := make([]biz.Application, len(r.items))
+	items := make([]biz.Environment, len(r.items))
 	copy(items, r.items)
 	return items, nil
 }
 
-func (r *MemoryRepository) Create(_ context.Context, item biz.Application) (biz.Application, error) {
+func (r *MemoryRepository) Create(_ context.Context, item biz.Environment) (biz.Environment, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, existing := range r.items {
 		if strings.EqualFold(existing.Name, item.Name) {
-			return biz.Application{}, biz.ErrDuplicateName
+			return biz.Environment{}, biz.ErrDuplicateName
 		}
 	}
 	r.items = append(r.items, item)
 	return item, nil
 }
 
-func (r *MemoryRepository) Find(_ context.Context, id string) (biz.Application, error) {
+func (r *MemoryRepository) Find(_ context.Context, id string) (biz.Environment, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	for _, item := range r.items {
@@ -43,5 +43,5 @@ func (r *MemoryRepository) Find(_ context.Context, id string) (biz.Application, 
 			return item, nil
 		}
 	}
-	return biz.Application{}, biz.ErrNotFound
+	return biz.Environment{}, biz.ErrNotFound
 }

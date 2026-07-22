@@ -15,7 +15,7 @@ func TestVersion(t *testing.T) {
 		BuildTime: "2026-07-21T00:00:00Z",
 	})
 	recorder := httptest.NewRecorder()
-	service.Version(recorder, httptest.NewRequest(http.MethodGet, "/api/meta/version", nil))
+	service.Version(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/meta/version", nil))
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)

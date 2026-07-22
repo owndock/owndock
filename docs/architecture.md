@@ -19,6 +19,8 @@ internal/modules/<domain>/
   service/      transport DTO 与用例之间的转换
 ```
 
+模块内请求链固定为 `HTTP/gRPC service → biz.UseCase → Repository/Gateway port ← data adapter`。Service 只处理协议解析、校验和错误映射；业务编排、状态规则与端口定义属于 `biz`。
+
 约束：
 
 - `biz` 不依赖 Kratos transport、Mongo driver 或其他模块的 `data`；
@@ -27,9 +29,13 @@ internal/modules/<domain>/
 - 数据库 client、日志、遥测属于 `internal/platform`，领域仓储实现仍归模块所有；
 - 只有出现独立扩缩容、故障隔离或团队所有权需求时，才把模块拆为服务。
 
+这些规则由 `internal/architecture` 中的可执行测试守护。新增领域不能让 `biz` 直接导入其他领域、Kratos transport、数据库驱动或运行时 SDK。
+
 ## 进程边界
 
 当前只建立 `cmd/server`，负责对外 API。agent、worker、CLI 等进程只在职责和生命周期明确后创建，不保留无实现的模板目录。Web 前端由独立项目维护。
+
+常驻任务实现 `Run(context.Context) error`，通过 `internal/platform/lifecycle.Server` 接入 Kratos App。构造函数不得启动 goroutine；停止过程必须响应 context，并受统一 shutdown timeout 约束。
 
 ## 版本策略
 
