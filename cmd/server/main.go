@@ -8,6 +8,8 @@ import (
 	"github.com/go-kratos/kratos/v2/log"
 
 	serverapp "github.com/owndock/owndock/internal/app"
+	applicationmodule "github.com/owndock/owndock/internal/modules/application"
+	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
@@ -63,7 +65,8 @@ func run() error {
 		Commit:    commit,
 		BuildTime: buildTime,
 	})
-	httpServer, err := server.NewHTTPServer(cfg.Server.HTTP, healthChecker, metaService, logger)
+	applicationService := applicationmodule.NewService(applicationdata.NewMemoryRepository())
+	httpServer, err := server.NewHTTPServer(cfg.Server.HTTP, healthChecker, metaService, applicationService, logger)
 	if err != nil {
 		return fmt.Errorf("create HTTP server: %w", err)
 	}

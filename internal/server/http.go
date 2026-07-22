@@ -9,6 +9,7 @@ import (
 	"github.com/go-kratos/kratos/v2/middleware/recovery"
 	kratoshttp "github.com/go-kratos/kratos/v2/transport/http"
 
+	applicationmodule "github.com/owndock/owndock/internal/modules/application"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
@@ -18,6 +19,7 @@ func NewHTTPServer(
 	cfg platformconfig.HTTP,
 	healthChecker *health.Checker,
 	metaService *meta.Service,
+	applicationService *applicationmodule.Service,
 	logger log.Logger,
 ) (*kratoshttp.Server, error) {
 	timeout, err := cfg.TimeoutDuration()
@@ -39,6 +41,8 @@ func NewHTTPServer(
 	srv.HandleFunc("/livez", healthChecker.Live)
 	srv.HandleFunc("/readyz", healthChecker.Ready)
 	srv.HandleFunc("/api/meta/version", metaService.Version)
+	srv.HandleFunc("/api/applications", applicationService.List)
+	srv.HandleFunc("/api/applications/", applicationService.Create)
 	return srv, nil
 }
 
