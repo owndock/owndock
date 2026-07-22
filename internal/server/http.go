@@ -41,8 +41,7 @@ func NewHTTPServer(
 	srv.HandleFunc("/livez", healthChecker.Live)
 	srv.HandleFunc("/readyz", healthChecker.Ready)
 	srv.HandleFunc("/api/meta/version", metaService.Version)
-	srv.HandleFunc("/api/applications", applicationService.List)
-	srv.HandleFunc("/api/applications/", applicationService.Create)
+	srv.HandleFunc("/api/applications", applicationService.Handle)
 	return srv, nil
 }
 

@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -34,6 +35,12 @@ func TestHTTPRoutes(t *testing.T) {
 		if recorder.Code != http.StatusOK {
 			t.Errorf("GET %s status = %d, want %d", path, recorder.Code, http.StatusOK)
 		}
+	}
+
+	create := httptest.NewRecorder()
+	srv.ServeHTTP(create, httptest.NewRequest(http.MethodPost, "/api/applications", strings.NewReader(`{"name":"demo"}`)))
+	if create.Code != http.StatusCreated {
+		t.Fatalf("POST /api/applications status = %d", create.Code)
 	}
 
 	recorder := httptest.NewRecorder()

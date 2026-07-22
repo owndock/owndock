@@ -20,6 +20,17 @@ func NewService(repo biz.Repository) *Service {
 	return &Service{repo: repo, now: time.Now}
 }
 
+func (s *Service) Handle(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		s.List(w, r)
+	case http.MethodPost:
+		s.Create(w, r)
+	default:
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
 func (s *Service) List(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed")
