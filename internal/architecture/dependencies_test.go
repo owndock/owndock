@@ -1,6 +1,7 @@
 package architecture
 
 import (
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"os"
@@ -38,6 +39,39 @@ func TestDependencyBoundaries(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDomainTypesDoNotDeclareJSONTransportTags(t *testing.T) {
+	root := repositoryRoot(t)
+	bizPattern := filepath.Join(root, "internal", "modules", "*", "biz", "*.go")
+	files, err := filepath.Glob(bizPattern)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			field, ok := node.(*ast.Field)
+			if !ok || field.Tag == nil {
+				return true
+			}
+			tag, err := strconv.Unquote(field.Tag.Value)
+			if err != nil {
+				t.Errorf("%s: invalid struct tag %s", path, field.Tag.Value)
+				return true
+			}
+			if strings.Contains(tag, "json:") {
+				t.Errorf("%s: biz domain types must not declare transport json tag %q", path, tag)
+			}
+			return true
+		})
 	}
 }
 

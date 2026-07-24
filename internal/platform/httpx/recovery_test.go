@@ -24,7 +24,9 @@ func TestRecoveryConvertsPanicToSafeError(t *testing.T) {
 	if strings.Contains(recorder.Body.String(), "secret detail") || !strings.Contains(recorder.Body.String(), `"request_id":"panic-request"`) {
 		t.Fatalf("response body = %s", recorder.Body.String())
 	}
-	if !strings.Contains(loggerOutput.Body.String(), "secret detail") || !strings.Contains(loggerOutput.Body.String(), "panic-request") {
+	if strings.Contains(loggerOutput.Body.String(), "secret detail") ||
+		!strings.Contains(loggerOutput.Body.String(), "panic.type=string") ||
+		!strings.Contains(loggerOutput.Body.String(), "panic-request") {
 		t.Fatalf("log = %s", loggerOutput.Body.String())
 	}
 }

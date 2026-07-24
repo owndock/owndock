@@ -23,11 +23,11 @@ const (
 )
 
 type Environment struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Provider  string    `json:"provider"`
-	Status    Status    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string
+	Name      string
+	Provider  string
+	Status    Status
+	CreatedAt time.Time
 }
 
 type Repository interface {

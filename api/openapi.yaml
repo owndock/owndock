@@ -1,0 +1,425 @@
+openapi: 3.0.3
+info:
+  title: OwnDock API
+  version: 0.1.0
+  description: Pre-release engineering contract. Application, Environment, and Deployment operations are disabled by default and are not accepted product APIs.
+  x-owndock-stability: engineering-evidence
+servers:
+  - url: /
+tags:
+  - name: Health
+  - name: Meta
+  - name: Applications
+  - name: Environments
+  - name: Deployments
+paths:
+  /livez:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Health]
+      operationId: getLiveness
+      summary: Check whether the process is alive
+      responses:
+        "200":
+          $ref: "#/components/responses/HealthOK"
+  /readyz:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Health]
+      operationId: getReadiness
+      summary: Check whether the process is ready to serve traffic
+      responses:
+        "200":
+          $ref: "#/components/responses/HealthOK"
+        "503":
+          $ref: "#/components/responses/NotReady"
+  /api/v1/meta/version:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Meta]
+      operationId: getVersion
+      summary: Get service build information
+      responses:
+        "200":
+          $ref: "#/components/responses/Version"
+  /api/v1/applications:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Applications]
+      operationId: listApplications
+      summary: List applications
+      responses:
+        "200":
+          $ref: "#/components/responses/ApplicationList"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Applications]
+      operationId: createApplication
+      summary: Create an application
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateApplicationRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ApplicationCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/environments:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Environments]
+      operationId: listEnvironments
+      summary: List environments
+      responses:
+        "200":
+          $ref: "#/components/responses/EnvironmentList"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Environments]
+      operationId: createEnvironment
+      summary: Create an environment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEnvironmentRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/EnvironmentCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/deployments:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Deployments]
+      operationId: listDeployments
+      summary: List deployments
+      parameters:
+        - name: application_id
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: environment_id
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/DeploymentList"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Deployments]
+      operationId: createDeployment
+      summary: Create a deployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDeploymentRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/DeploymentCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+components:
+  parameters:
+    RequestID:
+      name: X-Request-ID
+      in: header
+      required: false
+      description: Optional caller-provided request correlation identifier.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._-]+$"
+  headers:
+    RequestID:
+      description: Request correlation identifier accepted from or generated by OwnDock.
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9._-]+$"
+  responses:
+    HealthOK:
+      description: Process is healthy.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HealthResponse"
+    NotReady:
+      description: Process is not ready to serve traffic.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/HealthResponse"
+    Version:
+      description: Service build information.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Version"
+    ApplicationList:
+      description: Application collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Application"
+    ApplicationCreated:
+      description: Application created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Application"
+    EnvironmentList:
+      description: Environment collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Environment"
+    EnvironmentCreated:
+      description: Environment created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Environment"
+    DeploymentList:
+      description: Deployment collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Deployment"
+    DeploymentCreated:
+      description: Deployment created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Deployment"
+    APIError:
+      description: Request failed.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, not_ready]
+    Version:
+      type: object
+      additionalProperties: false
+      required: [service, version, commit, build_time, go_version]
+      properties:
+        service:
+          type: string
+        version:
+          type: string
+        commit:
+          type: string
+        build_time:
+          type: string
+        go_version:
+          type: string
+    Application:
+      type: object
+      additionalProperties: false
+      required: [id, name, status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [pending, ready, failed]
+        created_at:
+          type: string
+          format: date-time
+    Environment:
+      type: object
+      additionalProperties: false
+      required: [id, name, provider, status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        provider:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [active, draining, deleted]
+        created_at:
+          type: string
+          format: date-time
+    Deployment:
+      type: object
+      additionalProperties: false
+      required: [id, application_id, environment_id, revision, status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        environment_id:
+          type: string
+          minLength: 1
+        revision:
+          type: string
+        status:
+          type: string
+          enum: [queued, building, deploying, succeeded, failed, canceled]
+        created_at:
+          type: string
+          format: date-time
+    CreateApplicationRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+    CreateEnvironmentRequest:
+      type: object
+      additionalProperties: false
+      required: [name, provider]
+      properties:
+        name:
+          type: string
+        provider:
+          type: string
+    CreateDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [application_id, environment_id]
+      properties:
+        application_id:
+          type: string
+        environment_id:
+          type: string
+        revision:
+          type: string
+    ErrorResponse:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorDetail"
+    ErrorDetail:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          minLength: 1
+        message:
+          type: string
+          minLength: 1
+        request_id:
+          type: string
+          minLength: 1

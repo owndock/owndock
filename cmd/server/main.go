@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -22,6 +24,7 @@ import (
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
 	"github.com/owndock/owndock/internal/platform/id"
+	platformmongo "github.com/owndock/owndock/internal/platform/mongo"
 	"github.com/owndock/owndock/internal/platform/observability"
 	"github.com/owndock/owndock/internal/server"
 )
@@ -75,22 +78,51 @@ func run() error {
 		Commit:    commit,
 		BuildTime: buildTime,
 	})
-	applicationRepository := applicationdata.NewMemoryRepository()
-	environmentRepository := environmentdata.NewMemoryRepository()
-	applicationUseCase := applicationbiz.NewUseCase(applicationRepository, id.New, time.Now)
-	environmentUseCase := environmentbiz.NewUseCase(environmentRepository, id.New, time.Now)
-	deploymentUseCase := deploymentbiz.NewUseCase(
-		deploymentdata.NewMemoryRepository(),
-		deploymentdata.NewApplicationLookup(applicationRepository),
-		deploymentdata.NewEnvironmentLookup(environmentRepository),
-		id.New,
-		time.Now,
-	)
-	applicationService := applicationservice.NewHTTP(applicationUseCase)
-	environmentService := environmentservice.NewHTTP(environmentUseCase)
-	deploymentService := deploymentservice.NewHTTP(deploymentUseCase)
+	var engineeringSamples *server.EngineeringSamples
+	if cfg.Development.EnableEngineeringSamples {
+		applicationRepository := applicationdata.NewMemoryRepository()
+		environmentRepository := environmentdata.NewMemoryRepository()
+		engineeringSamples = &server.EngineeringSamples{
+			Application: applicationservice.NewHTTP(applicationbiz.NewUseCase(applicationRepository, id.New, time.Now)),
+			Environment: environmentservice.NewHTTP(environmentbiz.NewUseCase(environmentRepository, id.New, time.Now)),
+			Deployment: deploymentservice.NewHTTP(deploymentbiz.NewUseCase(
+				deploymentdata.NewMemoryRepository(),
+				deploymentdata.NewApplicationLookup(applicationRepository),
+				deploymentdata.NewEnvironmentLookup(environmentRepository),
+				id.New,
+				time.Now,
+			)),
+		}
+	}
 	metrics := observability.NewMetrics()
-	httpServer, err := server.NewHTTPServer(cfg.Server.HTTP, healthChecker, metaService, applicationService, environmentService, deploymentService, metrics, logger)
+	tracing, err := observability.NewTracing(context.Background(), cfg.Observability.Tracing, serviceName, version, instanceID)
+	if err != nil {
+		return fmt.Errorf("create tracing: %w", err)
+	}
+	var mongoClient *platformmongo.Client
+	if cfg.Database.Mongo.Enabled {
+		mongoClient, err = platformmongo.Open(context.Background(), cfg.Database.Mongo)
+		if err != nil {
+			shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+			defer cancel()
+			return errors.Join(fmt.Errorf("open MongoDB: %w", err), tracing.Shutdown(shutdownContext))
+		}
+		healthChecker.AddReadinessCheck("mongo", mongoClient.Ping)
+	}
+	cleanup := func(ctx context.Context) error {
+		var mongoErr error
+		if mongoClient != nil {
+			mongoErr = mongoClient.Close(ctx)
+		}
+		return errors.Join(mongoErr, tracing.Shutdown(ctx))
+	}
+	defer func() {
+		shutdownContext, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		_ = cleanup(shutdownContext)
+	}()
+
+	httpServer, err := server.NewHTTPServer(cfg.Server.HTTP, healthChecker, metaService, engineeringSamples, metrics, tracing, logger)
 	if err != nil {
 		return fmt.Errorf("create HTTP server: %w", err)
 	}
@@ -102,6 +134,7 @@ func run() error {
 		healthChecker,
 		shutdownTimeout,
 		logger,
+		cleanup,
 		httpServer,
 	)
 	return application.Run()

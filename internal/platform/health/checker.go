@@ -1,13 +1,18 @@
 package health
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
+	"sync"
 	"sync/atomic"
 )
 
 type Checker struct {
-	ready atomic.Bool
+	ready  atomic.Bool
+	mu     sync.RWMutex
+	checks map[string]func(context.Context) error
 }
 
 type response struct {
@@ -15,11 +20,20 @@ type response struct {
 }
 
 func NewChecker() *Checker {
-	return &Checker{}
+	return &Checker{checks: make(map[string]func(context.Context) error)}
 }
 
 func (c *Checker) SetReady(ready bool) {
 	c.ready.Store(ready)
+}
+
+func (c *Checker) AddReadinessCheck(name string, check func(context.Context) error) {
+	if name == "" || check == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.checks[name] = check
 }
 
 func (c *Checker) Live(w http.ResponseWriter, r *http.Request) {
@@ -39,7 +53,28 @@ func (c *Checker) Ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusServiceUnavailable, response{Status: "not_ready"})
 		return
 	}
+	for _, check := range c.readinessChecks() {
+		if err := check(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, response{Status: "not_ready"})
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, response{Status: "ok"})
+}
+
+func (c *Checker) readinessChecks() []func(context.Context) error {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	names := make([]string, 0, len(c.checks))
+	for name := range c.checks {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	checks := make([]func(context.Context) error, 0, len(names))
+	for _, name := range names {
+		checks = append(checks, c.checks[name])
+	}
+	return checks
 }
 
 func writeJSON(w http.ResponseWriter, status int, value any) {

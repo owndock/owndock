@@ -55,4 +55,9 @@ func TestCreateAndFilter(t *testing.T) {
 	if create.Code != http.StatusCreated || !strings.Contains(create.Body.String(), `"status":"queued"`) {
 		t.Fatalf("create response = %d %s", create.Code, create.Body.String())
 	}
+	for _, internalField := range []string{"version", "lease", "updated_at"} {
+		if strings.Contains(create.Body.String(), internalField) {
+			t.Fatalf("create response leaked internal field %q: %s", internalField, create.Body.String())
+		}
+	}
 }

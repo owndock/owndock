@@ -18,9 +18,10 @@ func NewServer(
 	healthChecker *health.Checker,
 	shutdownTimeout time.Duration,
 	logger log.Logger,
+	cleanup func(context.Context) error,
 	servers ...transport.Server,
 ) *kratos.App {
-	return kratos.New(
+	options := []kratos.Option{
 		kratos.Name(name),
 		kratos.Version(version),
 		kratos.ID(instanceID),
@@ -35,5 +36,17 @@ func NewServer(
 			healthChecker.SetReady(false)
 			return nil
 		}),
-	)
+	}
+	if cleanup != nil {
+		options = append(options, kratos.AfterStop(cleanupAfterStop(shutdownTimeout, cleanup)))
+	}
+	return kratos.New(options...)
+}
+
+func cleanupAfterStop(timeout time.Duration, cleanup func(context.Context) error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		shutdownContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), timeout)
+		defer cancel()
+		return cleanup(shutdownContext)
+	}
 }

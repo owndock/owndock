@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/owndock/owndock/internal/modules/environment/biz"
 	"github.com/owndock/owndock/internal/platform/httpx"
@@ -10,6 +11,14 @@ import (
 
 type HTTP struct {
 	useCase *biz.UseCase
+}
+
+type response struct {
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Provider  string     `json:"provider"`
+	Status    biz.Status `json:"status"`
+	CreatedAt time.Time  `json:"created_at"`
 }
 
 func NewHTTP(useCase *biz.UseCase) *HTTP {
@@ -33,7 +42,11 @@ func (s *HTTP) list(w http.ResponseWriter, r *http.Request) {
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"items": items})
+	responses := make([]response, len(items))
+	for i := range items {
+		responses[i] = toResponse(items[i])
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 }
 
 func (s *HTTP) create(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +70,16 @@ func (s *HTTP) create(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 	default:
-		httpx.JSON(w, http.StatusCreated, item)
+		httpx.JSON(w, http.StatusCreated, toResponse(item))
+	}
+}
+
+func toResponse(item biz.Environment) response {
+	return response{
+		ID:        item.ID,
+		Name:      item.Name,
+		Provider:  item.Provider,
+		Status:    item.Status,
+		CreatedAt: item.CreatedAt,
 	}
 }

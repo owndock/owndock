@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
 	"github.com/owndock/owndock/internal/platform/httpx"
@@ -10,6 +11,15 @@ import (
 
 type HTTP struct {
 	useCase *biz.UseCase
+}
+
+type response struct {
+	ID            string     `json:"id"`
+	ApplicationID string     `json:"application_id"`
+	EnvironmentID string     `json:"environment_id"`
+	Revision      string     `json:"revision"`
+	Status        biz.Status `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 func NewHTTP(useCase *biz.UseCase) *HTTP {
@@ -33,7 +43,11 @@ func (s *HTTP) list(w http.ResponseWriter, r *http.Request) {
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"items": items})
+	responses := make([]response, len(items))
+	for i := range items {
+		responses[i] = toResponse(items[i])
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 }
 
 func (s *HTTP) create(w http.ResponseWriter, r *http.Request) {
@@ -60,6 +74,17 @@ func (s *HTTP) create(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 	default:
-		httpx.JSON(w, http.StatusCreated, item)
+		httpx.JSON(w, http.StatusCreated, toResponse(item))
+	}
+}
+
+func toResponse(item biz.Deployment) response {
+	return response{
+		ID:            item.ID,
+		ApplicationID: item.ApplicationID,
+		EnvironmentID: item.EnvironmentID,
+		Revision:      item.Revision,
+		Status:        item.Status,
+		CreatedAt:     item.CreatedAt,
 	}
 }

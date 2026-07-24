@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/go-kratos/kratos/v2/log"
@@ -19,14 +20,21 @@ import (
 
 const apiV1 = "/api/v1"
 
+// EngineeringSamples groups replaceable technical examples that are not
+// accepted product modules. A nil value keeps every sample route unregistered.
+type EngineeringSamples struct {
+	Application *applicationservice.HTTP
+	Environment *environmentservice.HTTP
+	Deployment  *deploymentservice.HTTP
+}
+
 func NewHTTPServer(
 	cfg platformconfig.HTTP,
 	healthChecker *health.Checker,
 	metaService *meta.Service,
-	applicationService *applicationservice.HTTP,
-	environmentService *environmentservice.HTTP,
-	deploymentService *deploymentservice.HTTP,
+	samples *EngineeringSamples,
 	metrics *observability.Metrics,
+	tracing *observability.Tracing,
 	logger log.Logger,
 ) (*kratoshttp.Server, error) {
 	timeout, err := cfg.TimeoutDuration()
@@ -37,7 +45,13 @@ func NewHTTPServer(
 	srv := kratoshttp.NewServer(
 		kratoshttp.Address(cfg.Address),
 		kratoshttp.Timeout(timeout),
-		kratoshttp.Filter(httpx.RequestID(id.New), httpx.Recovery(logger), metrics.Instrument),
+		kratoshttp.Filter(
+			httpx.RequestID(id.New),
+			tracing.Instrument,
+			httpx.AccessLog(logger),
+			httpx.Recovery(logger),
+			metrics.Instrument,
+		),
 		kratoshttp.NotFoundHandler(errorHandler(http.StatusNotFound, "not_found")),
 		kratoshttp.MethodNotAllowedHandler(errorHandler(http.StatusMethodNotAllowed, "method_not_allowed")),
 	)
@@ -46,9 +60,14 @@ func NewHTTPServer(
 	srv.HandleFunc("/readyz", healthChecker.Ready)
 	srv.Handle("/metrics", metrics.Handler())
 	srv.HandleFunc(apiV1+"/meta/version", metaService.Version)
-	srv.HandleFunc(apiV1+"/applications", applicationService.Handle)
-	srv.HandleFunc(apiV1+"/environments", environmentService.Handle)
-	srv.HandleFunc(apiV1+"/deployments", deploymentService.Handle)
+	if samples != nil {
+		if samples.Application == nil || samples.Environment == nil || samples.Deployment == nil {
+			return nil, fmt.Errorf("engineering sample services must be provided together")
+		}
+		srv.HandleFunc(apiV1+"/applications", samples.Application.Handle)
+		srv.HandleFunc(apiV1+"/environments", samples.Environment.Handle)
+		srv.HandleFunc(apiV1+"/deployments", samples.Deployment.Handle)
+	}
 	return srv, nil
 }
 

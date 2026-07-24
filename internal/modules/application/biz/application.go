@@ -21,10 +21,10 @@ const (
 )
 
 type Application struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Status    Status    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string
+	Name      string
+	Status    Status
+	CreatedAt time.Time
 }
 
 type Repository interface {
