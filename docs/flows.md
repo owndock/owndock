@@ -180,6 +180,25 @@ sequenceDiagram
     end
 ```
 
+正式 Deployment 的状态只允许由领域方法推进，取消不是直接删除，而是经过 `canceling`：
+
+```mermaid
+stateDiagram-v2
+    [*] --> queued
+    queued --> building: worker claim
+    building --> deploying: build ready
+    deploying --> succeeded: executor success
+    building --> failed: non-retryable error
+    deploying --> failed: non-retryable error
+    queued --> canceling: cancel request
+    building --> canceling: cancel request
+    deploying --> canceling: cancel request
+    canceling --> canceled: worker cleanup
+    succeeded --> [*]
+    failed --> [*]
+    canceled --> [*]
+```
+
 ## 阅读边界
 
 - 当前正式持久化资源：Organization、User、Session、Project、Project Application、Environment、Release、Runtime Target、Audit Event。
