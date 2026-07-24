@@ -169,8 +169,8 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 
 	controlPlaneStore := controlplanedata.NewMongoStore(client.Database())
-	controlPlaneUseCase := controlplanebiz.NewUseCase(
-		controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore,
+	controlPlaneUseCase := controlplanebiz.NewUseCaseWithEnvironment(
+		controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore,
 		client, auditStore, auditStore, id.New, time.Now,
 	)
 	project, err := controlPlaneUseCase.CreateProject(ctx, principal, "Delivery", "project-request")
@@ -197,15 +197,19 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create runtime target: %v", err)
 	}
-	if release.ApplicationID != application.ID || target.ProjectID != project.ID {
-		t.Fatalf("release=%+v target=%+v", release, target)
+	environment, err := controlPlaneUseCase.CreateEnvironment(ctx, principal, project.ID, "Production", "production", "environment-request")
+	if err != nil {
+		t.Fatalf("create environment: %v", err)
+	}
+	if release.ApplicationID != application.ID || target.ProjectID != project.ID || environment.ProjectID != project.ID {
+		t.Fatalf("release=%+v target=%+v environment=%+v", release, target, environment)
 	}
 	events, err := controlPlaneUseCase.ListAuditEvents(ctx, principal, "", 100)
 	if err != nil {
 		t.Fatalf("list audit events: %v", err)
 	}
-	if len(events) < 6 {
-		t.Fatalf("audit event count = %d, want at least 6", len(events))
+	if len(events) < 7 {
+		t.Fatalf("audit event count = %d, want at least 7", len(events))
 	}
 
 	identityHTTP := identityservice.NewHTTP(identityUseCase, func() (string, error) {
