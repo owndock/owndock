@@ -107,6 +107,22 @@ func (r *MongoRepository) SaveClaimed(ctx context.Context, item biz.Deployment, 
 	return item, nil
 }
 
+// RenewLease extends a live worker lease only when owner and version still
+// match. A stale worker therefore cannot keep a reclaimed deployment alive.
+func (r *MongoRepository) RenewLease(ctx context.Context, deploymentID, workerID string, expectedVersion uint64, now, expiresAt time.Time) error {
+	if workerID == "" || !expiresAt.After(now) {
+		return biz.ErrInvalidLease
+	}
+	result, err := r.deployments.UpdateOne(ctx, bson.D{{Key: "_id", Value: deploymentID}, {Key: "version", Value: expectedVersion}, {Key: "lease.owner", Value: workerID}, {Key: "lease.expires_at", Value: bson.D{{Key: "$gt", Value: now}}}}, bson.D{{Key: "$set", Value: bson.D{{Key: "lease.expires_at", Value: expiresAt.UTC()}, {Key: "updated_at", Value: now.UTC()}}}, {Key: "$inc", Value: bson.D{{Key: "version", Value: 1}}}})
+	if err != nil {
+		return err
+	}
+	if result.ModifiedCount != 1 {
+		return biz.ErrConflict
+	}
+	return nil
+}
+
 type deploymentDocument struct {
 	ID              string                  `bson:"_id"`
 	ReleaseID       string                  `bson:"release_id"`
