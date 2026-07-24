@@ -68,7 +68,8 @@ func NewFormal(id, releaseID, applicationID, environmentID, runtimeTargetID, ide
 	if strings.TrimSpace(runtimeTargetID) == "" {
 		return Deployment{}, ErrInvalidRuntimeTarget
 	}
-	if strings.TrimSpace(idempotencyKey) == "" {
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if idempotencyKey == "" || len(idempotencyKey) > 128 {
 		return Deployment{}, ErrInvalidIdempotencyKey
 	}
 	item, err := New(applicationID, environmentID, "", id, now)
@@ -77,7 +78,7 @@ func NewFormal(id, releaseID, applicationID, environmentID, runtimeTargetID, ide
 	}
 	item.ReleaseID = strings.TrimSpace(releaseID)
 	item.RuntimeTargetID = strings.TrimSpace(runtimeTargetID)
-	item.IdempotencyKey = strings.TrimSpace(idempotencyKey)
+	item.IdempotencyKey = idempotencyKey
 	return item, nil
 }
 

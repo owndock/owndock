@@ -2,6 +2,7 @@ package biz
 
 import (
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,5 +78,9 @@ func TestFormalDeploymentPinsReferencesAndIdempotency(t *testing.T) {
 		if _, err := NewFormal(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], time.Now()); err == nil {
 			t.Errorf("invalid formal deployment %+v accepted", invalid)
 		}
+	}
+	longKey := strings.Repeat("k", 129)
+	if _, err := NewFormal("dep", "rel", "app", "env", "target", longKey, time.Now()); err != ErrInvalidIdempotencyKey {
+		t.Fatalf("long idempotency key error = %v", err)
 	}
 }
