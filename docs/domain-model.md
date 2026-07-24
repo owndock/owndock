@@ -17,7 +17,7 @@ Deployment *--1 Runtime Target
 
 ## 状态规则
 
-正式 Deployment 已在领域层固定 Release、Application、Environment、Runtime Target 和幂等键引用；重试和回滚仍创建新操作。当前工程样例中的应用创建后处于 `pending`，环境创建后处于 `active`，部署从 `queued` 依次进入 `building`、`deploying`，最终进入 `succeeded`、`failed` 或 `canceled`。这些状态只属于当前样例；正式执行仍需 Mongo 持久化和 Docker Gateway。
+正式 Deployment 已在领域层固定 Release、Application、Environment、Runtime Target 和幂等键引用；重试和回滚仍创建新操作。状态允许 `queued`、`building`、`deploying`、`canceling`，并最终进入 `succeeded`、`failed` 或 `canceled`。当前执行仍需接入正式 API、Worker 和 Docker Gateway。
 
 状态转换必须由领域方法执行，transport 层不得直接修改状态字段。异步 worker 后续只负责调用领域用例，不把 Docker/Kubernetes 状态直接暴露为 API 模型。
 

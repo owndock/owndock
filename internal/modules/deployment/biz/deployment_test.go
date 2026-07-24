@@ -18,6 +18,25 @@ func TestDeploymentLifecycle(t *testing.T) {
 	}
 }
 
+func TestDeploymentCancelingLifecycle(t *testing.T) {
+	d, err := New("app-1", "env-1", "main@abc", "dep-1", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusCanceling, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if d.Terminal() {
+		t.Fatal("canceling deployment must not be terminal")
+	}
+	if err := d.Transition(StatusCanceled, time.Unix(2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !d.Terminal() {
+		t.Fatal("canceled deployment must be terminal")
+	}
+}
+
 func TestDeploymentLease(t *testing.T) {
 	now := time.Unix(10, 0)
 	d, err := New(" app-1 ", " env-1 ", "main@abc", "dep-1", now)

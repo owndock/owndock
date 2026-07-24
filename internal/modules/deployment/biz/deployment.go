@@ -31,6 +31,7 @@ const (
 	StatusDeploying Status = "deploying"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
+	StatusCanceling Status = "canceling"
 	StatusCanceled  Status = "canceled"
 )
 
@@ -131,9 +132,10 @@ func New(applicationID, environmentID, revision, id string, now time.Time) (Depl
 }
 
 func (d *Deployment) Transition(next Status, now time.Time) error {
-	valid := (d.Status == StatusQueued && (next == StatusBuilding || next == StatusCanceled)) ||
-		(d.Status == StatusBuilding && (next == StatusDeploying || next == StatusFailed || next == StatusCanceled)) ||
-		(d.Status == StatusDeploying && (next == StatusSucceeded || next == StatusFailed || next == StatusCanceled))
+	valid := (d.Status == StatusQueued && (next == StatusBuilding || next == StatusCanceling)) ||
+		(d.Status == StatusBuilding && (next == StatusDeploying || next == StatusFailed || next == StatusCanceling)) ||
+		(d.Status == StatusDeploying && (next == StatusSucceeded || next == StatusFailed || next == StatusCanceling)) ||
+		(d.Status == StatusCanceling && next == StatusCanceled)
 	if !valid {
 		return ErrInvalidTransition
 	}
