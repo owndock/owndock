@@ -70,25 +70,26 @@ func (r *MongoRepository) ClaimNext(ctx context.Context, claim biz.Claim) (biz.D
 	if err := claim.Validate(); err != nil {
 		return biz.Deployment{}, false, err
 	}
-	filter := bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: []string{string(biz.StatusQueued), string(biz.StatusBuilding), string(biz.StatusDeploying)}}}}, {Key: "$or", Value: bson.A{bson.D{{Key: "lease.expires_at", Value: bson.D{{Key: "$lte", Value: claim.Now}}}}, bson.D{{Key: "lease.expires_at", Value: bson.D{{Key: "$exists", Value: false}}}}}}}
+	lease := bson.D{{Key: "owner", Value: claim.WorkerID}, {Key: "expires_at", Value: claim.ExpiresAt.UTC()}}
+	base := bson.D{{Key: "$or", Value: bson.A{bson.D{{Key: "lease.expires_at", Value: bson.D{{Key: "$lte", Value: claim.Now}}}}, bson.D{{Key: "lease.expires_at", Value: bson.D{{Key: "$exists", Value: false}}}}}}}
 	var doc deploymentDocument
-	err := r.deployments.FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "created_at", Value: 1}})).Decode(&doc)
-	if err == mongo.ErrNoDocuments {
-		return biz.Deployment{}, false, nil
+	queuedUpdate := bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: string(biz.StatusBuilding)}, {Key: "lease", Value: lease}, {Key: "updated_at", Value: claim.Now.UTC()}}}, {Key: "$inc", Value: bson.D{{Key: "version", Value: 1}}}}
+	result := r.deployments.FindOneAndUpdate(ctx, append(base, bson.E{Key: "status", Value: string(biz.StatusQueued)}), queuedUpdate, options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After))
+	err := result.Decode(&doc)
+	if err == nil {
+		return doc.domain(), true, nil
 	}
-	if err != nil {
+	if err != mongo.ErrNoDocuments {
 		return biz.Deployment{}, false, err
 	}
-	item := doc.domain()
-	if err := item.Acquire(claim); err != nil {
+	reclaimUpdate := bson.D{{Key: "$set", Value: bson.D{{Key: "lease", Value: lease}, {Key: "updated_at", Value: claim.Now.UTC()}}}, {Key: "$inc", Value: bson.D{{Key: "version", Value: 1}}}}
+	result = r.deployments.FindOneAndUpdate(ctx, append(base, bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: []string{string(biz.StatusBuilding), string(biz.StatusDeploying)}}}}), reclaimUpdate, options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After))
+	if err := result.Decode(&doc); err == mongo.ErrNoDocuments {
 		return biz.Deployment{}, false, nil
+	} else if err != nil {
+		return biz.Deployment{}, false, err
 	}
-	item.Version++
-	result, err := r.deployments.ReplaceOne(ctx, bson.D{{Key: "_id", Value: item.ID}, {Key: "version", Value: doc.Version}}, deploymentDocumentFromDomain(item))
-	if err != nil || result.ModifiedCount != 1 {
-		return biz.Deployment{}, false, biz.ErrConflict
-	}
-	return item, true, nil
+	return doc.domain(), true, nil
 }
 
 func (r *MongoRepository) SaveClaimed(ctx context.Context, item biz.Deployment, expectedVersion uint64, workerID string, now time.Time) (biz.Deployment, error) {
