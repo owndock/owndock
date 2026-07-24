@@ -14,6 +14,9 @@ func TestRolePermissions(t *testing.T) {
 		{RoleDeveloper, PermissionRuntimeTargetWrite, false},
 		{RoleViewer, PermissionProjectRead, true},
 		{RoleViewer, PermissionApplicationWrite, false},
+		{RoleDeveloper, PermissionDeploymentCreate, true},
+		{RoleDeveloper, PermissionDeploymentCancel, false},
+		{RoleMaintainer, PermissionDeploymentCancel, true},
 	}
 	for _, test := range tests {
 		principal := Principal{

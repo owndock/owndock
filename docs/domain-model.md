@@ -35,6 +35,8 @@ Deployment *--1 Runtime Target
 
 当前采用 Organization 级内置角色 Owner、Maintainer、Developer、Viewer。自定义角色、细粒度 Project 成员绑定和 OIDC 不在当前社区切片内。
 
+Deployment 权限独立于 Runtime Target：Developer 可创建部署但不能取消部署，Maintainer 可取消部署，Viewer 仅可读取部署记录。
+
 ## 工程样例边界
 
 现有三个模块都已采用 `service → biz.UseCase → Repository/Gateway` 依赖方向。Deployment 通过窄查询端口确认 Application 和 Environment 是否存在，不导入其他领域模型，也不跨模块访问数据适配器。

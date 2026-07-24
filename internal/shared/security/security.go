@@ -41,6 +41,9 @@ const (
 	PermissionRuntimeTargetWrite Permission = "runtime_target.write"
 	PermissionEnvironmentRead    Permission = "environment.read"
 	PermissionEnvironmentWrite   Permission = "environment.write"
+	PermissionDeploymentRead     Permission = "deployment.read"
+	PermissionDeploymentCreate   Permission = "deployment.create"
+	PermissionDeploymentCancel   Permission = "deployment.cancel"
 	PermissionAuditRead          Permission = "audit.read"
 	PermissionOrganizationManage Permission = "organization.manage"
 )
@@ -72,11 +75,11 @@ func allowed(role Role, permission Permission) bool {
 		return true
 	}
 	switch permission {
-	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead, PermissionRuntimeTargetRead, PermissionEnvironmentRead:
+	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead, PermissionRuntimeTargetRead, PermissionEnvironmentRead, PermissionDeploymentRead:
 		return role == RoleMaintainer || role == RoleDeveloper || role == RoleViewer
-	case PermissionApplicationWrite, PermissionReleaseCreate:
+	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionDeploymentCreate:
 		return role == RoleMaintainer || role == RoleDeveloper
-	case PermissionRuntimeTargetWrite, PermissionEnvironmentWrite, PermissionAuditRead:
+	case PermissionRuntimeTargetWrite, PermissionEnvironmentWrite, PermissionDeploymentCancel, PermissionAuditRead:
 		return role == RoleMaintainer
 	case PermissionProjectCreate, PermissionOrganizationManage:
 		return false
