@@ -57,6 +57,20 @@ func TestTerminalDeploymentCannotBeCanceled(t *testing.T) {
 	}
 }
 
+func TestDeploymentRetryCreatesNewOperation(t *testing.T) {
+	d, err := NewFormal("dep-1", "rel-1", "app-1", "env-1", "target-1", "key-1", time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	retry, err := d.Retry("dep-2", "key-2", time.Unix(2, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retry.ID == d.ID || retry.Status != StatusQueued || retry.ReleaseID != d.ReleaseID || retry.IdempotencyKey == d.IdempotencyKey {
+		t.Fatalf("retry = %+v", retry)
+	}
+}
+
 func TestDeploymentLease(t *testing.T) {
 	now := time.Unix(10, 0)
 	d, err := New(" app-1 ", " env-1 ", "main@abc", "dep-1", now)

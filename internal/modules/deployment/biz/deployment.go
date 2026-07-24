@@ -159,6 +159,12 @@ func (d *Deployment) Cancel(now time.Time) error {
 	return d.Transition(StatusCanceling, now)
 }
 
+// Retry creates a new queued operation while preserving the immutable product
+// references. The caller must provide a fresh idempotency key.
+func (d Deployment) Retry(newID, idempotencyKey string, now time.Time) (Deployment, error) {
+	return NewFormal(newID, d.ReleaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+}
+
 func (d *Deployment) Acquire(claim Claim) error {
 	if err := claim.Validate(); err != nil {
 		return err
