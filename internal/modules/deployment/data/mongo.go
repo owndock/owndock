@@ -43,6 +43,18 @@ func (r *MongoRepository) List(ctx context.Context, applicationID, environmentID
 	return items, nil
 }
 
+func (r *MongoRepository) GetByIdempotency(ctx context.Context, key string) (biz.Deployment, error) {
+	var doc deploymentDocument
+	err := r.deployments.FindOne(ctx, bson.D{{Key: "idempotency_key", Value: key}}).Decode(&doc)
+	if err == mongo.ErrNoDocuments {
+		return biz.Deployment{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Deployment{}, fmt.Errorf("find deployment idempotency: %w", err)
+	}
+	return doc.domain(), nil
+}
+
 func (r *MongoRepository) Create(ctx context.Context, item biz.Deployment) (biz.Deployment, error) {
 	_, err := r.deployments.InsertOne(ctx, deploymentDocumentFromDomain(item))
 	if mongo.IsDuplicateKeyError(err) {

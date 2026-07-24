@@ -90,7 +90,11 @@ func (u *UseCase) Create(ctx context.Context, applicationID, environmentID, revi
 			return Deployment{}, ErrNotFound
 		}
 	}
-	return u.repo.Create(ctx, item)
+	created, err := u.repo.Create(ctx, item)
+	if err == ErrDuplicateIdempotency {
+		return u.repo.GetByIdempotency(ctx, item.IdempotencyKey)
+	}
+	return created, err
 }
 
 // CreateFormal persists a product deployment with immutable release and target

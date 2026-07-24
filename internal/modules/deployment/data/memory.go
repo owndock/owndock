@@ -31,6 +31,20 @@ func (r *MemoryRepository) List(ctx context.Context, applicationID, environmentI
 	return items, nil
 }
 
+func (r *MemoryRepository) GetByIdempotency(ctx context.Context, key string) (biz.Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return biz.Deployment{}, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, item := range r.items {
+		if item.IdempotencyKey == key {
+			return item, nil
+		}
+	}
+	return biz.Deployment{}, biz.ErrNotFound
+}
+
 func (r *MemoryRepository) Create(ctx context.Context, item biz.Deployment) (biz.Deployment, error) {
 	if err := ctx.Err(); err != nil {
 		return biz.Deployment{}, err

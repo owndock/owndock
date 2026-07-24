@@ -98,6 +98,7 @@ func (c Claim) Validate() error {
 
 type Repository interface {
 	List(context.Context, string, string) ([]Deployment, error)
+	GetByIdempotency(context.Context, string) (Deployment, error)
 	Create(context.Context, Deployment) (Deployment, error)
 	ClaimNext(context.Context, Claim) (Deployment, bool, error)
 	SaveClaimed(context.Context, Deployment, uint64, string, time.Time) (Deployment, error)
