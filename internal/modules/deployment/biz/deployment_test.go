@@ -24,7 +24,7 @@ func TestDeploymentCancelingLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Transition(StatusCanceling, time.Unix(1, 0)); err != nil {
+	if err := d.Cancel(time.Unix(1, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if d.Terminal() {
@@ -35,6 +35,25 @@ func TestDeploymentCancelingLifecycle(t *testing.T) {
 	}
 	if !d.Terminal() {
 		t.Fatal("canceled deployment must be terminal")
+	}
+}
+
+func TestTerminalDeploymentCannotBeCanceled(t *testing.T) {
+	d, err := New("app", "env", "rev", "dep", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusBuilding, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusDeploying, time.Unix(2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusSucceeded, time.Unix(3, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Cancel(time.Unix(4, 0)); err != ErrInvalidTransition {
+		t.Fatalf("cancel terminal error = %v", err)
 	}
 }
 

@@ -148,6 +148,15 @@ func (d *Deployment) Transition(next Status, now time.Time) error {
 	return nil
 }
 
+// Cancel requests cooperative cancellation. Workers must observe canceling and
+// only then move the operation to canceled, preserving the audit trail.
+func (d *Deployment) Cancel(now time.Time) error {
+	if d.Terminal() {
+		return ErrInvalidTransition
+	}
+	return d.Transition(StatusCanceling, now)
+}
+
 func (d *Deployment) Acquire(claim Claim) error {
 	if err := claim.Validate(); err != nil {
 		return err
