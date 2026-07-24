@@ -71,6 +71,20 @@ func TestDeploymentRetryCreatesNewOperation(t *testing.T) {
 	}
 }
 
+func TestDeploymentRollbackTargetsNewRelease(t *testing.T) {
+	d, err := NewFormal("dep-1", "rel-current", "app-1", "env-1", "target-1", "key-1", time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rollback, err := d.Rollback("dep-2", "rel-known-good", "key-2", time.Unix(2, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rollback.ReleaseID != "rel-known-good" || rollback.Status != StatusQueued || rollback.ApplicationID != d.ApplicationID {
+		t.Fatalf("rollback = %+v", rollback)
+	}
+}
+
 func TestDeploymentLease(t *testing.T) {
 	now := time.Unix(10, 0)
 	d, err := New(" app-1 ", " env-1 ", "main@abc", "dep-1", now)

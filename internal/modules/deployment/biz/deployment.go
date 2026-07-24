@@ -165,6 +165,11 @@ func (d Deployment) Retry(newID, idempotencyKey string, now time.Time) (Deployme
 	return NewFormal(newID, d.ReleaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
 }
 
+// Rollback creates a new queued operation targeting a previously known release.
+func (d Deployment) Rollback(newID, releaseID, idempotencyKey string, now time.Time) (Deployment, error) {
+	return NewFormal(newID, releaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+}
+
 func (d *Deployment) Acquire(claim Claim) error {
 	if err := claim.Validate(); err != nil {
 		return err
