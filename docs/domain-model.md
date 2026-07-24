@@ -29,6 +29,7 @@ Deployment *--1 Runtime Target
 - Project 以 Organization 为查询、名称和所有权边界；
 - Application 位于 Project 下；
 - Release 位于 Application 下，只接受固定 SHA-256 digest 的 OCI image reference，创建后不可变；
+- Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，不保存运行时凭据；
 - Runtime Target 位于 Project 下，只接受带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`；
 - Session 只保存 access token 的单向哈希；写操作与对应 Audit Event 在同一 MongoDB 事务中提交。
 
@@ -44,7 +45,7 @@ Deployment Repository 已定义原子 `ClaimNext` 与带期望版本的 `SaveCla
 
 ## 下一步实现顺序
 
-1. 建立 Environment、Template 和正式 Deployment 模型。
+1. 建立 Template 和正式 Deployment 模型；Environment 已完成正式持久化切片。
 2. 明确 Runtime Target 凭据存储与连接探测边界。
 3. 接入真实 Docker 执行，完成幂等、取消、重试和回滚。
 4. 增加用户管理、Project 成员绑定、登录限流和安全运维能力。

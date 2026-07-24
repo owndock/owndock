@@ -71,6 +71,14 @@ type Environment struct {
 	CreatedAt time.Time
 }
 
+type EnvironmentStage string
+
+const (
+	EnvironmentStageDevelopment EnvironmentStage = "development"
+	EnvironmentStageStaging     EnvironmentStage = "staging"
+	EnvironmentStageProduction  EnvironmentStage = "production"
+)
+
 type ProjectRepository interface {
 	ListProjects(context.Context, string) ([]Project, error)
 	CreateProject(context.Context, Project) (Project, error)
@@ -156,7 +164,10 @@ func NewEnvironment(id, projectID, name, stage, createdBy string, now time.Time)
 		return Environment{}, err
 	}
 	stage = strings.TrimSpace(stage)
-	if stage == "" || projectID == "" || createdBy == "" {
+	if stage != string(EnvironmentStageDevelopment) && stage != string(EnvironmentStageStaging) && stage != string(EnvironmentStageProduction) {
+		return Environment{}, ErrInvalidName
+	}
+	if projectID == "" || createdBy == "" {
 		return Environment{}, ErrInvalidName
 	}
 	return Environment{ID: id, ProjectID: projectID, Name: name, Stage: stage, CreatedBy: createdBy, CreatedAt: now.UTC()}, nil

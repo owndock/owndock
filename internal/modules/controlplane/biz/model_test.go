@@ -46,3 +46,18 @@ func TestNewRuntimeTargetRequiresTLSReference(t *testing.T) {
 		}
 	}
 }
+
+func TestNewEnvironmentRequiresKnownStage(t *testing.T) {
+	item, err := NewEnvironment("env", "project", "Production", string(EnvironmentStageProduction), "user", time.Unix(1, 0))
+	if err != nil {
+		t.Fatalf("NewEnvironment() error = %v", err)
+	}
+	if item.Stage != string(EnvironmentStageProduction) {
+		t.Fatalf("stage = %q", item.Stage)
+	}
+	for _, stage := range []string{"", "qa", "prod"} {
+		if _, err := NewEnvironment("env", "project", "Production", stage, "user", time.Now()); err != ErrInvalidName {
+			t.Errorf("stage %q error = %v, want ErrInvalidName", stage, err)
+		}
+	}
+}
