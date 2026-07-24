@@ -15,6 +15,7 @@ var (
 	ErrNotClaimable          = errors.New("deployment is not claimable")
 	ErrNotFound              = errors.New("deployment not found")
 	ErrConflict              = errors.New("deployment version conflict")
+	ErrDuplicateIdempotency  = errors.New("idempotency key already used")
 	ErrLeaseExpired          = errors.New("deployment lease expired")
 	ErrApplicationNotFound   = errors.New("application not found")
 	ErrEnvironmentNotFound   = errors.New("environment not found")

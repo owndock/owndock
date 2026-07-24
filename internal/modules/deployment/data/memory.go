@@ -41,6 +41,9 @@ func (r *MemoryRepository) Create(ctx context.Context, item biz.Deployment) (biz
 		if existing.ID == item.ID {
 			return biz.Deployment{}, biz.ErrConflict
 		}
+		if item.IdempotencyKey != "" && existing.IdempotencyKey == item.IdempotencyKey {
+			return biz.Deployment{}, biz.ErrDuplicateIdempotency
+		}
 	}
 	if item.Version == 0 {
 		item.Version = 1

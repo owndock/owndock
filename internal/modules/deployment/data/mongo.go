@@ -46,7 +46,7 @@ func (r *MongoRepository) List(ctx context.Context, applicationID, environmentID
 func (r *MongoRepository) Create(ctx context.Context, item biz.Deployment) (biz.Deployment, error) {
 	_, err := r.deployments.InsertOne(ctx, deploymentDocumentFromDomain(item))
 	if mongo.IsDuplicateKeyError(err) {
-		return biz.Deployment{}, biz.ErrConflict
+		return biz.Deployment{}, biz.ErrDuplicateIdempotency
 	}
 	if err != nil {
 		return biz.Deployment{}, fmt.Errorf("insert deployment: %w", err)
