@@ -21,7 +21,20 @@ Deployment *--1 Runtime Target
 
 状态转换必须由领域方法执行，transport 层不得直接修改状态字段。异步 worker 后续只负责调用领域用例，不把 Docker/Kubernetes 状态直接暴露为 API 模型。
 
-## 当前边界
+## 当前正式边界
+
+已持久化并进入 `/api/v1` pre-release 契约的模型：
+
+- 一个安装实例首次 bootstrap 一个 Organization 和 Owner；
+- Project 以 Organization 为查询、名称和所有权边界；
+- Application 位于 Project 下；
+- Release 位于 Application 下，只接受固定 SHA-256 digest 的 OCI image reference，创建后不可变；
+- Runtime Target 位于 Project 下，只接受带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`；
+- Session 只保存 access token 的单向哈希；写操作与对应 Audit Event 在同一 MongoDB 事务中提交。
+
+当前采用 Organization 级内置角色 Owner、Maintainer、Developer、Viewer。自定义角色、细粒度 Project 成员绑定和 OIDC 不在当前社区切片内。
+
+## 工程样例边界
 
 现有三个模块都已采用 `service → biz.UseCase → Repository/Gateway` 依赖方向。Deployment 通过窄查询端口确认 Application 和 Environment 是否存在，不导入其他领域模型，也不跨模块访问数据适配器。
 
@@ -31,8 +44,10 @@ Deployment Repository 已定义原子 `ClaimNext` 与带期望版本的 `SaveCla
 
 ## 下一步实现顺序
 
-1. 定义首个正式 `/api/v1` 契约和 Project 所有权。
-2. 建立 Organization、Project、Release、Runtime Target 与 Template 模块边界。
-3. 实现身份、授权、基础审计、MongoDB Repository 和 migration。
-4. 接入真实 Docker 执行，完成幂等、取消、重试和回滚。
-5. 通过端到端用例后再将工程路由替换为正式产品契约。
+1. 建立 Environment、Template 和正式 Deployment 模型。
+2. 明确 Runtime Target 凭据存储与连接探测边界。
+3. 接入真实 Docker 执行，完成幂等、取消、重试和回滚。
+4. 增加用户管理、Project 成员绑定、登录限流和安全运维能力。
+5. 通过首个端到端用例后移除或重塑工程样例。
+
+当前和目标链路的时序见 [flows.md](flows.md)。

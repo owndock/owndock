@@ -2,13 +2,19 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release engineering contract. Application, Environment, and Deployment operations are disabled by default and are not accepted product APIs.
-  x-owndock-stability: engineering-evidence
+  description: Pre-release contract. Identity, Project, project-scoped Application, Release, Runtime Target, and Audit operations form the first product slice when product mode is enabled. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  x-owndock-stability: pre-release
 servers:
   - url: /
 tags:
   - name: Health
   - name: Meta
+  - name: Identity
+  - name: Projects
+  - name: Product Applications
+  - name: Releases
+  - name: Runtime Targets
+  - name: Audit
   - name: Applications
   - name: Environments
   - name: Deployments
@@ -45,6 +51,339 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/Version"
+  /api/v1/auth/bootstrap:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      tags: [Identity]
+      operationId: bootstrapIdentity
+      summary: Initialize the first organization and owner
+      parameters:
+        - name: X-OwnDock-Bootstrap-Token
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/BootstrapRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/Credentials"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/login:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      tags: [Identity]
+      operationId: login
+      summary: Create a local bearer session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/Credentials"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/me:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Identity]
+      operationId: getCurrentIdentity
+      summary: Get the current authenticated identity
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/CurrentIdentity"
+        "401":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/logout:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      tags: [Identity]
+      operationId: logout
+      summary: Revoke the current bearer session
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Session revoked.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Projects]
+      operationId: listProjects
+      summary: List projects in the current organization
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Projects]
+      operationId: createProject
+      summary: Create a project
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNamedResourceRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProjectCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Product Applications]
+      operationId: listProjectApplications
+      summary: List applications in a project
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ProductApplicationList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Product Applications]
+      operationId: createProjectApplication
+      summary: Create an application in a project
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNamedResourceRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProductApplicationCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/releases:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+    get:
+      tags: [Releases]
+      operationId: listReleases
+      summary: List immutable releases for an application
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ReleaseList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Releases]
+      operationId: createRelease
+      summary: Create an immutable digest-pinned release
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateReleaseRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ReleaseCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/runtime-targets:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Runtime Targets]
+      operationId: listRuntimeTargets
+      summary: List Docker runtime targets in a project
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/RuntimeTargetList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Runtime Targets]
+      operationId: createRuntimeTarget
+      summary: Register a TLS-protected Docker runtime target
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRuntimeTargetRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/RuntimeTargetCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/audit-events:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Audit]
+      operationId: listAuditEvents
+      summary: List audit events for the current organization
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: project_id
+          in: query
+          required: false
+          schema:
+            type: string
+            minLength: 1
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+      responses:
+        "200":
+          $ref: "#/components/responses/AuditEventList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/applications:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -160,6 +499,11 @@ paths:
         "500":
           $ref: "#/components/responses/APIError"
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
   parameters:
     RequestID:
       name: X-Request-ID
@@ -171,6 +515,20 @@ components:
         minLength: 1
         maxLength: 128
         pattern: "^[A-Za-z0-9._-]+$"
+    ProjectID:
+      name: project_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    ApplicationID:
+      name: application_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
   headers:
     RequestID:
       description: Request correlation identifier accepted from or generated by OwnDock.
@@ -208,6 +566,140 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Version"
+    Credentials:
+      description: Bearer credentials issued.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Credentials"
+    CurrentIdentity:
+      description: Current authenticated identity.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/IdentityUser"
+    ProjectList:
+      description: Project collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Project"
+    ProjectCreated:
+      description: Project created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Project"
+    ProductApplicationList:
+      description: Project application collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProductApplication"
+    ProductApplicationCreated:
+      description: Project application created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProductApplication"
+    ReleaseList:
+      description: Release collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Release"
+    ReleaseCreated:
+      description: Release created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Release"
+    RuntimeTargetList:
+      description: Runtime target collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RuntimeTarget"
+    RuntimeTargetCreated:
+      description: Runtime target created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RuntimeTarget"
+    AuditEventList:
+      description: Audit event collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditEvent"
     ApplicationList:
       description: Application collection.
       headers:
@@ -316,6 +808,248 @@ components:
           type: string
         go_version:
           type: string
+    BootstrapRequest:
+      type: object
+      additionalProperties: false
+      required: [organization_name, email, password]
+      properties:
+        organization_name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 1
+          maxLength: 128
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [access_token, token_type, expires_at, user]
+      properties:
+        access_token:
+          type: string
+          minLength: 32
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          type: string
+          format: date-time
+        user:
+          $ref: "#/components/schemas/IdentityUser"
+        organization:
+          $ref: "#/components/schemas/Organization"
+    IdentityUser:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, email, role]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [owner, maintainer, developer, viewer]
+    Organization:
+      type: object
+      additionalProperties: false
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+    Project:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, name, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    ProductApplication:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    Release:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, image_digest, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        image_digest:
+          type: string
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    RuntimeTarget:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, endpoint, tls_server_name, credential_ref, status, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        endpoint:
+          type: string
+          pattern: "^tcp://.+:[0-9]+$"
+        tls_server_name:
+          type: string
+          minLength: 1
+        credential_ref:
+          type: string
+          minLength: 1
+        status:
+          type: string
+          enum: [pending]
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    AuditEvent:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, actor_id, action, resource_type, resource_id, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        actor_id:
+          type: string
+          minLength: 1
+        action:
+          type: string
+          minLength: 1
+        resource_type:
+          type: string
+          minLength: 1
+        resource_id:
+          type: string
+          minLength: 1
+        request_id:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    CreateNamedResourceRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+    CreateReleaseRequest:
+      type: object
+      additionalProperties: false
+      required: [image]
+      properties:
+        image:
+          type: string
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+    CreateRuntimeTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [name, endpoint, tls_server_name, credential_ref]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        endpoint:
+          type: string
+          pattern: "^tcp://.+:[0-9]+$"
+        tls_server_name:
+          type: string
+          minLength: 1
+        credential_ref:
+          type: string
+          minLength: 1
     Application:
       type: object
       additionalProperties: false

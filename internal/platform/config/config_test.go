@@ -86,10 +86,52 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if cfg.Database.Mongo.Enabled {
 		t.Fatal("MongoDB must be disabled by default")
 	}
+	if cfg.Product.Enabled {
+		t.Fatal("product API must be disabled by default")
+	}
+	if cfg.Security.BootstrapTokenEnv != defaultBootstrapTokenEnv {
+		t.Fatalf("bootstrap token env = %q, want %q", cfg.Security.BootstrapTokenEnv, defaultBootstrapTokenEnv)
+	}
+	sessionTTL, err := cfg.Security.SessionTTLDuration()
+	if err != nil || sessionTTL != defaultSessionTTL {
+		t.Fatalf("session TTL = %v, %v; want %v", sessionTTL, err, defaultSessionTTL)
+	}
 	if cfg.Database.Mongo.URIEnv != defaultMongoURIEnv ||
 		cfg.Database.Mongo.Database != defaultMongoDatabase ||
 		cfg.Database.Mongo.MaxPoolSize != defaultMongoMaxPoolSize {
 		t.Fatalf("MongoDB defaults = %+v", cfg.Database.Mongo)
+	}
+}
+
+func TestProductRequiresMongoDBAndSecurity(t *testing.T) {
+	cfg := Config{
+		Server:   Server{HTTP: HTTP{Address: "127.0.0.1:8000"}},
+		Product:  Product{Enabled: true},
+		Security: Security{BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN", SessionTTL: "1h"},
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil without MongoDB")
+	}
+	cfg.Database.Mongo = Mongo{
+		Enabled: true, URIEnv: "TEST_MONGODB_URI", Database: "test", MaxPoolSize: 10,
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	cfg.Security.BootstrapTokenEnv = ""
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil without bootstrap token env")
+	}
+}
+
+func TestBootstrapTokenReadsOnlyNamedEnvironmentVariable(t *testing.T) {
+	t.Setenv("TEST_BOOTSTRAP_TOKEN", " bootstrap-secret ")
+	token, err := (Security{BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN"}).BootstrapToken()
+	if err != nil {
+		t.Fatalf("BootstrapToken() error = %v", err)
+	}
+	if token != "bootstrap-secret" {
+		t.Fatalf("BootstrapToken() = %q", token)
 	}
 }
 

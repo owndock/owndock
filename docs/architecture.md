@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization/Project 下的 Template、Application、Release、Environment、Runtime Target 和 Deployment，详见 [product.md](product.md)。当前同名工程模块仍不是正式实现，只有满足所有权、权限、审计、持久化和产品契约后才能替换默认关闭的样例路由。
+产品边界已经固定为 Organization/Project 下的 Template、Application、Release、Environment、Runtime Target 和 Deployment，详见 [product.md](product.md)。Organization、身份会话、Project、Project 范围 Application、不可变 Release、Runtime Target 元数据和基础审计已经形成首个正式持久化切片；Environment、Template、Deployment 和 Docker 执行仍待实现。默认关闭的顶层工程样例不属于正式产品实现。
 
 ## 模块边界
 
@@ -51,7 +51,7 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 ## API 契约
 
-`api/openapi.yaml` 是发布前 HTTP 行为的机器可读工程契约，覆盖运维接口和当前工程样例；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。产品概念已经接受，但当前样例 operation 尚未满足正式所有权、授权、审计和持久化要求，不能因此成为稳定产品契约。Handler 仍显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
+`api/openapi.yaml` 是发布前 HTTP 行为的机器可读契约，覆盖运维接口、首个正式产品切片和当前工程样例；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。正式切片 operation 已具备 Organization 所有权、内置角色授权、审计和 MongoDB 持久化，但在首个端到端部署用例完成前仍标记为 pre-release。Handler 显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
 
 契约文件必须通过 oasdiff 严格校验，真实 Handler 的请求与响应必须通过 kin-openapi 契约测试。工程样例在产品接受前允许显式删除或重塑；正式 operation 则执行 breaking-change 门禁，不兼容变更进入新的 API 主版本并记录迁移窗口。
 
@@ -59,7 +59,9 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 进程级 MongoDB Client 由 `internal/platform/mongo` 创建和关闭，业务模块只能通过自己在 `biz` 中定义的 Repository 接口使用持久化。MongoDB 默认关闭；启用时连接串来自指定环境变量，启动 Ping 失败会阻止服务启动，运行期 Ping 失败会使 `/readyz` 返回 503。
 
-开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 必须按已接受的产品所有权与不可变 Release/Deployment 语义设计，不能从当前内存样例直接生成。
+开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从内存样例直接生成。启动时使用带租约锁的版本化 migration；资源写入和对应审计事件使用同一事务提交。
+
+关键运行链路见 [flows.md](flows.md)。
 
 ## 版本策略
 

@@ -1,6 +1,6 @@
 # API contracts
 
-此目录只存放 API 契约源文件和生成配置，不放业务实现。[`openapi.yaml`](./openapi.yaml) 是发布前工程契约，使用 OpenAPI 3.0.3；其中 Application、Environment 和 Deployment operation 仅用于验证架构与契约工具链，不是已接受的产品 API。
+此目录只存放 API 契约源文件和生成配置，不放业务实现。[`openapi.yaml`](./openapi.yaml) 是发布前契约，使用 OpenAPI 3.0.3。身份、Project、Project 范围 Application、Release、Runtime Target 和 Audit operation 是 pre-release 产品切片；顶层 Application、Environment 和 Deployment operation 仅用于验证架构与契约工具链，不是正式产品 API。
 
 API 开发遵循以下规则：
 
@@ -32,6 +32,23 @@ JSON 写接口的工程契约要求 `application/json`；实现允许省略 Cont
 
 当前仍使用手写 HTTP DTO，不从 OpenAPI 生成服务代码。只有出现多语言 SDK、正式客户端或 gRPC 契约需求时才评估生成工具，避免生成层反向控制领域模型。
 
+## 当前正式产品切片
+
+正式路由由 `product.enabled` 控制，并要求 MongoDB 同时启用。除 bootstrap 和 login 外均使用 Bearer session：
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/v1/auth/bootstrap` | 创建首个 Organization、Owner 和 Session |
+| `POST` | `/api/v1/auth/login` | 创建本地 Session |
+| `GET` / `POST` | `/api/v1/auth/me`、`/api/v1/auth/logout` | 查询身份或注销当前 Session |
+| `GET` / `POST` | `/api/v1/projects` | 查询或创建 Organization 下的 Project |
+| `GET` / `POST` | `/api/v1/projects/{project_id}/applications` | 查询或创建 Project Application |
+| `GET` / `POST` | `/api/v1/projects/{project_id}/applications/{application_id}/releases` | 查询或创建固定 OCI digest 的不可变 Release |
+| `GET` / `POST` | `/api/v1/projects/{project_id}/runtime-targets` | 查询或创建 Runtime Target 元数据 |
+| `GET` | `/api/v1/audit-events` | 查询当前 Organization 或指定 Project 的审计事件 |
+
+该切片已经具备所有权校验、内置 RBAC、MongoDB Repository、事务审计和契约测试，但仍是 pre-release。它不包含 Environment、Template、正式 Deployment、凭据正文存储或 Docker 执行。
+
 ## 当前工程样例
 
 样例路由由 `development.enable_engineering_samples` 控制并默认关闭。它们没有认证授权，只能在隔离的本地开发环境启用，不得作为生产接口或兼容承诺。
@@ -43,7 +60,7 @@ JSON 写接口的工程契约要求 `application/json`；实现允许省略 Cont
 | `GET` | `/api/v1/applications` | 返回当前实例中的应用列表 |
 | `POST` | `/api/v1/applications` | 创建应用，请求体为 `{"name":"demo"}` |
 
-创建成功返回 `201` 和应用资源，初始状态为 `pending`；名称为空返回 `422`、重复名称返回 `409 name_conflict`、请求体不是合法 JSON 返回 `400`。当前实现使用内存仓储，仅用于验证 API、领域和数据适配器的边界。正式产品契约将按 Organization/Project 所有权、Release、逻辑 Environment、Runtime Target、身份权限和审计要求替换这些工程接口。
+创建成功返回 `201` 和应用资源，初始状态为 `pending`；名称为空返回 `422`、重复名称返回 `409 name_conflict`、请求体不是合法 JSON 返回 `400`。当前实现使用内存仓储，仅用于验证 API、领域和数据适配器的边界。Project 范围正式 Application 已使用独立路由和持久化模型；样例接口不会被当作其兼容入口。
 
 HTTP Handler 位于各模块的 `service` 子包，只负责协议解析和错误映射。创建、查询、引用检查等流程由 `biz.UseCase` 执行，HTTP DTO 不直接访问 Repository。
 

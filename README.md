@@ -17,12 +17,13 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - 主服务进程：`owndock`
 - 可观测性：结构化 Access Log、Prometheus 指标；OpenTelemetry Trace 默认关闭，可通过 OTLP/HTTP 导出
 - MongoDB：官方 Go Driver v2.8.0；服务端测试基线 8.3.7，默认关闭
-- 默认接口：健康和版本接口
+- 正式产品切片：本地 bootstrap/login/session、内置 RBAC、Project、Project Application、不可变 Release、Runtime Target 元数据、基础审计和 MongoDB migration
+- 默认接口：健康和版本接口；产品切片需要显式启用 MongoDB 与 `product.enabled`
 - 工程样例：Application、Environment、Deployment JSON API，默认关闭；概念已进入产品模型，但当前实现不属于正式产品契约
 
-当前版本提供项目运行基线，正式产品模型见 [docs/product.md](docs/product.md)，业务能力会按首个端到端用例逐步实现。
+当前版本已经提供首个正式持久化切片，但尚不能执行真实部署。Environment、Template、正式 Deployment、凭据存储与 Docker 执行仍需按首个端到端用例补齐。
 
-当前 Application、Environment 和 Deployment 使用进程内存仓储，服务重启后数据会丢失，只用于验证架构、契约和并发机制。正式实现还需要 Organization/Project 所有权、Release、Template、逻辑 Environment 与 Runtime Target 分离、身份权限、审计、MongoDB Repository 和真实 Docker 执行。Deployment Worker 已具备原子领取、租约和版本冲突样例，但尚未形成正式产品状态机。
+顶层 Application、Environment 和 Deployment 使用进程内存仓储，服务重启后数据会丢失，只用于验证架构、契约和并发机制。它们与 Project 范围的正式 API 隔离。Deployment Worker 已具备原子领取、租约和版本冲突样例，但尚未形成正式产品状态机。
 
 ## 本地运行
 
@@ -45,6 +46,16 @@ curl http://127.0.0.1:8000/api/v1/meta/version
 
 MongoDB 启用时只从 `database.mongo.uri_env` 指定的环境变量读取连接串，默认变量名为 `OWNDOCK_MONGODB_URI`。启动会连接并 Ping，运行期 `/readyz` 会检查主节点可用性，停止时关闭连接池。开发与 CI 使用固定的 MongoDB 8.3.7 单节点 Replica Set，详见 [docs/mongodb.md](docs/mongodb.md)。
 
+本地启用正式产品切片时，将 `database.mongo.enabled` 和 `product.enabled` 设为 `true`，并通过环境变量提供 MongoDB URI 与一次性 bootstrap token：
+
+```bash
+export OWNDOCK_MONGODB_URI='mongodb://...'
+export OWNDOCK_BOOTSTRAP_TOKEN='use-a-long-random-bootstrap-token'
+make run
+```
+
+随后调用 `POST /api/v1/auth/bootstrap` 创建首个 Organization 和 Owner。Bootstrap、登录、资源写入和未来部署流程见 [docs/flows.md](docs/flows.md)，完整请求契约见 [api/openapi.yaml](api/openapi.yaml)。
+
 如需启用链路追踪，将 `observability.tracing.enabled` 设为 `true`，并将 `endpoint` 配置为 OTLP/HTTP Collector 的 `host:port`（通常为 `localhost:4318`）。`sample_ratio` 取值为 `0` 到 `1`，默认配置为 `1`；设为 `0` 时不采样新的根 Span，无需追踪时应直接关闭 tracing。生产环境建议由应用发送至 OpenTelemetry Collector，再由 Collector 转发到后端。
 
 ## 目录约定
@@ -60,7 +71,7 @@ internal/platform/   配置、数据库、可观测性等平台能力
 internal/server/     HTTP/gRPC transport 装配
 ```
 
-产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，发布前工程契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、OpenAPI 校验、静态检查和构建验证；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，核心时序见 [docs/flows.md](docs/flows.md)，发布前契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、OpenAPI 校验、静态检查和构建验证；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
 
 ## License
 

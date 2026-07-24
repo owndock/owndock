@@ -30,10 +30,15 @@ database:
 ## 生命周期
 
 - 启动时创建连接池并 Ping Primary；失败时服务不启动；
+- 启动时获取带租约的全局锁并按版本执行 migration；已记录的同名版本会跳过，版本名称漂移会拒绝启动；
 - 每次操作受 Client operation timeout 和调用方 context 共同约束；
 - `/readyz` 会 Ping Primary，失败时返回通用 `not_ready`，不暴露数据库错误；
 - Kratos 停止接收请求后关闭连接池；
 - 业务模块不能直接创建 Client，也不能从 `internal/platform/mongo` 推导业务 schema。
+
+正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`sessions`、`projects`、`product_applications`、`releases`、`runtime_targets`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。
+
+启动和事务写入时序见 [flows.md](flows.md)。
 
 ## 验证
 
@@ -43,7 +48,7 @@ database:
 make check
 ```
 
-MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping 和 Replica Set 身份：
+MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、正式资源持久化、审计原子回滚和注销失效：
 
 ```bash
 make test-integration

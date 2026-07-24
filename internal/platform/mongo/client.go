@@ -80,6 +80,27 @@ func (c *Client) Database() *drivermongo.Database {
 	return c.database
 }
 
+func (c *Client) WithinTransaction(ctx context.Context, fn func(context.Context) error) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("MongoDB client is not initialized")
+	}
+	session, err := c.client.StartSession()
+	if err != nil {
+		return fmt.Errorf("start MongoDB session: %w", err)
+	}
+	defer session.EndSession(ctx)
+	_, err = session.WithTransaction(ctx, func(transactionContext context.Context) (any, error) {
+		if err := fn(transactionContext); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	})
+	if err != nil {
+		return fmt.Errorf("run MongoDB transaction: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) Ping(ctx context.Context) error {
 	if c == nil || c.client == nil {
 		return fmt.Errorf("MongoDB client is not initialized")

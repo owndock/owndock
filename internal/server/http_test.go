@@ -22,6 +22,7 @@ import (
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
+	"github.com/owndock/owndock/internal/platform/httpx"
 	"github.com/owndock/owndock/internal/platform/observability"
 )
 
@@ -68,6 +69,48 @@ func TestEngineeringSampleRoutesAreDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestProductAPIRoutesAuthenticationBoundary(t *testing.T) {
+	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	authenticate := func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Authorization") != "Bearer valid" {
+				httpx.ErrorRequest(w, r, http.StatusUnauthorized, "unauthenticated")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+	api, err := NewProductAPI(identity, controlPlane, authenticate)
+	if err != nil {
+		t.Fatalf("NewProductAPI() error = %v", err)
+	}
+
+	public := httptest.NewRecorder()
+	api.ServeHTTP(public, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil))
+	if public.Code != http.StatusNoContent {
+		t.Fatalf("public auth status = %d", public.Code)
+	}
+
+	denied := httptest.NewRecorder()
+	api.ServeHTTP(denied, httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil))
+	if denied.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated project status = %d", denied.Code)
+	}
+
+	allowedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	allowedRequest.Header.Set("Authorization", "Bearer valid")
+	allowed := httptest.NewRecorder()
+	api.ServeHTTP(allowed, allowedRequest)
+	if allowed.Code != http.StatusOK {
+		t.Fatalf("authenticated project status = %d", allowed.Code)
+	}
+}
+
 func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handler {
 	t.Helper()
 	checker := health.NewChecker()
@@ -99,6 +142,7 @@ func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handle
 		checker,
 		meta.NewService(meta.BuildInfo{Service: "owndock", Version: "test"}),
 		samples,
+		nil,
 		observability.NewMetrics(),
 		tracing,
 		log.NewStdLogger(httptest.NewRecorder()),

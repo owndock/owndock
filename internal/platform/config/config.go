@@ -13,15 +13,17 @@ import (
 )
 
 const (
-	defaultHTTPTimeout      = 30 * time.Second
-	defaultShutdownTimeout  = 15 * time.Second
-	defaultTraceSampleRatio = 1.0
-	defaultMongoURIEnv      = "OWNDOCK_MONGODB_URI"
-	defaultMongoDatabase    = "owndock"
-	defaultMongoConnect     = 10 * time.Second
-	defaultMongoOperation   = 5 * time.Second
-	defaultMongoMaxIdle     = 5 * time.Minute
-	defaultMongoMaxPoolSize = 100
+	defaultHTTPTimeout       = 30 * time.Second
+	defaultShutdownTimeout   = 15 * time.Second
+	defaultTraceSampleRatio  = 1.0
+	defaultMongoURIEnv       = "OWNDOCK_MONGODB_URI"
+	defaultMongoDatabase     = "owndock"
+	defaultMongoConnect      = 10 * time.Second
+	defaultMongoOperation    = 5 * time.Second
+	defaultMongoMaxIdle      = 5 * time.Minute
+	defaultMongoMaxPoolSize  = 100
+	defaultBootstrapTokenEnv = "OWNDOCK_BOOTSTRAP_TOKEN"
+	defaultSessionTTL        = 24 * time.Hour
 )
 
 // Config is the process configuration root. Keep transport and infrastructure
@@ -31,6 +33,8 @@ type Config struct {
 	Observability Observability `json:"observability"`
 	Development   Development   `json:"development"`
 	Database      Database      `json:"database"`
+	Product       Product       `json:"product"`
+	Security      Security      `json:"security"`
 }
 
 type Server struct {
@@ -58,6 +62,15 @@ type Tracing struct {
 // section must remain disabled in the checked-in default configuration.
 type Development struct {
 	EnableEngineeringSamples bool `json:"enable_engineering_samples"`
+}
+
+type Product struct {
+	Enabled bool `json:"enabled"`
+}
+
+type Security struct {
+	BootstrapTokenEnv string `json:"bootstrap_token_env"`
+	SessionTTL        string `json:"session_ttl"`
 }
 
 type Database struct {
@@ -97,6 +110,10 @@ func Load(path string) (Config, error) {
 				MaxPoolSize:      defaultMongoMaxPoolSize,
 			},
 		},
+		Security: Security{
+			BootstrapTokenEnv: defaultBootstrapTokenEnv,
+			SessionTTL:        defaultSessionTTL.String(),
+		},
 	}
 	if err := c.Scan(&cfg); err != nil {
 		return Config{}, fmt.Errorf("scan config: %w", err)
@@ -122,6 +139,12 @@ func (c Config) Validate() error {
 	}
 	if err := c.Database.Mongo.Validate(); err != nil {
 		return fmt.Errorf("database.mongo: %w", err)
+	}
+	if err := c.Security.Validate(c.Product.Enabled); err != nil {
+		return fmt.Errorf("security: %w", err)
+	}
+	if c.Product.Enabled && !c.Database.Mongo.Enabled {
+		return fmt.Errorf("product.enabled requires database.mongo.enabled")
 	}
 	return nil
 }
@@ -176,6 +199,35 @@ func (m Mongo) OperationTimeoutDuration() (time.Duration, error) {
 
 func (m Mongo) MaxIdleTimeDuration() (time.Duration, error) {
 	return parseDuration(m.MaxIdleTime, defaultMongoMaxIdle)
+}
+
+func (s Security) Validate(productEnabled bool) error {
+	if !productEnabled {
+		return nil
+	}
+	if strings.TrimSpace(s.BootstrapTokenEnv) == "" {
+		return fmt.Errorf("bootstrap_token_env is required when product is enabled")
+	}
+	if _, err := s.SessionTTLDuration(); err != nil {
+		return fmt.Errorf("session_ttl: %w", err)
+	}
+	return nil
+}
+
+func (s Security) SessionTTLDuration() (time.Duration, error) {
+	return parseDuration(s.SessionTTL, defaultSessionTTL)
+}
+
+func (s Security) BootstrapToken() (string, error) {
+	name := strings.TrimSpace(s.BootstrapTokenEnv)
+	if name == "" {
+		return "", fmt.Errorf("bootstrap_token_env is required")
+	}
+	value, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("environment variable %s is required for bootstrap", name)
+	}
+	return strings.TrimSpace(value), nil
 }
 
 func (t Tracing) Validate() error {

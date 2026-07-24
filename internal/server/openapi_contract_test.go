@@ -21,7 +21,7 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create OpenAPI router: %v", err)
 	}
-	handler := newTestHTTPHandler(t, true)
+	handler := newProductContractHTTPHandler(t)
 	coveredOperations := make(map[string]bool)
 
 	tests := []struct {
@@ -29,6 +29,7 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		method     string
 		target     string
 		body       string
+		headers    map[string]string
 		wantStatus int
 	}{
 		{name: "liveness", method: http.MethodGet, target: "/livez", wantStatus: http.StatusOK},
@@ -42,11 +43,71 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		{name: "create environment", method: http.MethodPost, target: "/api/v1/environments", body: `{"name":"local","provider":"docker"}`, wantStatus: http.StatusCreated},
 		{name: "create deployment", method: http.MethodPost, target: "/api/v1/deployments", body: `{"application_id":"test-id","environment_id":"test-id","revision":"main@abc"}`, wantStatus: http.StatusCreated},
 		{name: "filtered deployment list", method: http.MethodGet, target: "/api/v1/deployments?application_id=test-id&environment_id=test-id", wantStatus: http.StatusOK},
+		{
+			name: "bootstrap identity", method: http.MethodPost, target: "/api/v1/auth/bootstrap",
+			body:       `{"organization_name":"Example Company","email":"owner@example.com","password":"long-enough-password"}`,
+			headers:    map[string]string{"X-OwnDock-Bootstrap-Token": "bootstrap-secret"},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name: "login", method: http.MethodPost, target: "/api/v1/auth/login",
+			body:       `{"email":"owner@example.com","password":"long-enough-password"}`,
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "current identity", method: http.MethodGet, target: "/api/v1/auth/me",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create project", method: http.MethodPost, target: "/api/v1/projects",
+			body: `{"name":"Delivery"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list projects", method: http.MethodGet, target: "/api/v1/projects",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create project application", method: http.MethodPost, target: "/api/v1/projects/test-id/applications",
+			body: `{"name":"API"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list project applications", method: http.MethodGet, target: "/api/v1/projects/test-id/applications",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create release", method: http.MethodPost, target: "/api/v1/projects/test-id/applications/test-id/releases",
+			body:    `{"image":"registry.example.com/team/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list releases", method: http.MethodGet, target: "/api/v1/projects/test-id/applications/test-id/releases",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create runtime target", method: http.MethodPost, target: "/api/v1/projects/test-id/runtime-targets",
+			body:    `{"name":"Production","endpoint":"tcp://docker.example.com:2376","tls_server_name":"docker.example.com","credential_ref":"secret://docker"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list runtime targets", method: http.MethodGet, target: "/api/v1/projects/test-id/runtime-targets",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list audit events", method: http.MethodGet, target: "/api/v1/audit-events?project_id=test-id&limit=100",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "logout", method: http.MethodPost, target: "/api/v1/auth/logout",
+			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
+		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			operationID := assertOpenAPIExchange(t, context.Background(), router, handler, test.method, test.target, []byte(test.body), test.wantStatus)
+			operationID := assertOpenAPIExchange(
+				t, context.Background(), router, handler,
+				test.method, test.target, []byte(test.body), test.headers, test.wantStatus,
+			)
 			coveredOperations[operationID] = true
 		})
 	}
@@ -84,6 +145,7 @@ func assertOpenAPIExchange(
 	method string,
 	target string,
 	body []byte,
+	headers map[string]string,
 	wantStatus int,
 ) string {
 	t.Helper()
@@ -91,6 +153,9 @@ func assertOpenAPIExchange(
 	contractRequest.Header.Set("X-Request-ID", "contract-request")
 	if len(body) > 0 {
 		contractRequest.Header.Set("Content-Type", "application/json")
+	}
+	for key, value := range headers {
+		contractRequest.Header.Set(key, value)
 	}
 	route, pathParams, err := router.FindRoute(contractRequest)
 	if err != nil {
@@ -100,6 +165,9 @@ func assertOpenAPIExchange(
 		Request:    contractRequest,
 		PathParams: pathParams,
 		Route:      route,
+		Options: &openapi3filter.Options{
+			AuthenticationFunc: func(context.Context, *openapi3filter.AuthenticationInput) error { return nil },
+		},
 	}
 	if err := openapi3filter.ValidateRequest(ctx, requestInput); err != nil {
 		t.Fatalf("request does not match OpenAPI: %v", err)
@@ -123,4 +191,8 @@ func assertOpenAPIExchange(
 		t.Fatalf("response does not match OpenAPI: %v; body = %s", err, recorder.Body.String())
 	}
 	return route.Operation.OperationID
+}
+
+func bearerHeaders() map[string]string {
+	return map[string]string{"Authorization": "Bearer " + contractAccessToken}
 }

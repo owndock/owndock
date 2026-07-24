@@ -77,17 +77,26 @@ func validRequestID(value string) bool {
 
 func errorMessage(code string) string {
 	messages := map[string]string{
-		"application_not_found":  "application was not found",
-		"environment_not_found":  "environment was not found",
-		"internal_error":         "an internal error occurred",
-		"invalid_deployment":     "deployment input is invalid",
-		"invalid_environment":    "environment input is invalid",
-		"invalid_json":           "request body must be valid JSON",
-		"invalid_name":           "application name is required",
-		"method_not_allowed":     "method is not allowed",
-		"name_conflict":          "resource name already exists",
-		"not_found":              "resource was not found",
-		"unsupported_media_type": "content type must be application/json",
+		"already_bootstrapped":    "identity has already been initialized",
+		"application_not_found":   "application was not found",
+		"bootstrap_token_invalid": "bootstrap token is invalid",
+		"environment_not_found":   "environment was not found",
+		"forbidden":               "permission is denied",
+		"internal_error":          "an internal error occurred",
+		"invalid_deployment":      "deployment input is invalid",
+		"invalid_environment":     "environment input is invalid",
+		"invalid_json":            "request body must be valid JSON",
+		"invalid_identity":        "identity input is invalid",
+		"invalid_image":           "image must be pinned by a sha256 digest",
+		"invalid_limit":           "limit must be between 1 and 100",
+		"invalid_name":            "application name is required",
+		"invalid_runtime_target":  "runtime target input is invalid",
+		"method_not_allowed":      "method is not allowed",
+		"name_conflict":           "resource name already exists",
+		"not_found":               "resource was not found",
+		"release_conflict":        "an equivalent release already exists",
+		"unauthenticated":         "authentication is required",
+		"unsupported_media_type":  "content type must be application/json",
 	}
 	if message, ok := messages[code]; ok {
 		return message

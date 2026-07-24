@@ -3,6 +3,7 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/go-kratos/kratos/v2/log"
 	kratoshttp "github.com/go-kratos/kratos/v2/transport/http"
@@ -28,11 +29,37 @@ type EngineeringSamples struct {
 	Deployment  *deploymentservice.HTTP
 }
 
+type ProductAPI struct {
+	identity  http.Handler
+	protected http.Handler
+}
+
+func NewProductAPI(identity http.Handler, controlPlane http.Handler, authenticate func(http.Handler) http.Handler) (*ProductAPI, error) {
+	if identity == nil || controlPlane == nil || authenticate == nil {
+		return nil, fmt.Errorf("product API requires identity, control plane, and authentication middleware")
+	}
+	return &ProductAPI{identity: identity, protected: authenticate(controlPlane)}, nil
+}
+
+func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case strings.HasPrefix(r.URL.Path, apiV1+"/auth/"):
+		p.identity.ServeHTTP(w, r)
+	case r.URL.Path == apiV1+"/projects",
+		r.URL.Path == apiV1+"/audit-events",
+		strings.HasPrefix(r.URL.Path, apiV1+"/projects/"):
+		p.protected.ServeHTTP(w, r)
+	default:
+		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+	}
+}
+
 func NewHTTPServer(
 	cfg platformconfig.HTTP,
 	healthChecker *health.Checker,
 	metaService *meta.Service,
 	samples *EngineeringSamples,
+	productAPI *ProductAPI,
 	metrics *observability.Metrics,
 	tracing *observability.Tracing,
 	logger log.Logger,
@@ -60,6 +87,12 @@ func NewHTTPServer(
 	srv.HandleFunc("/readyz", healthChecker.Ready)
 	srv.Handle("/metrics", metrics.Handler())
 	srv.HandleFunc(apiV1+"/meta/version", metaService.Version)
+	if productAPI != nil {
+		srv.HandlePrefix(apiV1+"/auth/", productAPI)
+		srv.Handle(apiV1+"/projects", productAPI)
+		srv.HandlePrefix(apiV1+"/projects/", productAPI)
+		srv.Handle(apiV1+"/audit-events", productAPI)
+	}
 	if samples != nil {
 		if samples.Application == nil || samples.Environment == nil || samples.Deployment == nil {
 			return nil, fmt.Errorf("engineering sample services must be provided together")
