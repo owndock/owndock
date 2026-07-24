@@ -77,6 +77,24 @@ func (s *MongoStore) ProjectExists(ctx context.Context, organizationID, projectI
 	return count == 1, nil
 }
 
+// ReleaseExists verifies ownership before a deployment may reference a release.
+func (s *MongoStore) ReleaseExists(ctx context.Context, projectID, releaseID string) (bool, error) {
+	count, err := s.releases.CountDocuments(ctx, bson.D{{Key: "_id", Value: releaseID}, {Key: "project_id", Value: projectID}})
+	if err != nil {
+		return false, fmt.Errorf("check release: %w", err)
+	}
+	return count == 1, nil
+}
+
+// RuntimeTargetExists verifies that a deployment target belongs to the project.
+func (s *MongoStore) RuntimeTargetExists(ctx context.Context, projectID, targetID string) (bool, error) {
+	count, err := s.targets.CountDocuments(ctx, bson.D{{Key: "_id", Value: targetID}, {Key: "project_id", Value: projectID}})
+	if err != nil {
+		return false, fmt.Errorf("check runtime target: %w", err)
+	}
+	return count == 1, nil
+}
+
 func (s *MongoStore) ListApplications(ctx context.Context, projectID string) ([]biz.Application, error) {
 	cursor, err := s.applications.Find(
 		ctx,
