@@ -62,6 +62,15 @@ type RuntimeTarget struct {
 	CreatedAt     time.Time
 }
 
+type Environment struct {
+	ID        string
+	ProjectID string
+	Name      string
+	Stage     string
+	CreatedBy string
+	CreatedAt time.Time
+}
+
 type ProjectRepository interface {
 	ListProjects(context.Context, string) ([]Project, error)
 	CreateProject(context.Context, Project) (Project, error)
@@ -82,6 +91,11 @@ type ReleaseRepository interface {
 type RuntimeTargetRepository interface {
 	ListRuntimeTargets(context.Context, string) ([]RuntimeTarget, error)
 	CreateRuntimeTarget(context.Context, RuntimeTarget) (RuntimeTarget, error)
+}
+
+type EnvironmentRepository interface {
+	ListEnvironments(context.Context, string) ([]Environment, error)
+	CreateEnvironment(context.Context, Environment) (Environment, error)
 }
 
 func NewProject(id, organizationID, name, createdBy string, now time.Time) (Project, error) {
@@ -134,6 +148,18 @@ func NewRuntimeTarget(
 		TLSServerName: tlsServerName, CredentialRef: credentialRef,
 		Status: RuntimeTargetStatusPending, CreatedBy: createdBy, CreatedAt: now.UTC(),
 	}, nil
+}
+
+func NewEnvironment(id, projectID, name, stage, createdBy string, now time.Time) (Environment, error) {
+	name, err := validName(name)
+	if err != nil {
+		return Environment{}, err
+	}
+	stage = strings.TrimSpace(stage)
+	if stage == "" || projectID == "" || createdBy == "" {
+		return Environment{}, ErrInvalidName
+	}
+	return Environment{ID: id, ProjectID: projectID, Name: name, Stage: stage, CreatedBy: createdBy, CreatedAt: now.UTC()}, nil
 }
 
 func validName(value string) (string, error) {

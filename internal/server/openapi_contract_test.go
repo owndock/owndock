@@ -93,6 +93,14 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "create project environment", method: http.MethodPost, target: "/api/v1/projects/test-id/environments",
+			body: `{"name":"Production","stage":"production"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list project environments", method: http.MethodGet, target: "/api/v1/projects/test-id/environments",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "list audit events", method: http.MethodGet, target: "/api/v1/audit-events?project_id=test-id&limit=100",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},

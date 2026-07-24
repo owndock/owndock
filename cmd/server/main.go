@@ -153,7 +153,8 @@ func run() error {
 		)
 		identityHTTP := identityservice.NewHTTP(identityUseCase, cfg.Security.BootstrapToken)
 		controlPlaneStore := controlplanedata.NewMongoStore(mongoClient.Database())
-		controlPlaneHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCase(
+		controlPlaneHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCaseWithEnvironment(
+			controlPlaneStore,
 			controlPlaneStore,
 			controlPlaneStore,
 			controlPlaneStore,

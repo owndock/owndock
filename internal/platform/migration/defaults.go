@@ -52,6 +52,9 @@ func createInitialProductIndexes(ctx context.Context, database *mongo.Database) 
 		"runtime_targets": {
 			uniqueIndex("uniq_runtime_target_name", bson.D{{Key: "project_id", Value: 1}, {Key: "name_normalized", Value: 1}}),
 		},
+		"environments": {
+			uniqueIndex("uniq_environment_name", bson.D{{Key: "project_id", Value: 1}, {Key: "name_normalized", Value: 1}}),
+		},
 		"audit_events": {
 			{
 				Keys:    bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1}, {Key: "created_at", Value: -1}},

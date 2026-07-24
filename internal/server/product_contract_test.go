@@ -52,8 +52,8 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		return "bootstrap-secret", nil
 	})
 	controlStore := &contractControlStore{}
-	controlHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCase(
-		controlStore, controlStore, controlStore, controlStore,
+	controlHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCaseWithEnvironment(
+		controlStore, controlStore, controlStore, controlStore, controlStore,
 		transaction.Passthrough{}, audits, audits, newID, now,
 	))
 	productAPI, err := NewProductAPI(identityHTTP, controlHTTP, identityHTTP.Authenticate)
@@ -190,6 +190,7 @@ type contractControlStore struct {
 	applications []controlplanebiz.Application
 	releases     []controlplanebiz.Release
 	targets      []controlplanebiz.RuntimeTarget
+	environments []controlplanebiz.Environment
 }
 
 func (s *contractControlStore) ListProjects(_ context.Context, organizationID string) ([]controlplanebiz.Project, error) {
@@ -270,5 +271,20 @@ func (s *contractControlStore) CreateRuntimeTarget(
 	item controlplanebiz.RuntimeTarget,
 ) (controlplanebiz.RuntimeTarget, error) {
 	s.targets = append(s.targets, item)
+	return item, nil
+}
+
+func (s *contractControlStore) ListEnvironments(_ context.Context, projectID string) ([]controlplanebiz.Environment, error) {
+	var result []controlplanebiz.Environment
+	for _, item := range s.environments {
+		if item.ProjectID == projectID {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func (s *contractControlStore) CreateEnvironment(_ context.Context, item controlplanebiz.Environment) (controlplanebiz.Environment, error) {
+	s.environments = append(s.environments, item)
 	return item, nil
 }

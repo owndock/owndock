@@ -17,11 +17,29 @@ type UseCase struct {
 	applications ApplicationRepository
 	releases     ReleaseRepository
 	targets      RuntimeTargetRepository
+	environments EnvironmentRepository
 	transaction  transaction.Manager
 	audit        sharedaudit.Recorder
 	auditReader  sharedaudit.Reader
 	newID        IDGenerator
 	now          Clock
+}
+
+func NewUseCaseWithEnvironment(
+	projects ProjectRepository,
+	applications ApplicationRepository,
+	releases ReleaseRepository,
+	targets RuntimeTargetRepository,
+	environments EnvironmentRepository,
+	transaction transaction.Manager,
+	auditRecorder sharedaudit.Recorder,
+	auditReader sharedaudit.Reader,
+	newID IDGenerator,
+	now Clock,
+) *UseCase {
+	useCase := NewUseCase(projects, applications, releases, targets, transaction, auditRecorder, auditReader, newID, now)
+	useCase.environments = environments
+	return useCase
 }
 
 func NewUseCase(
@@ -198,6 +216,48 @@ func (u *UseCase) CreateRuntimeTarget(
 		}
 		item = created
 		return u.record(transactionContext, principal, auditID, "runtime_target.create", "runtime_target", item.ID, projectID, requestID, now)
+	})
+	return item, err
+}
+
+func (u *UseCase) ListEnvironments(ctx context.Context, principal security.Principal, projectID string) ([]Environment, error) {
+	if u.environments == nil {
+		return nil, ErrNotFound
+	}
+	if err := principal.Require(security.PermissionEnvironmentRead); err != nil {
+		return nil, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return nil, err
+	}
+	return u.environments.ListEnvironments(ctx, projectID)
+}
+
+func (u *UseCase) CreateEnvironment(ctx context.Context, principal security.Principal, projectID, name, stage, requestID string) (Environment, error) {
+	if u.environments == nil {
+		return Environment{}, ErrNotFound
+	}
+	if err := principal.Require(security.PermissionEnvironmentWrite); err != nil {
+		return Environment{}, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return Environment{}, err
+	}
+	id, auditID, now, err := u.identifiers()
+	if err != nil {
+		return Environment{}, err
+	}
+	item, err := NewEnvironment(id, projectID, name, stage, principal.UserID, now)
+	if err != nil {
+		return Environment{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		created, createErr := u.environments.CreateEnvironment(transactionContext, item)
+		if createErr != nil {
+			return createErr
+		}
+		item = created
+		return u.record(transactionContext, principal, auditID, "environment.create", "environment", item.ID, projectID, requestID, now)
 	})
 	return item, err
 }

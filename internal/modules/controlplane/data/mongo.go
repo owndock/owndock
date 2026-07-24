@@ -17,6 +17,7 @@ type MongoStore struct {
 	applications *mongo.Collection
 	releases     *mongo.Collection
 	targets      *mongo.Collection
+	environments *mongo.Collection
 }
 
 func NewMongoStore(database *mongo.Database) *MongoStore {
@@ -25,6 +26,7 @@ func NewMongoStore(database *mongo.Database) *MongoStore {
 		applications: database.Collection("product_applications"),
 		releases:     database.Collection("releases"),
 		targets:      database.Collection("runtime_targets"),
+		environments: database.Collection("environments"),
 	}
 }
 
@@ -194,6 +196,37 @@ func (s *MongoStore) CreateRuntimeTarget(ctx context.Context, item biz.RuntimeTa
 	return item, nil
 }
 
+func (s *MongoStore) ListEnvironments(ctx context.Context, projectID string) ([]biz.Environment, error) {
+	cursor, err := s.environments.Find(ctx, bson.D{{Key: "project_id", Value: projectID}}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("find environments: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []environmentDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode environments: %w", err)
+	}
+	items := make([]biz.Environment, len(documents))
+	for i, document := range documents {
+		items[i] = document.domain()
+	}
+	return items, nil
+}
+
+func (s *MongoStore) CreateEnvironment(ctx context.Context, item biz.Environment) (biz.Environment, error) {
+	_, err := s.environments.InsertOne(ctx, environmentDocument{
+		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name, NameNormalized: normalizeName(item.Name),
+		Stage: item.Stage, CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+	})
+	if mongo.IsDuplicateKeyError(err) {
+		return biz.Environment{}, biz.ErrDuplicateName
+	}
+	if err != nil {
+		return biz.Environment{}, fmt.Errorf("insert environment: %w", err)
+	}
+	return item, nil
+}
+
 func normalizeName(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
@@ -257,6 +290,20 @@ type runtimeTargetDocument struct {
 	Status         biz.RuntimeTargetStatus `bson:"status"`
 	CreatedBy      string                  `bson:"created_by"`
 	CreatedAt      time.Time               `bson:"created_at"`
+}
+
+type environmentDocument struct {
+	ID             string    `bson:"_id"`
+	ProjectID      string    `bson:"project_id"`
+	Name           string    `bson:"name"`
+	NameNormalized string    `bson:"name_normalized"`
+	Stage          string    `bson:"stage"`
+	CreatedBy      string    `bson:"created_by"`
+	CreatedAt      time.Time `bson:"created_at"`
+}
+
+func (d environmentDocument) domain() biz.Environment {
+	return biz.Environment{ID: d.ID, ProjectID: d.ProjectID, Name: d.Name, Stage: d.Stage, CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt}
 }
 
 func (d runtimeTargetDocument) domain() biz.RuntimeTarget {

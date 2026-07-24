@@ -83,7 +83,7 @@ sequenceDiagram
 
 ## 已实现：认证、授权、资源写入与审计
 
-Project、Project 下的 Application、不可变 Release 和 Runtime Target 共用相同的写入骨架。身份来自 Bearer session，Organization 所有权和角色权限由 UseCase 强制执行。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
+Project、Project 下的 Application、Environment、不可变 Release 和 Runtime Target 共用相同的写入骨架。Environment 只表达项目阶段，不承载运行时凭据。身份来自 Bearer session，Organization 所有权和角色权限由 UseCase 强制执行。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
 
 ```mermaid
 sequenceDiagram
@@ -112,11 +112,32 @@ sequenceDiagram
             M-->>U: 回滚事务
             U-->>API: 稳定错误码
         else 全部成功
-            M-->>U: 提交事务
+                M-->>U: 提交事务
             U-->>API: 新资源
             API-->>D: 201 Created
         end
     end
+```
+
+Environment 创建是 Project 范围内的独立资源，后续 Deployment 执行时再通过 Runtime Target 选择实际运行位置：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Developer
+    participant API as Project API
+    participant U as Control Plane UseCase
+    participant M as MongoDB
+    participant A as Audit Store
+
+    D->>API: POST /api/v1/projects/{project_id}/environments
+    API->>U: name + stage + Principal
+    U->>U: 校验 project ownership 与 environment.write
+    U->>M: 写入 Environment
+    U->>A: 写 environment.create 审计
+    M-->>U: 提交事务
+    U-->>API: Environment
+    API-->>D: 201 Created
 ```
 
 ## 目标：从 Release 到 Docker Deployment
@@ -161,7 +182,7 @@ sequenceDiagram
 
 ## 阅读边界
 
-- 当前正式持久化资源：Organization、User、Session、Project、Project Application、Release、Runtime Target、Audit Event。
+- 当前正式持久化资源：Organization、User、Session、Project、Project Application、Environment、Release、Runtime Target、Audit Event。
 - 当前 Runtime Target 状态固定为 `pending`，只保存连接元数据和 `credential_ref`，不保存凭据正文。
-- Environment、Template、Deployment 正式模型、Docker 连接探测与执行仍是后续纵向切片。
+- Template、Deployment 正式模型、Docker 连接探测与执行仍是后续纵向切片；Environment 已作为 Project 范围资源落地。
 - 顶层 Application、Environment、Deployment 路由是默认关闭的工程样例，与正式 Project 范围 API 相互隔离。

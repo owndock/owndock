@@ -52,6 +52,9 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		case len(segments) == 5 && segments[4] == "runtime-targets":
 			s.runtimeTargets(w, r, principal, projectID)
 			return
+		case len(segments) == 5 && segments[4] == "environments":
+			s.environments(w, r, principal, projectID)
+			return
 		}
 	}
 	httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
@@ -202,6 +205,39 @@ func (s *HTTP) runtimeTargets(
 	}
 }
 
+func (s *HTTP) environments(w http.ResponseWriter, r *http.Request, principal security.Principal, projectID string) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.useCase.ListEnvironments(r.Context(), principal, projectID)
+		if writeError(w, r, err) {
+			return
+		}
+		responses := make([]environmentResponse, len(items))
+		for i, item := range items {
+			responses[i] = environmentResponseFromDomain(item)
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
+	case http.MethodPost:
+		var request struct {
+			Name  string `json:"name"`
+			Stage string `json:"stage"`
+		}
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		item, err := s.useCase.CreateEnvironment(
+			r.Context(), principal, projectID, request.Name, request.Stage,
+			httpx.RequestIDFromContext(r.Context()),
+		)
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusCreated, environmentResponseFromDomain(item))
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
 func (s *HTTP) auditEvents(w http.ResponseWriter, r *http.Request, principal security.Principal) {
 	if r.Method != http.MethodGet {
 		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -321,6 +357,22 @@ type runtimeTargetResponse struct {
 	Status        biz.RuntimeTargetStatus `json:"status"`
 	CreatedBy     string                  `json:"created_by"`
 	CreatedAt     time.Time               `json:"created_at"`
+}
+
+type environmentResponse struct {
+	ID        string    `json:"id"`
+	ProjectID string    `json:"project_id"`
+	Name      string    `json:"name"`
+	Stage     string    `json:"stage"`
+	CreatedBy string    `json:"created_by"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+func environmentResponseFromDomain(item biz.Environment) environmentResponse {
+	return environmentResponse{
+		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name, Stage: item.Stage,
+		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+	}
 }
 
 func runtimeTargetResponseFromDomain(item biz.RuntimeTarget) runtimeTargetResponse {
