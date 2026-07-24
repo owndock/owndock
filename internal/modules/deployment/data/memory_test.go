@@ -95,3 +95,23 @@ func TestSaveClaimedRejectsExpiredLease(t *testing.T) {
 		t.Fatalf("expired save error = %v", err)
 	}
 }
+
+func TestFormalIdempotencyKeyIsUnique(t *testing.T) {
+	repo := NewMemoryRepository()
+	item, err := biz.NewFormal("dep-1", "rel-1", "app-1", "env-1", "target-1", "request-1", time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := item
+	duplicate.ID = "dep-2"
+	if _, err := repo.Create(t.Context(), duplicate); !errors.Is(err, biz.ErrDuplicateIdempotency) {
+		t.Fatalf("duplicate key error = %v", err)
+	}
+	found, err := repo.GetByIdempotency(t.Context(), "request-1")
+	if err != nil || found.ID != "dep-1" {
+		t.Fatalf("found = %+v, err = %v", found, err)
+	}
+}
