@@ -13,8 +13,22 @@ type UseCase struct {
 	repo         Repository
 	applications ApplicationLookup
 	environments EnvironmentLookup
+	releases     ReleaseLookup
+	targets      RuntimeTargetLookup
 	newID        IDGenerator
 	now          Clock
+}
+
+type ReleaseLookup interface {
+	Exists(context.Context, string) (bool, error)
+}
+type RuntimeTargetLookup interface {
+	Exists(context.Context, string) (bool, error)
+}
+
+func (u *UseCase) WithFormalLookups(releases ReleaseLookup, targets RuntimeTargetLookup) *UseCase {
+	u.releases, u.targets = releases, targets
+	return u
 }
 
 func NewUseCase(
@@ -57,6 +71,24 @@ func (u *UseCase) Create(ctx context.Context, applicationID, environmentID, revi
 	}
 	if !exists {
 		return Deployment{}, ErrEnvironmentNotFound
+	}
+	if u.releases != nil {
+		exists, err = u.releases.Exists(ctx, item.ReleaseID)
+		if err != nil {
+			return Deployment{}, err
+		}
+		if !exists {
+			return Deployment{}, ErrNotFound
+		}
+	}
+	if u.targets != nil {
+		exists, err = u.targets.Exists(ctx, item.RuntimeTargetID)
+		if err != nil {
+			return Deployment{}, err
+		}
+		if !exists {
+			return Deployment{}, ErrNotFound
+		}
 	}
 	return u.repo.Create(ctx, item)
 }
