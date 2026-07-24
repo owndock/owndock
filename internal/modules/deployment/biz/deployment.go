@@ -8,16 +8,19 @@ import (
 )
 
 var (
-	ErrInvalidApplication  = errors.New("application id is required")
-	ErrInvalidEnvironment  = errors.New("environment id is required")
-	ErrInvalidTransition   = errors.New("invalid deployment status transition")
-	ErrInvalidLease        = errors.New("invalid deployment lease")
-	ErrNotClaimable        = errors.New("deployment is not claimable")
-	ErrNotFound            = errors.New("deployment not found")
-	ErrConflict            = errors.New("deployment version conflict")
-	ErrLeaseExpired        = errors.New("deployment lease expired")
-	ErrApplicationNotFound = errors.New("application not found")
-	ErrEnvironmentNotFound = errors.New("environment not found")
+	ErrInvalidApplication    = errors.New("application id is required")
+	ErrInvalidEnvironment    = errors.New("environment id is required")
+	ErrInvalidTransition     = errors.New("invalid deployment status transition")
+	ErrInvalidLease          = errors.New("invalid deployment lease")
+	ErrNotClaimable          = errors.New("deployment is not claimable")
+	ErrNotFound              = errors.New("deployment not found")
+	ErrConflict              = errors.New("deployment version conflict")
+	ErrLeaseExpired          = errors.New("deployment lease expired")
+	ErrApplicationNotFound   = errors.New("application not found")
+	ErrEnvironmentNotFound   = errors.New("environment not found")
+	ErrInvalidRelease        = errors.New("release id is required")
+	ErrInvalidRuntimeTarget  = errors.New("runtime target id is required")
+	ErrInvalidIdempotencyKey = errors.New("idempotency key is required")
 )
 
 type Status string
@@ -41,15 +44,40 @@ func (l Lease) Active(now time.Time) bool {
 }
 
 type Deployment struct {
-	ID            string
-	ApplicationID string
-	EnvironmentID string
-	Revision      string
-	Status        Status
-	CreatedAt     time.Time
-	UpdatedAt     time.Time
-	Version       uint64
-	Lease         Lease
+	ID              string
+	ReleaseID       string
+	ApplicationID   string
+	EnvironmentID   string
+	RuntimeTargetID string
+	IdempotencyKey  string
+	Revision        string
+	Status          Status
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	Version         uint64
+	Lease           Lease
+}
+
+// NewFormal creates the immutable product deployment reference. Runtime execution
+// may evolve, but these references and the idempotency key never change.
+func NewFormal(id, releaseID, applicationID, environmentID, runtimeTargetID, idempotencyKey string, now time.Time) (Deployment, error) {
+	if strings.TrimSpace(releaseID) == "" {
+		return Deployment{}, ErrInvalidRelease
+	}
+	if strings.TrimSpace(runtimeTargetID) == "" {
+		return Deployment{}, ErrInvalidRuntimeTarget
+	}
+	if strings.TrimSpace(idempotencyKey) == "" {
+		return Deployment{}, ErrInvalidIdempotencyKey
+	}
+	item, err := New(applicationID, environmentID, "", id, now)
+	if err != nil {
+		return Deployment{}, err
+	}
+	item.ReleaseID = strings.TrimSpace(releaseID)
+	item.RuntimeTargetID = strings.TrimSpace(runtimeTargetID)
+	item.IdempotencyKey = strings.TrimSpace(idempotencyKey)
+	return item, nil
 }
 
 type Claim struct {

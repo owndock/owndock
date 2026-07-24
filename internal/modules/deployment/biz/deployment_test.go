@@ -41,3 +41,22 @@ func TestDeploymentLease(t *testing.T) {
 		t.Fatalf("lease owner = %q", d.Lease.Owner)
 	}
 }
+
+func TestFormalDeploymentPinsReferencesAndIdempotency(t *testing.T) {
+	d, err := NewFormal("dep-1", "release-1", "app-1", "env-1", "target-1", "request-123", time.Unix(1, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.ReleaseID != "release-1" || d.RuntimeTargetID != "target-1" || d.IdempotencyKey != "request-123" {
+		t.Fatalf("deployment references = %+v", d)
+	}
+	for _, invalid := range [][6]string{
+		{"dep", "", "app", "env", "target", "key"},
+		{"dep", "rel", "app", "env", "", "key"},
+		{"dep", "rel", "app", "env", "target", ""},
+	} {
+		if _, err := NewFormal(invalid[0], invalid[1], invalid[2], invalid[3], invalid[4], invalid[5], time.Now()); err == nil {
+			t.Errorf("invalid formal deployment %+v accepted", invalid)
+		}
+	}
+}
