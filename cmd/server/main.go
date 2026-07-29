@@ -5,10 +5,12 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
 	"github.com/go-kratos/kratos/v2/log"
+	"github.com/go-kratos/kratos/v2/transport"
 
 	serverapp "github.com/owndock/owndock/internal/app"
 	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
@@ -20,21 +22,28 @@ import (
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
 	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
+	deploymentworker "github.com/owndock/owndock/internal/modules/deployment/worker"
 	environmentbiz "github.com/owndock/owndock/internal/modules/environment/biz"
 	environmentdata "github.com/owndock/owndock/internal/modules/environment/data"
 	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	identitybiz "github.com/owndock/owndock/internal/modules/identity/biz"
 	identitydata "github.com/owndock/owndock/internal/modules/identity/data"
 	identityservice "github.com/owndock/owndock/internal/modules/identity/service"
+	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
+	managedhostdata "github.com/owndock/owndock/internal/modules/managedhost/data"
+	managedhostservice "github.com/owndock/owndock/internal/modules/managedhost/service"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
+	"github.com/owndock/owndock/internal/platform/httpx"
 	"github.com/owndock/owndock/internal/platform/id"
+	"github.com/owndock/owndock/internal/platform/lifecycle"
 	"github.com/owndock/owndock/internal/platform/migration"
 	platformmongo "github.com/owndock/owndock/internal/platform/mongo"
 	"github.com/owndock/owndock/internal/platform/observability"
 	"github.com/owndock/owndock/internal/server"
+	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 )
 
 const serviceName = "owndock"
@@ -109,6 +118,8 @@ func run() error {
 	}
 	var mongoClient *platformmongo.Client
 	var productAPI *server.ProductAPI
+	var deploymentWorkerServer *lifecycle.Server
+	var agentControlServer *server.AgentServer
 	cleanup := func(ctx context.Context) error {
 		var mongoErr error
 		if mongoClient != nil {
@@ -153,7 +164,114 @@ func run() error {
 		)
 		identityHTTP := identityservice.NewHTTP(identityUseCase, cfg.Security.BootstrapToken)
 		controlPlaneStore := controlplanedata.NewMongoStore(mongoClient.Database())
-		controlPlaneHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCaseWithEnvironment(
+		managedHostStore := managedhostdata.NewMongoRepository(mongoClient.Database())
+		managedHostUseCase := managedhostbiz.NewUseCase(
+			managedHostStore,
+			mongoClient,
+			auditStore,
+			id.New,
+			time.Now,
+		)
+		if cfg.Security.AgentPKI.Enabled {
+			enrollmentTTL, err := cfg.Security.AgentPKI.EnrollmentTTLDuration()
+			if err != nil {
+				return err
+			}
+			certificateTTL, err := cfg.Security.AgentPKI.CertificateTTLDuration()
+			if err != nil {
+				return err
+			}
+			caCertificate, caPrivateKey, err := cfg.Security.AgentPKI.Materials()
+			if err != nil {
+				return fmt.Errorf("load Agent PKI material: %w", err)
+			}
+			issuer, issuerErr := managedhostdata.NewCertificateIssuer(
+				caCertificate, caPrivateKey, certificateTTL,
+			)
+			for index := range caPrivateKey {
+				caPrivateKey[index] = 0
+			}
+			if issuerErr != nil {
+				return fmt.Errorf("create Agent certificate issuer: %w", issuerErr)
+			}
+			managedHostUseCase.WithEnrollment(
+				managedHostStore,
+				managedhostdata.EnrollmentTokens{},
+				issuer,
+				enrollmentTTL,
+			)
+			if cfg.Server.Agent.Enabled {
+				handshakeTimeout, durationErr :=
+					cfg.Server.Agent.HandshakeTimeoutDuration()
+				if durationErr != nil {
+					return durationErr
+				}
+				heartbeatInterval, durationErr :=
+					cfg.Server.Agent.HeartbeatIntervalDuration()
+				if durationErr != nil {
+					return durationErr
+				}
+				heartbeatTimeout, durationErr :=
+					cfg.Server.Agent.HeartbeatTimeoutDuration()
+				if durationErr != nil {
+					return durationErr
+				}
+				connectionRegistry, registryErr :=
+					managedhostdata.NewConnectionRegistry(
+						cfg.Server.Agent.OutboundBuffer,
+						cfg.Server.Agent.CompletedCommandCache,
+					)
+				if registryErr != nil {
+					return fmt.Errorf(
+						"create Agent connection registry: %w",
+						registryErr,
+					)
+				}
+				managedHostUseCase.WithAgentControl(
+					managedHostStore,
+					connectionRegistry,
+					cfg.Server.Agent.ProtocolVersions,
+				)
+				agentStream, streamErr := managedhostservice.NewAgentStream(
+					managedHostUseCase,
+					connectionRegistry,
+					handshakeTimeout,
+					heartbeatInterval,
+					heartbeatTimeout,
+					cfg.Server.Agent.MaxFrameBytes,
+				)
+				if streamErr != nil {
+					return fmt.Errorf("create Agent stream: %w", streamErr)
+				}
+				serverCertificate, serverPrivateKey, materialErr :=
+					cfg.Server.Agent.Materials()
+				if materialErr != nil {
+					return fmt.Errorf("load Agent server material: %w", materialErr)
+				}
+				agentHandler := httpx.RequestID(id.New)(
+					httpx.AccessLog(logger)(
+						httpx.Recovery(logger)(agentStream),
+					),
+				)
+				agentControlServer, materialErr = server.NewAgentServer(
+					cfg.Server.Agent,
+					agentHandler,
+					caCertificate,
+					serverCertificate,
+					serverPrivateKey,
+					connectionRegistry,
+				)
+				for index := range serverPrivateKey {
+					serverPrivateKey[index] = 0
+				}
+				if materialErr != nil {
+					return fmt.Errorf("create Agent server: %w", materialErr)
+				}
+			}
+		}
+		managedHostHTTP := managedhostservice.NewHTTP(managedHostUseCase)
+		controlPlaneUseCase := controlplanebiz.NewUseCaseWithResources(
+			controlPlaneStore,
 			controlPlaneStore,
 			controlPlaneStore,
 			controlPlaneStore,
@@ -164,10 +282,82 @@ func run() error {
 			auditStore,
 			id.New,
 			time.Now,
-		))
-		productAPI, err = server.NewProductAPI(identityHTTP, controlPlaneHTTP, identityHTTP.Authenticate)
+		).WithManagedHosts(managedHostStore).
+			WithRuntimeTargetProbe(
+				controlPlaneStore,
+				controlplanedata.NewDockerRuntimeTargetProber(),
+			)
+		controlPlaneHTTP := controlplaneservice.NewHTTP(controlPlaneUseCase)
+		deploymentStore := deploymentdata.NewMongoRepository(mongoClient.Database())
+		deploymentHTTP := deploymentservice.NewHTTP(
+			deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+				WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlPlaneStore)).
+				WithFormalSecurity(mongoClient, auditStore),
+		)
+		productAPI, err = server.NewProductAPIWithDeploymentAndManagedHost(
+			identityHTTP,
+			controlPlaneHTTP,
+			http.HandlerFunc(deploymentHTTP.HandleFormal),
+			managedHostHTTP,
+			identityHTTP.Authenticate,
+		)
 		if err != nil {
 			return fmt.Errorf("create product API: %w", err)
+		}
+		if cfg.Runtime.DeploymentWorker.Enabled {
+			pollInterval, err := cfg.Runtime.DeploymentWorker.PollIntervalDuration()
+			if err != nil {
+				return err
+			}
+			leaseDuration, err := cfg.Runtime.DeploymentWorker.LeaseDurationValue()
+			if err != nil {
+				return err
+			}
+			operationTimeout, err := cfg.Runtime.DeploymentWorker.OperationTimeoutDuration()
+			if err != nil {
+				return err
+			}
+			executor, err := deploymentworker.NewRuntimeExecutor(
+				deploymentdata.NewExecutionResolver(controlPlaneStore),
+				deploymentdata.NewEnvironmentSecretResolver(),
+				deploymentdata.NewRuntimeGatewayRouter(
+					map[runtimeaccess.Mode]deploymentbiz.RuntimeGateway{
+						runtimeaccess.ModeDirectDocker: deploymentdata.
+							NewDockerGateway().
+							WithFence(deploymentStore),
+					},
+				),
+			)
+			if err != nil {
+				return fmt.Errorf("create deployment executor: %w", err)
+			}
+			executor.
+				WithRegistryCredentials(deploymentdata.NewEnvironmentSecretResolver()).
+				WithConfiguration(deploymentdata.NewEnvironmentSecretResolver())
+			runner, err := deploymentworker.NewRunner(
+				deploymentStore, executor, instanceID, leaseDuration, time.Now,
+			)
+			if err != nil {
+				return fmt.Errorf("create deployment runner: %w", err)
+			}
+			runner.WithAudit(mongoClient, auditStore, id.New)
+			loop, err := deploymentworker.NewLoop(
+				runner, pollInterval, operationTimeout,
+				func(workerErr error) {
+					category := deploymentbiz.CategorizeExecutionError(
+						workerErr, deploymentbiz.FailureUnknown,
+					)
+					_ = logger.Log(
+						log.LevelError,
+						"component", "deployment_worker",
+						"failure.category", category,
+					)
+				},
+			)
+			if err != nil {
+				return fmt.Errorf("create deployment worker loop: %w", err)
+			}
+			deploymentWorkerServer = lifecycle.NewServer(loop)
 		}
 	}
 	httpServer, err := server.NewHTTPServer(
@@ -184,6 +374,13 @@ func run() error {
 		return fmt.Errorf("create HTTP server: %w", err)
 	}
 
+	managedServers := []transport.Server{httpServer}
+	if deploymentWorkerServer != nil {
+		managedServers = append(managedServers, deploymentWorkerServer)
+	}
+	if agentControlServer != nil {
+		managedServers = append(managedServers, agentControlServer)
+	}
 	application := serverapp.NewServer(
 		serviceName,
 		version,
@@ -192,7 +389,7 @@ func run() error {
 		shutdownTimeout,
 		logger,
 		cleanup,
-		httpServer,
+		managedServers...,
 	)
 	return application.Run()
 }

@@ -75,8 +75,17 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "create registry credential", method: http.MethodPost, target: "/api/v1/projects/test-id/registry-credentials",
+			body:    `{"name":"Private Registry","server":"registry.example.com","username":"robot","password_ref":"secret://registry-password"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list registry credentials", method: http.MethodGet, target: "/api/v1/projects/test-id/registry-credentials",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "create release", method: http.MethodPost, target: "/api/v1/projects/test-id/applications/test-id/releases",
-			body:    `{"image":"registry.example.com/team/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+			body:    `{"image":"registry.example.com/team/api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","registry_credential_id":"test-id","runtime_spec":{"ports":[{"name":"http","container_port":8080,"protocol":"tcp"}],"environment_keys":["DATABASE_URL"],"resources":{"cpu_milli":500,"memory_bytes":268435456},"health_check":{"command":["/healthcheck"],"interval_seconds":30,"timeout_seconds":5,"retries":3,"start_period_seconds":0}}}`,
 			headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
@@ -84,9 +93,38 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
-			name: "create runtime target", method: http.MethodPost, target: "/api/v1/projects/test-id/runtime-targets",
-			body:    `{"name":"Production","endpoint":"tcp://docker.example.com:2376","tls_server_name":"docker.example.com","credential_ref":"secret://docker"}`,
+			name: "create managed host", method: http.MethodPost, target: "/api/v1/managed-hosts",
+			body:    `{"name":"Production Host","connection_mode":"direct"}`,
 			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list managed hosts", method: http.MethodGet, target: "/api/v1/managed-hosts",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get managed host", method: http.MethodGet, target: "/api/v1/managed-hosts/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "agent enrollment is unavailable without PKI", method: http.MethodPost,
+			target:  "/api/v1/managed-hosts/test-id/enrollments",
+			headers: bearerHeaders(), wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "agent enrollment exchange is unavailable without PKI", method: http.MethodPost,
+			target:     "/api/v1/agent/enrollments:exchange",
+			body:       `{"enrollment_token":"01234567890123456789012345678901","instance_id":"instance-1","agent_version":"1.0.0","protocol_version":"v1","capabilities":["docker"],"csr_pem":"unavailable"}`,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "create runtime target", method: http.MethodPost, target: "/api/v1/projects/test-id/runtime-targets",
+			body:    `{"name":"Production","managed_host_id":"test-id","connection_mode":"direct","endpoint":"tcp://docker.example.com:2376","tls_server_name":"docker.example.com","credential_ref":"secret://docker"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "probe runtime target", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/runtime-targets/test-id/probe",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
 			name: "list runtime targets", method: http.MethodGet, target: "/api/v1/projects/test-id/runtime-targets",
@@ -94,14 +132,59 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		},
 		{
 			name: "create project environment", method: http.MethodPost, target: "/api/v1/projects/test-id/environments",
-			body: `{"name":"Production","stage":"production"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+			body: `{"name":"Production","stage":"production","variables":{"DATABASE_URL":"secret://database-url"}}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
 			name: "list project environments", method: http.MethodGet, target: "/api/v1/projects/test-id/environments",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "create project deployment", method: http.MethodPost, target: "/api/v1/projects/test-id/deployments",
+			body: `{"release_id":"test-id","application_id":"test-id","environment_id":"test-id","runtime_target_id":"test-id"}`,
+			headers: map[string]string{
+				"Authorization":   "Bearer " + contractAccessToken,
+				"Idempotency-Key": "contract-deployment",
+			},
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list project deployments", method: http.MethodGet, target: "/api/v1/projects/test-id/deployments",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get project deployment", method: http.MethodGet, target: "/api/v1/projects/test-id/deployments/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "reject retry while deployment is queued", method: http.MethodPost,
+			target: "/api/v1/projects/test-id/deployments/test-id/retry",
+			headers: map[string]string{
+				"Authorization":   "Bearer " + contractAccessToken,
+				"Idempotency-Key": "contract-retry",
+			},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name: "reject rollback while deployment is queued", method: http.MethodPost,
+			target: "/api/v1/projects/test-id/deployments/test-id/rollback",
+			body:   `{"release_id":"test-id"}`,
+			headers: map[string]string{
+				"Authorization":   "Bearer " + contractAccessToken,
+				"Idempotency-Key": "contract-rollback",
+			},
+			wantStatus: http.StatusConflict,
+		},
+		{
+			name: "cancel project deployment", method: http.MethodPost, target: "/api/v1/projects/test-id/deployments/test-id/cancel",
+			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
 			name: "list audit events", method: http.MethodGet, target: "/api/v1/audit-events?project_id=test-id&limit=100",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "disable managed host", method: http.MethodPost,
+			target:  "/api/v1/managed-hosts/test-id:disable",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{

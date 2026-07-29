@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release contract. Identity, Project, project-scoped Application, Release, Runtime Target, and Audit operations form the first product slice when product mode is enabled. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser and management HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Environment, Runtime Target, Deployment lifecycle, and Audit operations form the implemented product slice when product mode is enabled. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands, Agent Runtime Gateway, Git-to-Deploy, Terminal, and Template are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -13,7 +13,9 @@ tags:
   - name: Projects
   - name: Product Applications
   - name: Releases
+  - name: Managed Hosts
   - name: Runtime Targets
+  - name: Registry Credentials
   - name: Audit
   - name: Applications
   - name: Environments
@@ -47,10 +49,155 @@ paths:
     get:
       tags: [Meta]
       operationId: getVersion
-      summary: Get service build information
+      summary: Get service prepare information
       responses:
         "200":
           $ref: "#/components/responses/Version"
+  /api/v1/managed-hosts:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Managed Hosts]
+      operationId: listManagedHosts
+      summary: List Organization-owned managed hosts
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ManagedHostList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Managed Hosts]
+      operationId: createManagedHost
+      summary: Register an Organization-owned managed host
+      description: Only an Owner may register a host. Agent hosts remain enrolling until the separate enrollment flow creates a fixed Agent identity, then remain offline until the future authenticated control flow establishes liveness.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateManagedHostRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ManagedHostCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/managed-hosts/{managed_host_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ManagedHostID"
+    get:
+      tags: [Managed Hosts]
+      operationId: getManagedHost
+      summary: Get an Organization-owned managed host
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ManagedHostResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/managed-hosts/{managed_host_id}:disable:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ManagedHostID"
+    post:
+      tags: [Managed Hosts]
+      operationId: disableManagedHost
+      summary: Disable a managed host and revoke its active Agent identity
+      description: Only an Owner may disable a Host. Any unused enrollment credentials are expired in the same transaction.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ManagedHostResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/managed-hosts/{managed_host_id}/enrollments:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ManagedHostID"
+    post:
+      tags: [Managed Hosts]
+      operationId: createAgentEnrollment
+      summary: Create a one-time Agent enrollment credential
+      description: Only an Owner may create an enrollment. The raw token is returned once and only its SHA-256 hash is persisted. Creating a new credential expires any previous unused credential for the Host.
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          $ref: "#/components/responses/AgentEnrollmentCreated"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/agent/enrollments:exchange:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      tags: [Managed Hosts]
+      operationId: exchangeAgentEnrollment
+      summary: Exchange a one-time enrollment token and CSR for an Agent certificate
+      description: This bootstrap endpoint does not accept a user session. The enrollment token is carried only in the JSON body, is consumed atomically, and cannot be replayed.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExchangeAgentEnrollmentRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/AgentCredentialsCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/auth/bootstrap:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -319,7 +466,8 @@ paths:
     post:
       tags: [Runtime Targets]
       operationId: createRuntimeTarget
-      summary: Register a TLS-protected Docker runtime target
+      summary: Register a Docker runtime target on a managed host
+      description: The connection mode must match the Organization-owned Managed Host. Direct mode requires the protected Docker endpoint fields. Agent mode forbids direct connection fields. Agent enrollment is implemented, but an Agent target cannot be probed or deployed until the authenticated control flow and Agent Runtime Gateway are implemented.
       security:
         - bearerAuth: []
       requestBody:
@@ -331,6 +479,82 @@ paths:
       responses:
         "201":
           $ref: "#/components/responses/RuntimeTargetCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/runtime-targets/{runtime_target_id}/probe:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/RuntimeTargetID"
+    post:
+      tags: [Runtime Targets]
+      operationId: probeRuntimeTarget
+      summary: Probe a runtime target using its external TLS credential
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/RuntimeTargetResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/registry-credentials:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Registry Credentials]
+      operationId: listRegistryCredentials
+      summary: List external registry credentials in a project
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/RegistryCredentialList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Registry Credentials]
+      operationId: createRegistryCredential
+      summary: Register private registry metadata backed by an external secret
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRegistryCredentialRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/RegistryCredentialCreated"
         "400":
           $ref: "#/components/responses/APIError"
         "401":
@@ -383,6 +607,188 @@ paths:
       responses:
         "201":
           $ref: "#/components/responses/ProjectEnvironmentCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Deployments]
+      operationId: listProjectDeployments
+      summary: List deployments in a project
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: application_id
+          in: query
+          schema:
+            type: string
+        - name: environment_id
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectDeploymentList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Deployments]
+      operationId: createProjectDeployment
+      summary: Create an immutable deployment operation
+      description: The selected runtime target must have completed a successful probe and be in the ready state. Otherwise the API returns 409 with code runtime_target_not_ready.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectDeploymentRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProjectDeploymentCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployments/{deployment_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/DeploymentID"
+    get:
+      tags: [Deployments]
+      operationId: getProjectDeployment
+      summary: Get a deployment
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectDeploymentResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployments/{deployment_id}/cancel:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/DeploymentID"
+    post:
+      tags: [Deployments]
+      operationId: cancelProjectDeployment
+      summary: Request deployment cancellation
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          $ref: "#/components/responses/ProjectDeploymentResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployments/{deployment_id}/retry:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/DeploymentID"
+    post:
+      tags: [Deployments]
+      operationId: retryProjectDeployment
+      summary: Retry a failed deployment as a new operation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProjectDeploymentCreated"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployments/{deployment_id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/DeploymentID"
+    post:
+      tags: [Deployments]
+      operationId: rollbackProjectDeployment
+      summary: Deploy a previously successful release as a new rollback operation
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRollbackDeploymentRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProjectDeploymentCreated"
         "400":
           $ref: "#/components/responses/APIError"
         "401":
@@ -581,6 +987,35 @@ components:
       schema:
         type: string
         minLength: 1
+    DeploymentID:
+      name: deployment_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    RuntimeTargetID:
+      name: runtime_target_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    ManagedHostID:
+      name: managed_host_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
   headers:
     RequestID:
       description: Request correlation identifier accepted from or generated by OwnDock.
@@ -610,7 +1045,7 @@ components:
           schema:
             $ref: "#/components/schemas/HealthResponse"
     Version:
-      description: Service build information.
+      description: Service prepare information.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -711,6 +1146,89 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Release"
+    RegistryCredentialList:
+      description: Registry credential metadata collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RegistryCredential"
+    RegistryCredentialCreated:
+      description: Registry credential metadata created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RegistryCredential"
+    ManagedHostList:
+      description: Organization managed host collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ManagedHost"
+    ManagedHostCreated:
+      description: Managed host registered.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ManagedHost"
+    ManagedHostResponse:
+      description: Managed host state.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ManagedHost"
+    AgentEnrollmentCreated:
+      description: One-time Agent enrollment credential. The token is never returned again.
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentEnrollmentCredential"
+    AgentCredentialsCreated:
+      description: Newly issued Agent client identity and certificate chain.
+      headers:
+        Cache-Control:
+          schema:
+            type: string
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/AgentCredentials"
     RuntimeTargetList:
       description: Runtime target collection.
       headers:
@@ -729,6 +1247,15 @@ components:
                   $ref: "#/components/schemas/RuntimeTarget"
     RuntimeTargetCreated:
       description: Runtime target created.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RuntimeTarget"
+    RuntimeTargetResponse:
+      description: Runtime target state.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -761,6 +1288,40 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ProjectEnvironment"
+    ProjectDeploymentCreated:
+      description: Deployment operation created or replayed by idempotency key.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProjectDeployment"
+    ProjectDeploymentResponse:
+      description: Deployment operation.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProjectDeployment"
+    ProjectDeploymentList:
+      description: Project deployment collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProjectDeployment"
     AuditEventList:
       description: Audit event collection.
       headers:
@@ -1007,7 +1568,7 @@ components:
     Release:
       type: object
       additionalProperties: false
-      required: [id, project_id, application_id, image_digest, created_by, created_at]
+      required: [id, project_id, application_id, image_digest, runtime_spec, created_by, created_at]
       properties:
         id:
           type: string
@@ -1021,16 +1582,21 @@ components:
         image_digest:
           type: string
           pattern: "^.+@sha256:[a-f0-9]{64}$"
+        registry_credential_id:
+          type: string
+          minLength: 1
+        runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
         created_by:
           type: string
           minLength: 1
         created_at:
           type: string
           format: date-time
-    RuntimeTarget:
+    RegistryCredential:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, endpoint, tls_server_name, credential_ref, status, created_by, created_at]
+      required: [id, project_id, name, server, username, password_ref, created_by, created_at]
       properties:
         id:
           type: string
@@ -1042,6 +1608,256 @@ components:
           type: string
           minLength: 2
           maxLength: 80
+        server:
+          type: string
+          minLength: 1
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+        password_ref:
+          type: string
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    ReleaseRuntimeSpec:
+      type: object
+      additionalProperties: false
+      required: [ports, environment_keys, resources]
+      properties:
+        ports:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/ReleasePort"
+        environment_keys:
+          type: array
+          maxItems: 100
+          items:
+            type: string
+            pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+        resources:
+          $ref: "#/components/schemas/ReleaseResources"
+        health_check:
+          $ref: "#/components/schemas/ReleaseHealthCheck"
+    ReleasePort:
+      type: object
+      additionalProperties: false
+      required: [name, container_port, protocol]
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{0,30}$"
+        container_port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum: [tcp, udp]
+    ReleaseResources:
+      type: object
+      additionalProperties: false
+      required: [cpu_milli, memory_bytes]
+      properties:
+        cpu_milli:
+          type: integer
+          minimum: 10
+          maximum: 64000
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 16777216
+          maximum: 1099511627776
+    ReleaseHealthCheck:
+      type: object
+      additionalProperties: false
+      required: [command, interval_seconds, timeout_seconds, retries, start_period_seconds]
+      properties:
+        command:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            type: string
+            minLength: 1
+            maxLength: 1024
+        interval_seconds:
+          type: integer
+          minimum: 1
+          maximum: 300
+        timeout_seconds:
+          type: integer
+          minimum: 1
+          maximum: 60
+        retries:
+          type: integer
+          minimum: 1
+          maximum: 10
+        start_period_seconds:
+          type: integer
+          minimum: 0
+          maximum: 600
+    ManagedHost:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, name, status, connection_mode, capabilities, created_by, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        status:
+          type: string
+          enum: [enrolling, online, offline, disabled]
+        connection_mode:
+          type: string
+          enum: [agent, direct]
+        agent_identity_id:
+          type: string
+          minLength: 1
+          readOnly: true
+        agent_instance_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          readOnly: true
+        agent_certificate_expires_at:
+          type: string
+          format: date-time
+          readOnly: true
+        direct_ssh_ref:
+          type: string
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+        last_seen_at:
+          type: string
+          format: date-time
+        agent_version:
+          type: string
+          minLength: 1
+        protocol_version:
+          type: string
+          minLength: 1
+        capabilities:
+          type: array
+          items:
+            type: string
+            minLength: 1
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    AgentEnrollmentCredential:
+      type: object
+      additionalProperties: false
+      required: [enrollment_id, managed_host_id, enrollment_token, expires_at]
+      properties:
+        enrollment_id:
+          type: string
+          minLength: 1
+        managed_host_id:
+          type: string
+          minLength: 1
+        enrollment_token:
+          type: string
+          minLength: 32
+          readOnly: true
+        expires_at:
+          type: string
+          format: date-time
+    ExchangeAgentEnrollmentRequest:
+      type: object
+      additionalProperties: false
+      required: [enrollment_token, instance_id, agent_version, protocol_version, capabilities, csr_pem]
+      properties:
+        enrollment_token:
+          type: string
+          minLength: 32
+          writeOnly: true
+        instance_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9_-][A-Za-z0-9._-]*$"
+        agent_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        protocol_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        capabilities:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+        csr_pem:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          writeOnly: true
+    AgentCredentials:
+      type: object
+      additionalProperties: false
+      required: [agent_identity_id, managed_host_id, certificate_pem, ca_certificate_pem, certificate_expires_at]
+      properties:
+        agent_identity_id:
+          type: string
+          minLength: 1
+        managed_host_id:
+          type: string
+          minLength: 1
+        certificate_pem:
+          type: string
+          minLength: 1
+          readOnly: true
+        ca_certificate_pem:
+          type: string
+          minLength: 1
+          readOnly: true
+        certificate_expires_at:
+          type: string
+          format: date-time
+    RuntimeTarget:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, managed_host_id, connection_mode, status, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        managed_host_id:
+          type: string
+          minLength: 1
+        connection_mode:
+          type: string
+          enum: [agent, direct]
         endpoint:
           type: string
           pattern: "^tcp://.+:[0-9]+$"
@@ -1050,10 +1866,13 @@ components:
           minLength: 1
         credential_ref:
           type: string
-          minLength: 1
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
         status:
           type: string
-          enum: [pending]
+          enum: [pending, ready, unreachable, credential_error]
+        last_probed_at:
+          type: string
+          format: date-time
         created_by:
           type: string
           minLength: 1
@@ -1109,15 +1928,95 @@ components:
         image:
           type: string
           pattern: "^.+@sha256:[a-f0-9]{64}$"
-    CreateRuntimeTargetRequest:
+        registry_credential_id:
+          type: string
+          minLength: 1
+        runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+    CreateRegistryCredentialRequest:
       type: object
       additionalProperties: false
-      required: [name, endpoint, tls_server_name, credential_ref]
+      required: [name, server, username, password_ref]
       properties:
         name:
           type: string
           minLength: 2
           maxLength: 80
+        server:
+          type: string
+          minLength: 1
+        username:
+          type: string
+          minLength: 1
+          maxLength: 255
+        password_ref:
+          type: string
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+    CreateManagedHostRequest:
+      oneOf:
+        - $ref: "#/components/schemas/CreateAgentManagedHostRequest"
+        - $ref: "#/components/schemas/CreateDirectManagedHostRequest"
+    CreateAgentManagedHostRequest:
+      type: object
+      additionalProperties: false
+      required: [name, connection_mode]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        connection_mode:
+          type: string
+          enum: [agent]
+    CreateDirectManagedHostRequest:
+      type: object
+      additionalProperties: false
+      required: [name, connection_mode]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        connection_mode:
+          type: string
+          enum: [direct]
+        direct_ssh_ref:
+          type: string
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+    CreateRuntimeTargetRequest:
+      oneOf:
+        - $ref: "#/components/schemas/CreateAgentRuntimeTargetRequest"
+        - $ref: "#/components/schemas/CreateDirectRuntimeTargetRequest"
+    CreateAgentRuntimeTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [name, managed_host_id, connection_mode]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        managed_host_id:
+          type: string
+          minLength: 1
+        connection_mode:
+          type: string
+          enum: [agent]
+    CreateDirectRuntimeTargetRequest:
+      type: object
+      additionalProperties: false
+      required: [name, managed_host_id, connection_mode, endpoint, tls_server_name, credential_ref]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        managed_host_id:
+          type: string
+          minLength: 1
+        connection_mode:
+          type: string
+          enum: [direct]
         endpoint:
           type: string
           pattern: "^tcp://.+:[0-9]+$"
@@ -1126,7 +2025,7 @@ components:
           minLength: 1
         credential_ref:
           type: string
-          minLength: 1
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
     Application:
       type: object
       additionalProperties: false
@@ -1167,7 +2066,7 @@ components:
     ProjectEnvironment:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, stage, created_by, created_at]
+      required: [id, project_id, name, stage, variables, created_by, created_at]
       properties:
         id:
           type: string
@@ -1182,10 +2081,59 @@ components:
         stage:
           type: string
           enum: [development, staging, production]
+        variables:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 4096
         created_by:
           type: string
           minLength: 1
         created_at:
+          type: string
+          format: date-time
+    ProjectDeployment:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, release_id, application_id, environment_id, runtime_target_id, operation, status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        release_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        environment_id:
+          type: string
+          minLength: 1
+        runtime_target_id:
+          type: string
+          minLength: 1
+        operation:
+          type: string
+          enum: [deploy, retry, rollback]
+        source_deployment_id:
+          type: string
+          minLength: 1
+        revision:
+          type: string
+        status:
+          type: string
+          enum: [queued, preparing, deploying, canceling, succeeded, failed, canceled]
+        failure_category:
+          type: string
+          description: Safe failure category present only when status is failed.
+          enum: [configuration, credential, target_unreachable, image_pull, runtime, unsupported_target, unknown]
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time
     Deployment:
@@ -1206,7 +2154,7 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, building, deploying, succeeded, failed, canceled]
+          enum: [queued, preparing, deploying, succeeded, failed, canceled]
         created_at:
           type: string
           format: date-time
@@ -1238,6 +2186,37 @@ components:
         stage:
           type: string
           enum: [development, staging, production]
+        variables:
+          type: object
+          maxProperties: 100
+          additionalProperties:
+            type: string
+            maxLength: 4096
+    CreateProjectDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [release_id, application_id, environment_id, runtime_target_id]
+      properties:
+        release_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        environment_id:
+          type: string
+          minLength: 1
+        runtime_target_id:
+          type: string
+          minLength: 1
+    CreateRollbackDeploymentRequest:
+      type: object
+      additionalProperties: false
+      required: [release_id]
+      properties:
+        release_id:
+          type: string
+          minLength: 1
     CreateDeploymentRequest:
       type: object
       additionalProperties: false

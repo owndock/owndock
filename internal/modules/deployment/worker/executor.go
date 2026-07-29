@@ -10,5 +10,6 @@ import (
 // requiring Docker, Kubernetes, credentials, or an external queue.
 type NoopExecutor struct{}
 
-func (NoopExecutor) Build(context.Context, biz.Deployment) error  { return nil }
-func (NoopExecutor) Deploy(context.Context, biz.Deployment) error { return nil }
+func (NoopExecutor) Prepare(context.Context, biz.Deployment) error { return nil }
+func (NoopExecutor) Deploy(context.Context, biz.Deployment) error  { return nil }
+func (NoopExecutor) Cancel(context.Context, biz.Deployment) error  { return nil }

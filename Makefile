@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test test-integration build api-validate api-breaking check vuln run
+.PHONY: fmt fmt-check mod-verify vet test test-integration test-runtime-integration build api-validate api-breaking check vuln run
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -24,6 +24,9 @@ test:
 
 test-integration:
 	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test ./internal/platform/mongo -run TestMongoReplicaSetIntegration -count=1 -timeout=5m
+
+test-runtime-integration:
+	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run TestDockerGatewayEngineIntegration -count=1 -timeout=5m
 
 build:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock ./cmd/server

@@ -36,7 +36,7 @@ database:
 - Kratos 停止接收请求后关闭连接池；
 - 业务模块不能直接创建 Client，也不能从 `internal/platform/mongo` 推导业务 schema。
 
-正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`sessions`、`projects`、`product_applications`、`releases`、`runtime_targets`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。
+正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`sessions`、`managed_hosts`、`agent_enrollments`、`agent_identities`、`projects`、`product_applications`、`releases`、`registry_credentials`、`environments`、`runtime_targets`、`deployments`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。Agent enrollment 只保存 token 的 SHA-256 hash；兑换时在事务中条件消费 token、创建固定身份并绑定 Host，重复兑换会整体回滚。Agent 连接在 `managed_hosts` 保存当前 boot/session fence、版本、能力和 `last_seen_at`；heartbeat 与 disconnect 必须匹配当前 session，避免旧连接覆盖新连接状态，连接/断开审计仍使用事务。Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Application、Environment 与 Runtime Target 上曾成功部署的 Release”建立回滚查询索引。Migration v4 准备 Deployment 执行元数据，v5 建立 Registry Credential 索引，v6 为早期 Release 回填默认 CPU/内存运行规格，v7 允许同一 image digest 使用不同的不可变运行规格创建 Release，v8 建立 Organization Host 唯一命名和 Runtime Target Host 查询索引，v9 建立 enrollment token、过期清理、证书序列号/指纹和 Host 身份查询索引。
 
 启动和事务写入时序见 [flows.md](flows.md)。
 
@@ -48,7 +48,7 @@ database:
 make check
 ```
 
-MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、正式资源持久化、审计原子回滚和注销失效：
+MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、Agent token 只存哈希/原子消费/重放回滚、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、审计原子回滚和注销失效：
 
 ```bash
 make test-integration

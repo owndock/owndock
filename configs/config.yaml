@@ -3,6 +3,18 @@ server:
     address: 0.0.0.0:8000
     timeout: 30s
     shutdown_timeout: 15s
+  agent:
+    enabled: false
+    address: 0.0.0.0:8443
+    server_certificate_env: OWNDOCK_AGENT_SERVER_CERT_PEM
+    server_private_key_env: OWNDOCK_AGENT_SERVER_KEY_PEM
+    handshake_timeout: 10s
+    heartbeat_interval: 10s
+    heartbeat_timeout: 30s
+    max_frame_bytes: 65536
+    outbound_buffer: 32
+    completed_command_cache: 256
+    protocol_versions: [v1]
 
 observability:
   tracing:
@@ -17,9 +29,22 @@ development:
 product:
   enabled: false
 
+runtime:
+  deployment_worker:
+    enabled: false
+    poll_interval: 2s
+    lease_duration: 30s
+    operation_timeout: 10m
+
 security:
   bootstrap_token_env: OWNDOCK_BOOTSTRAP_TOKEN
   session_ttl: 24h
+  agent_pki:
+    enabled: false
+    ca_certificate_env: OWNDOCK_AGENT_CA_CERT_PEM
+    ca_private_key_env: OWNDOCK_AGENT_CA_KEY_PEM
+    enrollment_ttl: 15m
+    certificate_ttl: 720h
 
 database:
   mongo:

@@ -6,6 +6,9 @@ const (
 	AuditActionCancel    = "deployment.cancel"
 	AuditActionRetry     = "deployment.retry"
 	AuditActionRollback  = "deployment.rollback"
+	AuditActionPreparing = "deployment.preparing"
+	AuditActionDeploying = "deployment.deploying"
 	AuditActionSucceeded = "deployment.succeeded"
 	AuditActionFailed    = "deployment.failed"
+	AuditActionCanceled  = "deployment.canceled"
 )

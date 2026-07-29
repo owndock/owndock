@@ -22,11 +22,14 @@ import (
 	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	identitybiz "github.com/owndock/owndock/internal/modules/identity/biz"
 	identityservice "github.com/owndock/owndock/internal/modules/identity/service"
+	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
+	managedhostservice "github.com/owndock/owndock/internal/modules/managedhost/service"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
 	"github.com/owndock/owndock/internal/platform/observability"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/transaction"
 )
 
@@ -52,11 +55,25 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		return "bootstrap-secret", nil
 	})
 	controlStore := &contractControlStore{}
-	controlHTTP := controlplaneservice.NewHTTP(controlplanebiz.NewUseCaseWithEnvironment(
-		controlStore, controlStore, controlStore, controlStore, controlStore,
+	managedHostStore := &contractManagedHostStore{}
+	controlUseCase := controlplanebiz.NewUseCaseWithResources(
+		controlStore, controlStore, controlStore, controlStore, controlStore, controlStore,
 		transaction.Passthrough{}, audits, audits, newID, now,
+	).WithManagedHosts(managedHostStore).
+		WithRuntimeTargetProbe(controlStore, contractRuntimeTargetProber{})
+	controlHTTP := controlplaneservice.NewHTTP(controlUseCase)
+	managedHostHTTP := managedhostservice.NewHTTP(managedhostbiz.NewUseCase(
+		managedHostStore, transaction.Passthrough{}, audits, newID, now,
 	))
-	productAPI, err := NewProductAPI(identityHTTP, controlHTTP, identityHTTP.Authenticate)
+	formalDeploymentHTTP := deploymentservice.NewHTTP(
+		deploymentbiz.NewUseCase(deploymentdata.NewMemoryRepository(), nil, nil, newID, now).
+			WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlStore)).
+			WithFormalSecurity(transaction.Passthrough{}, audits),
+	)
+	productAPI, err := NewProductAPIWithDeploymentAndManagedHost(
+		identityHTTP, controlHTTP, http.HandlerFunc(formalDeploymentHTTP.HandleFormal),
+		managedHostHTTP, identityHTTP.Authenticate,
+	)
 	if err != nil {
 		t.Fatalf("NewProductAPI() error = %v", err)
 	}
@@ -190,7 +207,83 @@ type contractControlStore struct {
 	applications []controlplanebiz.Application
 	releases     []controlplanebiz.Release
 	targets      []controlplanebiz.RuntimeTarget
+	registries   []controlplanebiz.RegistryCredential
 	environments []controlplanebiz.Environment
+}
+
+type contractRuntimeTargetProber struct{}
+
+type contractManagedHostStore struct {
+	items []managedhostbiz.ManagedHost
+}
+
+func (s *contractManagedHostStore) List(
+	_ context.Context,
+	organizationID string,
+) ([]managedhostbiz.ManagedHost, error) {
+	var result []managedhostbiz.ManagedHost
+	for _, item := range s.items {
+		if item.OrganizationID == organizationID {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func (s *contractManagedHostStore) Get(
+	_ context.Context,
+	organizationID, hostID string,
+) (managedhostbiz.ManagedHost, error) {
+	for _, item := range s.items {
+		if item.OrganizationID == organizationID && item.ID == hostID {
+			return item, nil
+		}
+	}
+	return managedhostbiz.ManagedHost{}, managedhostbiz.ErrNotFound
+}
+
+func (s *contractManagedHostStore) Create(
+	_ context.Context,
+	item managedhostbiz.ManagedHost,
+) (managedhostbiz.ManagedHost, error) {
+	s.items = append(s.items, item)
+	return item, nil
+}
+
+func (s *contractManagedHostStore) Disable(
+	_ context.Context,
+	organizationID, hostID string,
+	now time.Time,
+) (managedhostbiz.ManagedHost, error) {
+	for index := range s.items {
+		if s.items[index].OrganizationID == organizationID &&
+			s.items[index].ID == hostID {
+			s.items[index].Status = managedhostbiz.StatusDisabled
+			s.items[index].AgentBootID = ""
+			s.items[index].AgentSessionID = ""
+			s.items[index].UpdatedAt = now
+			return s.items[index], nil
+		}
+	}
+	return managedhostbiz.ManagedHost{}, managedhostbiz.ErrNotFound
+}
+
+func (s *contractManagedHostStore) ConnectionMode(
+	ctx context.Context,
+	organizationID, hostID string,
+) (runtimeaccess.Mode, bool, error) {
+	item, err := s.Get(ctx, organizationID, hostID)
+	if err == managedhostbiz.ErrNotFound {
+		return "", false, nil
+	}
+	return item.ConnectionMode, err == nil, err
+}
+
+func (contractRuntimeTargetProber) ProbeRuntimeTarget(
+	context.Context,
+	controlplanebiz.RuntimeTarget,
+) controlplanebiz.RuntimeTargetStatus {
+	return controlplanebiz.RuntimeTargetStatusReady
 }
 
 func (s *contractControlStore) ListProjects(_ context.Context, organizationID string) ([]controlplanebiz.Project, error) {
@@ -256,6 +349,15 @@ func (s *contractControlStore) CreateRelease(_ context.Context, item controlplan
 	return item, nil
 }
 
+func (s *contractControlStore) ReleaseExists(_ context.Context, projectID, applicationID, releaseID string) (bool, error) {
+	for _, item := range s.releases {
+		if item.ID == releaseID && item.ProjectID == projectID && item.ApplicationID == applicationID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *contractControlStore) ListRuntimeTargets(_ context.Context, projectID string) ([]controlplanebiz.RuntimeTarget, error) {
 	var result []controlplanebiz.RuntimeTarget
 	for _, item := range s.targets {
@@ -274,6 +376,85 @@ func (s *contractControlStore) CreateRuntimeTarget(
 	return item, nil
 }
 
+func (s *contractControlStore) RuntimeTargetExists(_ context.Context, projectID, targetID string) (bool, error) {
+	for _, item := range s.targets {
+		if item.ID == targetID && item.ProjectID == projectID {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *contractControlStore) RuntimeTargetReady(_ context.Context, projectID, targetID string) (bool, error) {
+	for _, item := range s.targets {
+		if item.ID == targetID && item.ProjectID == projectID {
+			return item.Status == controlplanebiz.RuntimeTargetStatusReady, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *contractControlStore) GetRuntimeTarget(
+	_ context.Context,
+	projectID, targetID string,
+) (controlplanebiz.RuntimeTarget, error) {
+	for _, item := range s.targets {
+		if item.ID == targetID && item.ProjectID == projectID {
+			return item, nil
+		}
+	}
+	return controlplanebiz.RuntimeTarget{}, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) UpdateRuntimeTargetProbe(
+	_ context.Context,
+	projectID, targetID string,
+	status controlplanebiz.RuntimeTargetStatus,
+	probedAt time.Time,
+) (controlplanebiz.RuntimeTarget, error) {
+	for i := range s.targets {
+		if s.targets[i].ID == targetID && s.targets[i].ProjectID == projectID {
+			s.targets[i].Status = status
+			s.targets[i].LastProbedAt = probedAt
+			return s.targets[i], nil
+		}
+	}
+	return controlplanebiz.RuntimeTarget{}, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) ListRegistryCredentials(
+	_ context.Context,
+	projectID string,
+) ([]controlplanebiz.RegistryCredential, error) {
+	var result []controlplanebiz.RegistryCredential
+	for _, item := range s.registries {
+		if item.ProjectID == projectID {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func (s *contractControlStore) CreateRegistryCredential(
+	_ context.Context,
+	item controlplanebiz.RegistryCredential,
+) (controlplanebiz.RegistryCredential, error) {
+	s.registries = append(s.registries, item)
+	return item, nil
+}
+
+func (s *contractControlStore) GetRegistryCredential(
+	_ context.Context,
+	projectID, credentialID string,
+) (controlplanebiz.RegistryCredential, error) {
+	for _, item := range s.registries {
+		if item.ID == credentialID && item.ProjectID == projectID {
+			return item, nil
+		}
+	}
+	return controlplanebiz.RegistryCredential{}, controlplanebiz.ErrNotFound
+}
+
 func (s *contractControlStore) ListEnvironments(_ context.Context, projectID string) ([]controlplanebiz.Environment, error) {
 	var result []controlplanebiz.Environment
 	for _, item := range s.environments {
@@ -287,4 +468,13 @@ func (s *contractControlStore) ListEnvironments(_ context.Context, projectID str
 func (s *contractControlStore) CreateEnvironment(_ context.Context, item controlplanebiz.Environment) (controlplanebiz.Environment, error) {
 	s.environments = append(s.environments, item)
 	return item, nil
+}
+
+func (s *contractControlStore) EnvironmentExists(_ context.Context, projectID, environmentID string) (bool, error) {
+	for _, item := range s.environments {
+		if item.ID == environmentID && item.ProjectID == projectID {
+			return true, nil
+		}
+	}
+	return false, nil
 }

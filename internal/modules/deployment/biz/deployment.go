@@ -9,6 +9,7 @@ import (
 
 var (
 	ErrInvalidApplication    = errors.New("application id is required")
+	ErrInvalidProject        = errors.New("project id is required")
 	ErrInvalidEnvironment    = errors.New("environment id is required")
 	ErrInvalidTransition     = errors.New("invalid deployment status transition")
 	ErrInvalidLease          = errors.New("invalid deployment lease")
@@ -19,26 +20,44 @@ var (
 	ErrLeaseExpired          = errors.New("deployment lease expired")
 	ErrApplicationNotFound   = errors.New("application not found")
 	ErrEnvironmentNotFound   = errors.New("environment not found")
+	ErrReleaseNotFound       = errors.New("release not found")
+	ErrRuntimeTargetNotFound = errors.New("runtime target not found")
+	ErrRuntimeTargetNotReady = errors.New("runtime target is not ready")
+	ErrReferenceLookup       = errors.New("formal deployment reference lookup is required")
+	ErrFormalSecurity        = errors.New("formal deployment transaction and audit are required")
 	ErrInvalidRelease        = errors.New("release id is required")
 	ErrInvalidRuntimeTarget  = errors.New("runtime target id is required")
 	ErrInvalidIdempotencyKey = errors.New("idempotency key is required")
+	ErrIdempotencyMismatch   = errors.New("idempotency key was used with different deployment references")
+	ErrRetryRequiresFailed   = errors.New("only a failed deployment can be retried")
+	ErrRollbackRequiresFinal = errors.New("only a completed deployment can be rolled back")
+	ErrRollbackSameRelease   = errors.New("rollback release must differ from the source release")
+	ErrRollbackNotSucceeded  = errors.New("rollback release has no successful deployment on the selected target")
+	ErrInvalidFailure        = errors.New("deployment failure category is invalid")
+	ErrStaleExecution        = errors.New("deployment execution lease is stale")
 )
 
 type Status string
+type Operation string
 
 const (
 	StatusQueued    Status = "queued"
-	StatusBuilding  Status = "building"
+	StatusPreparing Status = "preparing"
 	StatusDeploying Status = "deploying"
 	StatusSucceeded Status = "succeeded"
 	StatusFailed    Status = "failed"
 	StatusCanceling Status = "canceling"
 	StatusCanceled  Status = "canceled"
+
+	OperationDeploy   Operation = "deploy"
+	OperationRetry    Operation = "retry"
+	OperationRollback Operation = "rollback"
 )
 
 type Lease struct {
-	Owner     string
-	ExpiresAt time.Time
+	Owner      string
+	ExpiresAt  time.Time
+	Generation uint64
 }
 
 func (l Lease) Active(now time.Time) bool {
@@ -46,23 +65,32 @@ func (l Lease) Active(now time.Time) bool {
 }
 
 type Deployment struct {
-	ID              string
-	ReleaseID       string
-	ApplicationID   string
-	EnvironmentID   string
-	RuntimeTargetID string
-	IdempotencyKey  string
-	Revision        string
-	Status          Status
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
-	Version         uint64
-	Lease           Lease
+	ID                 string
+	OrganizationID     string
+	ProjectID          string
+	ReleaseID          string
+	ApplicationID      string
+	EnvironmentID      string
+	RuntimeTargetID    string
+	IdempotencyKey     string
+	Operation          Operation
+	SourceDeploymentID string
+	Revision           string
+	Status             Status
+	FailureCategory    FailureCategory
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+	Version            uint64
+	Lease              Lease
 }
 
 // NewFormal creates the immutable product deployment reference. Runtime execution
 // may evolve, but these references and the idempotency key never change.
-func NewFormal(id, releaseID, applicationID, environmentID, runtimeTargetID, idempotencyKey string, now time.Time) (Deployment, error) {
+func NewFormal(id, projectID, releaseID, applicationID, environmentID, runtimeTargetID, idempotencyKey string, now time.Time) (Deployment, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return Deployment{}, ErrInvalidProject
+	}
 	if strings.TrimSpace(releaseID) == "" {
 		return Deployment{}, ErrInvalidRelease
 	}
@@ -78,8 +106,10 @@ func NewFormal(id, releaseID, applicationID, environmentID, runtimeTargetID, ide
 		return Deployment{}, err
 	}
 	item.ReleaseID = strings.TrimSpace(releaseID)
+	item.ProjectID = projectID
 	item.RuntimeTargetID = strings.TrimSpace(runtimeTargetID)
 	item.IdempotencyKey = idempotencyKey
+	item.Operation = OperationDeploy
 	return item, nil
 }
 
@@ -97,11 +127,15 @@ func (c Claim) Validate() error {
 }
 
 type Repository interface {
-	List(context.Context, string, string) ([]Deployment, error)
-	GetByIdempotency(context.Context, string) (Deployment, error)
+	List(context.Context, string, string, string) ([]Deployment, error)
+	Get(context.Context, string, string) (Deployment, error)
+	GetByIdempotency(context.Context, string, string) (Deployment, error)
+	HasSucceeded(context.Context, string, string, string, string, string) (bool, error)
 	Create(context.Context, Deployment) (Deployment, error)
+	Save(context.Context, Deployment, uint64) (Deployment, error)
 	ClaimNext(context.Context, Claim) (Deployment, bool, error)
 	SaveClaimed(context.Context, Deployment, uint64, string, time.Time) (Deployment, error)
+	RenewLease(context.Context, string, string, uint64, time.Time, time.Time) (Deployment, error)
 }
 
 type ApplicationLookup interface {
@@ -135,8 +169,8 @@ func New(applicationID, environmentID, revision, id string, now time.Time) (Depl
 }
 
 func (d *Deployment) Transition(next Status, now time.Time) error {
-	valid := (d.Status == StatusQueued && (next == StatusBuilding || next == StatusCanceling)) ||
-		(d.Status == StatusBuilding && (next == StatusDeploying || next == StatusFailed || next == StatusCanceling)) ||
+	valid := (d.Status == StatusQueued && (next == StatusPreparing || next == StatusCanceling)) ||
+		(d.Status == StatusPreparing && (next == StatusDeploying || next == StatusFailed || next == StatusCanceling)) ||
 		(d.Status == StatusDeploying && (next == StatusSucceeded || next == StatusFailed || next == StatusCanceling)) ||
 		(d.Status == StatusCanceling && next == StatusCanceled)
 	if !valid {
@@ -144,9 +178,27 @@ func (d *Deployment) Transition(next Status, now time.Time) error {
 	}
 	d.Status = next
 	d.UpdatedAt = now.UTC()
+	if next == StatusFailed {
+		d.FailureCategory = FailureUnknown
+	} else {
+		d.FailureCategory = ""
+	}
 	if d.Terminal() {
 		d.Lease = Lease{}
 	}
+	return nil
+}
+
+// Fail stores only a stable, safe category. Raw infrastructure errors are
+// deliberately excluded from the domain record and public API.
+func (d *Deployment) Fail(category FailureCategory, now time.Time) error {
+	if !category.Valid() {
+		return ErrInvalidFailure
+	}
+	if err := d.Transition(StatusFailed, now); err != nil {
+		return err
+	}
+	d.FailureCategory = category
 	return nil
 }
 
@@ -162,12 +214,35 @@ func (d *Deployment) Cancel(now time.Time) error {
 // Retry creates a new queued operation while preserving the immutable product
 // references. The caller must provide a fresh idempotency key.
 func (d Deployment) Retry(newID, idempotencyKey string, now time.Time) (Deployment, error) {
-	return NewFormal(newID, d.ReleaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+	if d.Status != StatusFailed {
+		return Deployment{}, ErrRetryRequiresFailed
+	}
+	item, err := NewFormal(newID, d.ProjectID, d.ReleaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+	if err != nil {
+		return Deployment{}, err
+	}
+	item.Operation = OperationRetry
+	item.OrganizationID = d.OrganizationID
+	item.SourceDeploymentID = d.ID
+	return item, nil
 }
 
 // Rollback creates a new queued operation targeting a previously known release.
 func (d Deployment) Rollback(newID, releaseID, idempotencyKey string, now time.Time) (Deployment, error) {
-	return NewFormal(newID, releaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+	if !d.Terminal() {
+		return Deployment{}, ErrRollbackRequiresFinal
+	}
+	if strings.TrimSpace(releaseID) == d.ReleaseID {
+		return Deployment{}, ErrRollbackSameRelease
+	}
+	item, err := NewFormal(newID, d.ProjectID, releaseID, d.ApplicationID, d.EnvironmentID, d.RuntimeTargetID, idempotencyKey, now)
+	if err != nil {
+		return Deployment{}, err
+	}
+	item.Operation = OperationRollback
+	item.OrganizationID = d.OrganizationID
+	item.SourceDeploymentID = d.ID
+	return item, nil
 }
 
 func (d *Deployment) Acquire(claim Claim) error {
@@ -176,10 +251,16 @@ func (d *Deployment) Acquire(claim Claim) error {
 	}
 	switch d.Status {
 	case StatusQueued:
-		if err := d.Transition(StatusBuilding, claim.Now); err != nil {
-			return err
+		if d.Lease.Active(claim.Now) {
+			return ErrNotClaimable
 		}
-	case StatusBuilding, StatusDeploying:
+		d.UpdatedAt = claim.Now.UTC()
+	case StatusPreparing, StatusDeploying:
+		if d.Lease.Active(claim.Now) {
+			return ErrNotClaimable
+		}
+		d.UpdatedAt = claim.Now.UTC()
+	case StatusCanceling:
 		if d.Lease.Active(claim.Now) {
 			return ErrNotClaimable
 		}
@@ -187,7 +268,10 @@ func (d *Deployment) Acquire(claim Claim) error {
 	default:
 		return ErrNotClaimable
 	}
-	d.Lease = Lease{Owner: strings.TrimSpace(claim.WorkerID), ExpiresAt: claim.ExpiresAt.UTC()}
+	d.Lease = Lease{
+		Owner: strings.TrimSpace(claim.WorkerID), ExpiresAt: claim.ExpiresAt.UTC(),
+		Generation: d.Lease.Generation + 1,
+	}
 	return nil
 }
 

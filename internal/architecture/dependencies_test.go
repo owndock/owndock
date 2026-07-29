@@ -89,6 +89,7 @@ func checkImport(t *testing.T, file, imported string) {
 		"github.com/go-kratos/kratos/",
 		"go.mongodb.org/mongo-driver/",
 		"github.com/docker/docker/",
+		"github.com/moby/moby/",
 	} {
 		if strings.HasPrefix(imported, forbidden) {
 			t.Errorf("%s: biz packages must not import infrastructure package %s", file, imported)

@@ -37,13 +37,18 @@ const (
 	PermissionApplicationWrite   Permission = "application.write"
 	PermissionReleaseRead        Permission = "release.read"
 	PermissionReleaseCreate      Permission = "release.create"
+	PermissionManagedHostRead    Permission = "managed_host.read"
+	PermissionManagedHostWrite   Permission = "managed_host.write"
 	PermissionRuntimeTargetRead  Permission = "runtime_target.read"
 	PermissionRuntimeTargetWrite Permission = "runtime_target.write"
+	PermissionRegistryRead       Permission = "registry.read"
+	PermissionRegistryWrite      Permission = "registry.write"
 	PermissionEnvironmentRead    Permission = "environment.read"
 	PermissionEnvironmentWrite   Permission = "environment.write"
 	PermissionDeploymentRead     Permission = "deployment.read"
 	PermissionDeploymentCreate   Permission = "deployment.create"
 	PermissionDeploymentCancel   Permission = "deployment.cancel"
+	PermissionDeploymentRollback Permission = "deployment.rollback"
 	PermissionAuditRead          Permission = "audit.read"
 	PermissionOrganizationManage Permission = "organization.manage"
 )
@@ -75,11 +80,13 @@ func allowed(role Role, permission Permission) bool {
 		return true
 	}
 	switch permission {
-	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead, PermissionRuntimeTargetRead, PermissionEnvironmentRead, PermissionDeploymentRead:
+	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead, PermissionRuntimeTargetRead, PermissionRegistryRead, PermissionEnvironmentRead, PermissionDeploymentRead:
 		return role == RoleMaintainer || role == RoleDeveloper || role == RoleViewer
-	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionDeploymentCreate:
+	case PermissionManagedHostRead:
+		return role == RoleMaintainer
+	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionDeploymentCreate, PermissionDeploymentCancel:
 		return role == RoleMaintainer || role == RoleDeveloper
-	case PermissionRuntimeTargetWrite, PermissionEnvironmentWrite, PermissionDeploymentCancel, PermissionAuditRead:
+	case PermissionRuntimeTargetWrite, PermissionRegistryWrite, PermissionEnvironmentWrite, PermissionDeploymentRollback, PermissionAuditRead:
 		return role == RoleMaintainer
 	case PermissionProjectCreate, PermissionOrganizationManage:
 		return false

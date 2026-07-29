@@ -13,17 +13,33 @@ import (
 )
 
 const (
-	defaultHTTPTimeout       = 30 * time.Second
-	defaultShutdownTimeout   = 15 * time.Second
-	defaultTraceSampleRatio  = 1.0
-	defaultMongoURIEnv       = "OWNDOCK_MONGODB_URI"
-	defaultMongoDatabase     = "owndock"
-	defaultMongoConnect      = 10 * time.Second
-	defaultMongoOperation    = 5 * time.Second
-	defaultMongoMaxIdle      = 5 * time.Minute
-	defaultMongoMaxPoolSize  = 100
-	defaultBootstrapTokenEnv = "OWNDOCK_BOOTSTRAP_TOKEN"
-	defaultSessionTTL        = 24 * time.Hour
+	defaultHTTPTimeout           = 30 * time.Second
+	defaultShutdownTimeout       = 15 * time.Second
+	defaultTraceSampleRatio      = 1.0
+	defaultMongoURIEnv           = "OWNDOCK_MONGODB_URI"
+	defaultMongoDatabase         = "owndock"
+	defaultMongoConnect          = 10 * time.Second
+	defaultMongoOperation        = 5 * time.Second
+	defaultMongoMaxIdle          = 5 * time.Minute
+	defaultMongoMaxPoolSize      = 100
+	defaultBootstrapTokenEnv     = "OWNDOCK_BOOTSTRAP_TOKEN"
+	defaultSessionTTL            = 24 * time.Hour
+	defaultWorkerPoll            = 2 * time.Second
+	defaultWorkerLease           = 30 * time.Second
+	defaultWorkerOperation       = 10 * time.Minute
+	defaultAgentCACertEnv        = "OWNDOCK_AGENT_CA_CERT_PEM"
+	defaultAgentCAKeyEnv         = "OWNDOCK_AGENT_CA_KEY_PEM"
+	defaultEnrollmentTTL         = 15 * time.Minute
+	defaultAgentCertTTL          = 30 * 24 * time.Hour
+	defaultAgentAddress          = "0.0.0.0:8443"
+	defaultAgentServerCertEnv    = "OWNDOCK_AGENT_SERVER_CERT_PEM"
+	defaultAgentServerKeyEnv     = "OWNDOCK_AGENT_SERVER_KEY_PEM"
+	defaultAgentHandshake        = 10 * time.Second
+	defaultAgentHeartbeat        = 10 * time.Second
+	defaultAgentHeartbeatTimeout = 30 * time.Second
+	defaultAgentMaxFrameBytes    = 64 * 1024
+	defaultAgentOutboundBuffer   = 32
+	defaultAgentCompletedCache   = 256
 )
 
 // Config is the process configuration root. Keep transport and infrastructure
@@ -34,17 +50,33 @@ type Config struct {
 	Development   Development   `json:"development"`
 	Database      Database      `json:"database"`
 	Product       Product       `json:"product"`
+	Runtime       Runtime       `json:"runtime"`
 	Security      Security      `json:"security"`
 }
 
 type Server struct {
-	HTTP HTTP `json:"http"`
+	HTTP  HTTP  `json:"http"`
+	Agent Agent `json:"agent"`
 }
 
 type HTTP struct {
 	Address         string `json:"address"`
 	Timeout         string `json:"timeout"`
 	ShutdownTimeout string `json:"shutdown_timeout"`
+}
+
+type Agent struct {
+	Enabled               bool     `json:"enabled"`
+	Address               string   `json:"address"`
+	ServerCertificateEnv  string   `json:"server_certificate_env"`
+	ServerPrivateKeyEnv   string   `json:"server_private_key_env"`
+	HandshakeTimeout      string   `json:"handshake_timeout"`
+	HeartbeatInterval     string   `json:"heartbeat_interval"`
+	HeartbeatTimeout      string   `json:"heartbeat_timeout"`
+	MaxFrameBytes         int      `json:"max_frame_bytes"`
+	OutboundBuffer        int      `json:"outbound_buffer"`
+	CompletedCommandCache int      `json:"completed_command_cache"`
+	ProtocolVersions      []string `json:"protocol_versions"`
 }
 
 type Observability struct {
@@ -68,9 +100,29 @@ type Product struct {
 	Enabled bool `json:"enabled"`
 }
 
+type Runtime struct {
+	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
+}
+
+type DeploymentWorker struct {
+	Enabled          bool   `json:"enabled"`
+	PollInterval     string `json:"poll_interval"`
+	LeaseDuration    string `json:"lease_duration"`
+	OperationTimeout string `json:"operation_timeout"`
+}
+
 type Security struct {
-	BootstrapTokenEnv string `json:"bootstrap_token_env"`
-	SessionTTL        string `json:"session_ttl"`
+	BootstrapTokenEnv string   `json:"bootstrap_token_env"`
+	SessionTTL        string   `json:"session_ttl"`
+	AgentPKI          AgentPKI `json:"agent_pki"`
+}
+
+type AgentPKI struct {
+	Enabled          bool   `json:"enabled"`
+	CACertificateEnv string `json:"ca_certificate_env"`
+	CAPrivateKeyEnv  string `json:"ca_private_key_env"`
+	EnrollmentTTL    string `json:"enrollment_ttl"`
+	CertificateTTL   string `json:"certificate_ttl"`
 }
 
 type Database struct {
@@ -97,6 +149,18 @@ func Load(path string) (Config, error) {
 	}
 
 	cfg := Config{
+		Server: Server{Agent: Agent{
+			Address:               defaultAgentAddress,
+			ServerCertificateEnv:  defaultAgentServerCertEnv,
+			ServerPrivateKeyEnv:   defaultAgentServerKeyEnv,
+			HandshakeTimeout:      defaultAgentHandshake.String(),
+			HeartbeatInterval:     defaultAgentHeartbeat.String(),
+			HeartbeatTimeout:      defaultAgentHeartbeatTimeout.String(),
+			MaxFrameBytes:         defaultAgentMaxFrameBytes,
+			OutboundBuffer:        defaultAgentOutboundBuffer,
+			CompletedCommandCache: defaultAgentCompletedCache,
+			ProtocolVersions:      []string{"v1"},
+		}},
 		Observability: Observability{
 			Tracing: Tracing{SampleRatio: defaultTraceSampleRatio},
 		},
@@ -113,7 +177,18 @@ func Load(path string) (Config, error) {
 		Security: Security{
 			BootstrapTokenEnv: defaultBootstrapTokenEnv,
 			SessionTTL:        defaultSessionTTL.String(),
+			AgentPKI: AgentPKI{
+				CACertificateEnv: defaultAgentCACertEnv,
+				CAPrivateKeyEnv:  defaultAgentCAKeyEnv,
+				EnrollmentTTL:    defaultEnrollmentTTL.String(),
+				CertificateTTL:   defaultAgentCertTTL.String(),
+			},
 		},
+		Runtime: Runtime{DeploymentWorker: DeploymentWorker{
+			PollInterval:     defaultWorkerPoll.String(),
+			LeaseDuration:    defaultWorkerLease.String(),
+			OperationTimeout: defaultWorkerOperation.String(),
+		}},
 	}
 	if err := c.Scan(&cfg); err != nil {
 		return Config{}, fmt.Errorf("scan config: %w", err)
@@ -134,6 +209,13 @@ func (c Config) Validate() error {
 	if _, err := c.Server.HTTP.ShutdownTimeoutDuration(); err != nil {
 		return fmt.Errorf("server.http.shutdown_timeout: %w", err)
 	}
+	if err := c.Server.Agent.Validate(
+		c.Product.Enabled,
+		c.Database.Mongo.Enabled,
+		c.Security.AgentPKI.Enabled,
+	); err != nil {
+		return fmt.Errorf("server.agent: %w", err)
+	}
 	if err := c.Observability.Tracing.Validate(); err != nil {
 		return fmt.Errorf("observability.tracing: %w", err)
 	}
@@ -146,7 +228,121 @@ func (c Config) Validate() error {
 	if c.Product.Enabled && !c.Database.Mongo.Enabled {
 		return fmt.Errorf("product.enabled requires database.mongo.enabled")
 	}
+	if err := c.Runtime.DeploymentWorker.Validate(c.Product.Enabled, c.Database.Mongo.Enabled); err != nil {
+		return fmt.Errorf("runtime.deployment_worker: %w", err)
+	}
 	return nil
+}
+
+func (a Agent) Validate(productEnabled, mongoEnabled, agentPKIEnabled bool) error {
+	if !a.Enabled {
+		return nil
+	}
+	if !productEnabled || !mongoEnabled || !agentPKIEnabled {
+		return fmt.Errorf("enabled Agent server requires product, MongoDB, and Agent PKI")
+	}
+	if strings.TrimSpace(a.Address) == "" {
+		return fmt.Errorf("address is required when enabled")
+	}
+	if strings.TrimSpace(a.ServerCertificateEnv) == "" ||
+		strings.TrimSpace(a.ServerPrivateKeyEnv) == "" {
+		return fmt.Errorf("server certificate and private key environment names are required")
+	}
+	handshakeTimeout, err := a.HandshakeTimeoutDuration()
+	if err != nil {
+		return fmt.Errorf("handshake_timeout: %w", err)
+	}
+	heartbeatInterval, err := a.HeartbeatIntervalDuration()
+	if err != nil {
+		return fmt.Errorf("heartbeat_interval: %w", err)
+	}
+	heartbeatTimeout, err := a.HeartbeatTimeoutDuration()
+	if err != nil {
+		return fmt.Errorf("heartbeat_timeout: %w", err)
+	}
+	if handshakeTimeout <= 0 || heartbeatInterval <= 0 ||
+		heartbeatTimeout <= heartbeatInterval {
+		return fmt.Errorf("timeouts must be positive and heartbeat_timeout must exceed heartbeat_interval")
+	}
+	if a.MaxFrameBytes < 1024 || a.MaxFrameBytes > 1024*1024 {
+		return fmt.Errorf("max_frame_bytes must be between 1024 and 1048576")
+	}
+	if a.OutboundBuffer < 1 || a.OutboundBuffer > 1024 {
+		return fmt.Errorf("outbound_buffer must be between 1 and 1024")
+	}
+	if a.CompletedCommandCache < 1 || a.CompletedCommandCache > 4096 {
+		return fmt.Errorf("completed_command_cache must be between 1 and 4096")
+	}
+	if len(a.ProtocolVersions) == 0 {
+		return fmt.Errorf("at least one protocol version is required")
+	}
+	seen := make(map[string]struct{}, len(a.ProtocolVersions))
+	for _, version := range a.ProtocolVersions {
+		version = strings.TrimSpace(version)
+		if version == "" {
+			return fmt.Errorf("protocol versions must not be empty")
+		}
+		if _, exists := seen[version]; exists {
+			return fmt.Errorf("protocol versions must be unique")
+		}
+		seen[version] = struct{}{}
+	}
+	return nil
+}
+
+func (a Agent) HandshakeTimeoutDuration() (time.Duration, error) {
+	return parseDuration(a.HandshakeTimeout, defaultAgentHandshake)
+}
+
+func (a Agent) HeartbeatIntervalDuration() (time.Duration, error) {
+	return parseDuration(a.HeartbeatInterval, defaultAgentHeartbeat)
+}
+
+func (a Agent) HeartbeatTimeoutDuration() (time.Duration, error) {
+	return parseDuration(a.HeartbeatTimeout, defaultAgentHeartbeatTimeout)
+}
+
+func (a Agent) Materials() ([]byte, []byte, error) {
+	certificate, err := requiredEnvironmentValue(a.ServerCertificateEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	privateKey, err := requiredEnvironmentValue(a.ServerPrivateKeyEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []byte(certificate), []byte(privateKey), nil
+}
+
+func (w DeploymentWorker) Validate(productEnabled, mongoEnabled bool) error {
+	if !w.Enabled {
+		return nil
+	}
+	if !productEnabled || !mongoEnabled {
+		return fmt.Errorf("enabled worker requires product and MongoDB")
+	}
+	if _, err := w.PollIntervalDuration(); err != nil {
+		return fmt.Errorf("poll_interval: %w", err)
+	}
+	if _, err := w.LeaseDurationValue(); err != nil {
+		return fmt.Errorf("lease_duration: %w", err)
+	}
+	if _, err := w.OperationTimeoutDuration(); err != nil {
+		return fmt.Errorf("operation_timeout: %w", err)
+	}
+	return nil
+}
+
+func (w DeploymentWorker) PollIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.PollInterval, defaultWorkerPoll)
+}
+
+func (w DeploymentWorker) LeaseDurationValue() (time.Duration, error) {
+	return parseDuration(w.LeaseDuration, defaultWorkerLease)
+}
+
+func (w DeploymentWorker) OperationTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.OperationTimeout, defaultWorkerOperation)
 }
 
 func (m Mongo) Validate() error {
@@ -211,7 +407,54 @@ func (s Security) Validate(productEnabled bool) error {
 	if _, err := s.SessionTTLDuration(); err != nil {
 		return fmt.Errorf("session_ttl: %w", err)
 	}
+	if err := s.AgentPKI.Validate(); err != nil {
+		return fmt.Errorf("agent_pki: %w", err)
+	}
 	return nil
+}
+
+func (p AgentPKI) Validate() error {
+	if !p.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(p.CACertificateEnv) == "" {
+		return fmt.Errorf("ca_certificate_env is required when enabled")
+	}
+	if strings.TrimSpace(p.CAPrivateKeyEnv) == "" {
+		return fmt.Errorf("ca_private_key_env is required when enabled")
+	}
+	enrollmentTTL, err := p.EnrollmentTTLDuration()
+	if err != nil {
+		return fmt.Errorf("enrollment_ttl: %w", err)
+	}
+	certificateTTL, err := p.CertificateTTLDuration()
+	if err != nil {
+		return fmt.Errorf("certificate_ttl: %w", err)
+	}
+	if certificateTTL <= enrollmentTTL {
+		return fmt.Errorf("certificate_ttl must be greater than enrollment_ttl")
+	}
+	return nil
+}
+
+func (p AgentPKI) EnrollmentTTLDuration() (time.Duration, error) {
+	return parseDuration(p.EnrollmentTTL, defaultEnrollmentTTL)
+}
+
+func (p AgentPKI) CertificateTTLDuration() (time.Duration, error) {
+	return parseDuration(p.CertificateTTL, defaultAgentCertTTL)
+}
+
+func (p AgentPKI) Materials() ([]byte, []byte, error) {
+	certificate, err := requiredEnvironmentValue(p.CACertificateEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	privateKey, err := requiredEnvironmentValue(p.CAPrivateKeyEnv)
+	if err != nil {
+		return nil, nil, err
+	}
+	return []byte(certificate), []byte(privateKey), nil
 }
 
 func (s Security) SessionTTLDuration() (time.Duration, error) {
@@ -228,6 +471,18 @@ func (s Security) BootstrapToken() (string, error) {
 		return "", fmt.Errorf("environment variable %s is required for bootstrap", name)
 	}
 	return strings.TrimSpace(value), nil
+}
+
+func requiredEnvironmentValue(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", fmt.Errorf("environment variable name is required")
+	}
+	value, ok := os.LookupEnv(name)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("environment variable %s is required", name)
+	}
+	return value, nil
 }
 
 func (t Tracing) Validate() error {

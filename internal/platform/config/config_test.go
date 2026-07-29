@@ -89,6 +89,21 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if cfg.Product.Enabled {
 		t.Fatal("product API must be disabled by default")
 	}
+	if cfg.Runtime.DeploymentWorker.Enabled {
+		t.Fatal("deployment worker must be disabled by default")
+	}
+	if cfg.Server.Agent.Enabled ||
+		cfg.Server.Agent.Address != defaultAgentAddress ||
+		cfg.Server.Agent.MaxFrameBytes != defaultAgentMaxFrameBytes ||
+		cfg.Server.Agent.OutboundBuffer != defaultAgentOutboundBuffer ||
+		cfg.Server.Agent.CompletedCommandCache != defaultAgentCompletedCache ||
+		len(cfg.Server.Agent.ProtocolVersions) != 1 ||
+		cfg.Server.Agent.ProtocolVersions[0] != "v1" {
+		t.Fatalf("Agent server defaults = %+v", cfg.Server.Agent)
+	}
+	if duration, err := cfg.Runtime.DeploymentWorker.LeaseDurationValue(); err != nil || duration != defaultWorkerLease {
+		t.Fatalf("worker lease duration = %v, %v", duration, err)
+	}
 	if cfg.Security.BootstrapTokenEnv != defaultBootstrapTokenEnv {
 		t.Fatalf("bootstrap token env = %q, want %q", cfg.Security.BootstrapTokenEnv, defaultBootstrapTokenEnv)
 	}
@@ -96,10 +111,92 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if err != nil || sessionTTL != defaultSessionTTL {
 		t.Fatalf("session TTL = %v, %v; want %v", sessionTTL, err, defaultSessionTTL)
 	}
+	if cfg.Security.AgentPKI.Enabled ||
+		cfg.Security.AgentPKI.CACertificateEnv != defaultAgentCACertEnv ||
+		cfg.Security.AgentPKI.CAPrivateKeyEnv != defaultAgentCAKeyEnv {
+		t.Fatalf("Agent PKI defaults = %+v", cfg.Security.AgentPKI)
+	}
 	if cfg.Database.Mongo.URIEnv != defaultMongoURIEnv ||
 		cfg.Database.Mongo.Database != defaultMongoDatabase ||
 		cfg.Database.Mongo.MaxPoolSize != defaultMongoMaxPoolSize {
 		t.Fatalf("MongoDB defaults = %+v", cfg.Database.Mongo)
+	}
+}
+
+func TestAgentPKIValidationAndMaterialLoading(t *testing.T) {
+	pki := AgentPKI{
+		Enabled:          true,
+		CACertificateEnv: "TEST_AGENT_CA_CERT",
+		CAPrivateKeyEnv:  "TEST_AGENT_CA_KEY",
+		EnrollmentTTL:    "15m",
+		CertificateTTL:   "720h",
+	}
+	if err := pki.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_AGENT_CA_CERT", "certificate")
+	t.Setenv("TEST_AGENT_CA_KEY", "private-key")
+	certificate, privateKey, err := pki.Materials()
+	if err != nil || string(certificate) != "certificate" ||
+		string(privateKey) != "private-key" {
+		t.Fatalf("materials = %q %q, error = %v", certificate, privateKey, err)
+	}
+	pki.CertificateTTL = "5m"
+	if err := pki.Validate(); err == nil {
+		t.Fatal("Agent PKI accepted certificate TTL shorter than enrollment TTL")
+	}
+}
+
+func TestAgentServerValidationAndMaterialLoading(t *testing.T) {
+	agent := Agent{
+		Enabled: true, Address: "127.0.0.1:8443",
+		ServerCertificateEnv: "TEST_AGENT_SERVER_CERT",
+		ServerPrivateKeyEnv:  "TEST_AGENT_SERVER_KEY",
+		HandshakeTimeout:     "5s", HeartbeatInterval: "10s",
+		HeartbeatTimeout: "30s", MaxFrameBytes: 65536,
+		OutboundBuffer: 32, CompletedCommandCache: 256,
+		ProtocolVersions: []string{"v1", "v1.1"},
+	}
+	if err := agent.Validate(true, true, true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TEST_AGENT_SERVER_CERT", "certificate")
+	t.Setenv("TEST_AGENT_SERVER_KEY", "private-key")
+	certificate, privateKey, err := agent.Materials()
+	if err != nil || string(certificate) != "certificate" ||
+		string(privateKey) != "private-key" {
+		t.Fatalf("materials = %q %q, error = %v", certificate, privateKey, err)
+	}
+	if err := agent.Validate(false, true, true); err == nil {
+		t.Fatal("Agent server accepted disabled product")
+	}
+	agent.HeartbeatTimeout = "5s"
+	if err := agent.Validate(true, true, true); err == nil {
+		t.Fatal("Agent server accepted heartbeat timeout shorter than interval")
+	}
+	agent.HeartbeatTimeout = "30s"
+	agent.OutboundBuffer = 0
+	if err := agent.Validate(true, true, true); err == nil {
+		t.Fatal("Agent server accepted an empty outbound buffer")
+	}
+}
+
+func TestDeploymentWorkerRequiresProductAndMongoDB(t *testing.T) {
+	worker := DeploymentWorker{
+		Enabled: true, PollInterval: "1s", LeaseDuration: "30s", OperationTimeout: "5m",
+	}
+	if err := worker.Validate(false, true); err == nil {
+		t.Fatal("worker accepted disabled product")
+	}
+	if err := worker.Validate(true, false); err == nil {
+		t.Fatal("worker accepted disabled MongoDB")
+	}
+	if err := worker.Validate(true, true); err != nil {
+		t.Fatalf("valid worker error = %v", err)
+	}
+	worker.PollInterval = "invalid"
+	if err := worker.Validate(true, true); err == nil {
+		t.Fatal("worker accepted invalid poll interval")
 	}
 }
 

@@ -1,36 +1,82 @@
 package data
 
-import "context"
+import (
+	"context"
 
-// ScopedReferenceStore is the narrow control-plane surface needed by formal
-// deployments. It deliberately exposes existence checks only.
+	"github.com/owndock/owndock/internal/modules/deployment/biz"
+)
+
+// ScopedReferenceStore is the narrow control-plane surface required to prove
+// that every deployment reference belongs to one Project.
 type ScopedReferenceStore interface {
-	ReleaseExists(context.Context, string, string) (bool, error)
+	ProjectExists(context.Context, string, string) (bool, error)
+	ApplicationExists(context.Context, string, string) (bool, error)
+	EnvironmentExists(context.Context, string, string) (bool, error)
+	ReleaseExists(context.Context, string, string, string) (bool, error)
 	RuntimeTargetExists(context.Context, string, string) (bool, error)
+	RuntimeTargetReady(context.Context, string, string) (bool, error)
 }
 
-type ReleaseLookup struct {
-	store     ScopedReferenceStore
-	projectID string
+type FormalReferenceLookup struct {
+	store ScopedReferenceStore
 }
 
-func NewReleaseLookup(store ScopedReferenceStore, projectID string) *ReleaseLookup {
-	return &ReleaseLookup{store: store, projectID: projectID}
+func NewFormalReferenceLookup(store ScopedReferenceStore) *FormalReferenceLookup {
+	return &FormalReferenceLookup{store: store}
 }
 
-func (l *ReleaseLookup) Exists(ctx context.Context, releaseID string) (bool, error) {
-	return l.store.ReleaseExists(ctx, l.projectID, releaseID)
+func (l *FormalReferenceLookup) ValidateProject(ctx context.Context, organizationID, projectID string) error {
+	exists, err := l.store.ProjectExists(ctx, organizationID, projectID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return biz.ErrNotFound
+	}
+	return nil
 }
 
-type RuntimeTargetLookup struct {
-	store     ScopedReferenceStore
-	projectID string
-}
-
-func NewRuntimeTargetLookup(store ScopedReferenceStore, projectID string) *RuntimeTargetLookup {
-	return &RuntimeTargetLookup{store: store, projectID: projectID}
-}
-
-func (l *RuntimeTargetLookup) Exists(ctx context.Context, targetID string) (bool, error) {
-	return l.store.RuntimeTargetExists(ctx, l.projectID, targetID)
+func (l *FormalReferenceLookup) Validate(
+	ctx context.Context,
+	projectID, releaseID, applicationID, environmentID, targetID string,
+) error {
+	checks := []struct {
+		id       string
+		notFound error
+		exists   func(context.Context, string, string) (bool, error)
+	}{
+		{applicationID, biz.ErrApplicationNotFound, l.store.ApplicationExists},
+		{environmentID, biz.ErrEnvironmentNotFound, l.store.EnvironmentExists},
+	}
+	for _, check := range checks {
+		exists, err := check.exists(ctx, projectID, check.id)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return check.notFound
+		}
+	}
+	exists, err := l.store.ReleaseExists(ctx, projectID, applicationID, releaseID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return biz.ErrReleaseNotFound
+	}
+	exists, err = l.store.RuntimeTargetExists(ctx, projectID, targetID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return biz.ErrRuntimeTargetNotFound
+	}
+	ready, err := l.store.RuntimeTargetReady(ctx, projectID, targetID)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		return biz.ErrRuntimeTargetNotReady
+	}
+	return nil
 }

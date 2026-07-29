@@ -72,8 +72,20 @@ func TestExpiredLeaseCanBeReclaimedAndRejectsStaleSave(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("second claim = %+v, %v, %v", second, ok, err)
 	}
-	if second.Lease.Owner != "worker-2" {
-		t.Fatalf("lease owner = %q", second.Lease.Owner)
+	if second.Lease.Owner != "worker-2" || second.Lease.Generation != first.Lease.Generation+1 {
+		t.Fatalf("first lease = %+v, second lease = %+v", first.Lease, second.Lease)
+	}
+	if err := repo.ValidateFence(
+		t.Context(), second.ProjectID, second.ID, "worker-2",
+		second.Lease.Generation, secondNow,
+	); err != nil {
+		t.Fatalf("validate current fence: %v", err)
+	}
+	if err := repo.ValidateFence(
+		t.Context(), first.ProjectID, first.ID, "worker-1",
+		first.Lease.Generation, secondNow,
+	); !errors.Is(err, biz.ErrStaleExecution) {
+		t.Fatalf("validate stale fence error = %v", err)
 	}
 
 	if _, err := repo.SaveClaimed(t.Context(), first, first.Version, "worker-1", secondNow); !errors.Is(err, biz.ErrConflict) {
@@ -98,7 +110,7 @@ func TestSaveClaimedRejectsExpiredLease(t *testing.T) {
 
 func TestFormalIdempotencyKeyIsUnique(t *testing.T) {
 	repo := NewMemoryRepository()
-	item, err := biz.NewFormal("dep-1", "rel-1", "app-1", "env-1", "target-1", "request-1", time.Unix(1, 0))
+	item, err := biz.NewFormal("dep-1", "project-1", "rel-1", "app-1", "env-1", "target-1", "request-1", time.Unix(1, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,8 +122,57 @@ func TestFormalIdempotencyKeyIsUnique(t *testing.T) {
 	if _, err := repo.Create(t.Context(), duplicate); !errors.Is(err, biz.ErrDuplicateIdempotency) {
 		t.Fatalf("duplicate key error = %v", err)
 	}
-	found, err := repo.GetByIdempotency(t.Context(), "request-1")
+	found, err := repo.GetByIdempotency(t.Context(), "project-1", "request-1")
 	if err != nil || found.ID != "dep-1" {
 		t.Fatalf("found = %+v, err = %v", found, err)
+	}
+	otherProject, err := biz.NewFormal(
+		"dep-3", "project-2", "rel-1", "app-1", "env-1", "target-1", "request-1", time.Unix(1, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Create(t.Context(), otherProject); err != nil {
+		t.Fatalf("same key in another project: %v", err)
+	}
+}
+
+func TestHasSucceededUsesCompleteDeploymentScope(t *testing.T) {
+	repo := NewMemoryRepository()
+	item, err := biz.NewFormal(
+		"dep", "project", "release", "app", "env", "target", "key", time.Unix(1, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := item.Transition(biz.StatusPreparing, time.Unix(2, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := item.Transition(biz.StatusDeploying, time.Unix(3, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := item.Transition(biz.StatusSucceeded, time.Unix(4, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repo.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	found, err := repo.HasSucceeded(t.Context(), "project", "release", "app", "env", "target")
+	if err != nil || !found {
+		t.Fatalf("exact successful deployment = %t, %v", found, err)
+	}
+	for name, values := range map[string][5]string{
+		"project":     {"other", "release", "app", "env", "target"},
+		"release":     {"project", "other", "app", "env", "target"},
+		"application": {"project", "release", "other", "env", "target"},
+		"environment": {"project", "release", "app", "other", "target"},
+		"target":      {"project", "release", "app", "env", "other"},
+	} {
+		found, err := repo.HasSucceeded(
+			t.Context(), values[0], values[1], values[2], values[3], values[4],
+		)
+		if err != nil || found {
+			t.Errorf("%s mismatch result = %t, %v", name, found, err)
+		}
 	}
 }

@@ -83,7 +83,7 @@ sequenceDiagram
 
 ## 已实现：认证、授权、资源写入与审计
 
-Project、Project 下的 Application、Environment、不可变 Release 和 Runtime Target 共用相同的写入骨架。Environment 只表达项目阶段，不承载运行时凭据。身份来自 Bearer session，Organization 所有权和角色权限由 UseCase 强制执行。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
+Project、Project 下的 Application、Registry Credential、Environment、不可变 Release 和 Runtime Target 共用相同的写入骨架。Environment 承载普通配置值或外部秘密引用，但不保存秘密正文；Release 只声明需要的配置键。身份来自 Bearer session，Organization 所有权和角色权限由 UseCase 强制执行。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
 
 ```mermaid
 sequenceDiagram
@@ -140,9 +140,156 @@ sequenceDiagram
     API-->>D: 201 Created
 ```
 
-## 目标：从 Release 到 Docker Deployment
+## 已实现：Runtime Target 连接探测
 
-下面是首个产品用例的目标流程，当前尚未实现。它用于约束后续 Environment、Deployment 状态机、凭据解析、Docker Gateway 和 Worker 的设计，不表示 Runtime Target 创建后已经发生连接探测或部署。
+探测只由 Maintainer 或 Owner 显式触发。控制面在执行时解析 mTLS 引用并 Ping Docker Engine，MongoDB 和 API 只保存安全状态，不保存证书正文或底层连接错误。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor M as Maintainer
+    participant API as Runtime Target API
+    participant U as Control Plane UseCase
+    participant S as Secret Resolver
+    participant D as Docker Engine
+    participant DB as MongoDB + Audit
+
+    M->>API: POST .../runtime-targets/{id}/probe
+    API->>U: ProbeRuntimeTarget(principal, target)
+    U->>S: 按 credential_ref 解析 CA/cert/key
+    alt 凭据缺失或无效
+        U->>DB: status=credential_error + audit
+    else 凭据可用
+        U->>D: mTLS Ping
+        alt Ping 成功
+            U->>DB: status=ready + last_probed_at + audit
+        else 无法连接
+            U->>DB: status=unreachable + last_probed_at + audit
+        end
+    end
+    U-->>M: 安全状态，不返回底层错误
+```
+
+## 已实现：Managed Host 与 Runtime Target 绑定
+
+Managed Host 属于 Organization，Runtime Target 属于 Project。Owner 先登记 Host，Maintainer 或 Owner 再把 Project Runtime Target 绑定到该 Host。Server 在创建目标时从后端解析 Host，不相信客户端声明的 Organization，并强制 `agent/direct` 模式一致。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor O as Owner
+    actor M as Maintainer
+    participant H as Managed Host API
+    participant T as Runtime Target API
+    participant DB as MongoDB + Audit
+
+    O->>H: 注册 Managed Host<br/>name + connection_mode
+    H->>DB: 事务写 Organization Host + managed_host.create
+    DB-->>O: host ID + enrolling/offline
+    M->>T: 创建 Project Runtime Target<br/>host ID + connection_mode
+    T->>DB: 验证 Project 属于当前 Organization
+    T->>DB: 读取 Host mode 且未 disabled
+    alt Host 不存在或跨 Organization
+        T-->>M: 404 managed_host_not_found
+    else mode 不一致
+        T-->>M: 422 runtime_target_host_mismatch
+    else agent 模式
+        T->>DB: 写 pending Agent Target + 审计
+        T-->>M: Agent 控制流和 Runtime Gateway 完成前不可探测或部署
+    else direct 模式
+        T->>DB: 写 pending Direct Target + 审计
+        T-->>M: 显式 probe 成功后可部署
+    end
+```
+
+## 部分实现：Agent 首次安全接入
+
+Owner 为 `agent` 模式 Host 创建短时一次性 enrollment。原始 token 只返回一次，MongoDB 只保存其 SHA-256 hash。Agent 私钥在目标主机本地生成，只把 CSR 发送给 Server。Server 签发固定 Organization、Host、Agent Identity 和 instance 的客户端证书，并在同一 MongoDB 事务中消费 token、创建身份、绑定 Host 和写审计。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor O as Owner
+    participant API as Managed Host API
+    participant K as Token / Certificate Issuer
+    participant DB as MongoDB Transaction
+    participant A as Agent 主机
+
+    O->>API: POST /managed-hosts/{id}/enrollments
+    API->>K: 生成随机 token + SHA-256 hash
+    API->>DB: 保存 hash、15m 过期时间 + enrollment 审计
+    API-->>O: 原始 token（仅一次，no-store）
+    O->>A: 通过安全安装渠道传递 token
+    A->>A: 本地生成私钥和 CSR
+    A->>API: POST /agent/enrollments:exchange<br/>token + CSR + instance/version/capabilities
+    API->>DB: 查询未过期且未消费的 token hash
+    API->>K: 校验 CSR 并签发 clientAuth 证书
+    API->>DB: 原子消费 token + 创建 Agent Identity<br/>绑定 Host + identity.issue 审计
+    DB-->>API: 提交
+    API-->>A: Agent certificate + CA certificate（no-store）
+    Note over A,API: 当前 Host 保持 offline；后续 mTLS hello 成功后才进入 online
+```
+
+过期 token、重复兑换、Host 已禁用、跨 Host 绑定和无效 CSR 都会被拒绝。Owner 禁用 Host 时，当前数据库身份会被标记吊销，所有未消费 enrollment 立即过期。配置和客户可读说明见 [agent-enrollment.md](agent-enrollment.md)。
+
+## 部分实现：Agent mTLS 控制连接与在线状态
+
+Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前已实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流，以及 Server 端 `runtime.probe` 类型化 command/result、有界队列、并发去重和近期结果缓存；Agent 进程、实际探测执行和 Runtime Gateway 尚未实现。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent
+    participant TLS as Agent TLS Listener
+    participant U as Managed Host UseCase
+    participant DB as MongoDB + Audit
+    participant R as Connection Registry
+
+    A->>TLS: TLS 1.3 + client certificate
+    TLS->>TLS: Agent CA 验证
+    A->>TLS: hello(sequence=1)<br/>host/identity/instance/boot/version/capabilities
+    TLS->>U: 证书固定身份 + hello
+    U->>DB: 查询 serial/fingerprint/expiry/revoked
+    U->>DB: 事务写 online + session fence + connect audit
+    U->>R: 注册 host → session；取消旧连接
+    TLS-->>A: hello_ack(session, protocol=v1, heartbeat policy)
+    loop heartbeat interval
+        A->>TLS: heartbeat(monotonic sequence)
+        TLS->>DB: 条件更新当前 session last_seen_at
+        TLS-->>A: heartbeat_ack
+    end
+    opt 后端已授权的 Runtime Target 探测
+        U->>R: Dispatch(runtime.probe, target ID, command ID, deadline)
+        alt Agent 发送队列已满
+            R-->>U: backpressure（不无限等待或增长内存）
+        else 已排队
+            R-->>TLS: 类型化 command（不含地址、Socket 或 Shell）
+            TLS-->>A: runtime.probe
+            A->>TLS: command_result(ready/unreachable/unsupported)
+            TLS->>R: 校验 session、command ID、结果类型
+            R-->>U: 唤醒相同 command ID 的等待方并缓存结果
+            TLS-->>A: command_result_ack
+        end
+    end
+    alt 同一 Host 重连
+        A->>TLS: 新 hello
+        TLS->>DB: 用新 session 覆盖
+        TLS->>R: 取消旧连接
+        Note over DB: 旧连接关闭的条件更新不匹配新 session
+    else Owner 禁用 Host
+        U->>DB: disabled + identity revoked + audit
+        U->>R: 取消当前进程连接
+        Note over A,TLS: 后续 heartbeat/reconnect 拒绝
+    else timeout / disconnect / shutdown
+        TLS->>DB: 当前 session 条件更新 offline + disconnect audit
+    end
+```
+
+完整 wire frame 与错误边界见 [Agent Control Protocol v1](../api/agent-control.md)。
+
+## 部分实现：从 Release 到 Docker Deployment
+
+下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 Runtime Gateway、安全失败分类和状态审计。当前只注册 direct Docker Gateway；Agent Gateway 尚未实现。Docker Gateway 已实现候选容器健康门禁与 lease generation fencing，本地真实 Docker Engine 已覆盖健康切换、失败保留、过期执行隔离和取消清理；远程 mTLS Engine、实际入口流量和故障注入系统测试尚未完成，因此仍不是生产闭环。
 
 ```mermaid
 sequenceDiagram
@@ -158,25 +305,41 @@ sequenceDiagram
 
     D->>API: 创建 Deployment<br/>release + environment + runtime target + idempotency key
     API->>U: CreateDeployment(...)
-    U->>M: 校验 Project 范围和引用资源
+    U->>M: 校验 Project 范围、引用资源和 Runtime Target=ready
     U->>M: 事务创建 queued Deployment + 审计
-    U-->>D: 202 Accepted + deployment ID
+    U-->>D: 201 Created + deployment ID
 
     W->>M: 原子领取 queued Deployment 和租约
-    W->>S: 按 credential_ref 解析短期凭据
-    S-->>W: TLS/认证材料（不落入 Release）
-    W->>G: 连接 Docker Engine 并按 digest 拉取/运行
+    W->>M: 事务推进 preparing + 状态审计
+    W->>M: 解析 Release 运行规格、Registry 引用和 Environment 绑定
+    W->>M: 解析目标的传输无关 Runtime Connection
+    W->>S: 按连接模式解析 Runtime TLS、Registry 密码和配置秘密
+    S-->>W: 单次执行材料（不进入 Deployment 或审计）
+    W->>G: Gateway Router 按 connection mode 选择适配器
+    W->>G: 检查本地 digest；缺失时携带 Registry auth 拉取
+    W->>G: 创建带 lease generation 的候选容器
+    G->>G: 应用端口、环境、资源和 HEALTHCHECK
+    G->>G: 等待 candidate healthy
+    W->>M: 再验证 owner + generation + lease expiry
+    M-->>W: fence 仍有效
+    W->>G: 把旧容器改为 previous 回退名称
+    W->>M: 切换前再次验证 fence
+    alt fence 有效且 candidate 接管成功
+        W->>G: candidate 改为稳定名称并清理 previous
+    else fence 失效或重命名失败
+        W->>G: previous 恢复稳定名称并清理 candidate
+    end
     alt 部署成功
         G-->>W: 运行实例状态
         W->>M: 条件更新为 succeeded
         W->>A: 写 deployment.succeeded
     else 可恢复失败
         G-->>W: 分类后的失败
-        W->>M: 更新为 failed，保留诊断摘要
+        W->>M: 事务更新为 failed，仅保存安全类别
         W->>A: 写 deployment.failed
-        D->>API: retry 或 rollback
+        D->>API: retry（仅 failed）或 rollback（选择此前成功 Release）
         API->>U: 创建关联到原操作的新 Deployment
-        U->>M: 使用新幂等键写入新操作
+        U->>M: 校验来源状态和成功历史<br/>使用新幂等键写入新操作与审计
     end
 ```
 
@@ -185,13 +348,13 @@ sequenceDiagram
 ```mermaid
 stateDiagram-v2
     [*] --> queued
-    queued --> building: worker claim
-    building --> deploying: build ready
+    queued --> preparing: worker claim
+    preparing --> deploying: prepare ready
     deploying --> succeeded: executor success
-    building --> failed: non-retryable error
+    preparing --> failed: non-retryable error
     deploying --> failed: non-retryable error
     queued --> canceling: cancel request
-    building --> canceling: cancel request
+    preparing --> canceling: cancel request
     deploying --> canceling: cancel request
     canceling --> canceled: worker cleanup
     succeeded --> [*]
@@ -201,7 +364,7 @@ stateDiagram-v2
 
 ## 阅读边界
 
-- 当前正式持久化资源：Organization、User、Session、Project、Project Application、Environment、Release、Runtime Target、Audit Event。
-- 当前 Runtime Target 状态固定为 `pending`，只保存连接元数据和 `credential_ref`，不保存凭据正文。
-- Template、Deployment 正式模型、Docker 连接探测与执行仍是后续纵向切片；Environment 已作为 Project 范围资源落地。
+- 当前正式持久化资源：Organization、User、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Application、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event。
+- Runtime Target 只保存连接元数据和 `credential_ref`，不保存凭据正文；显式探测会更新 `ready`、`unreachable` 或 `credential_error` 及探测时间。
+- Template、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；基础 Worker 与 Docker 执行默认关闭。
 - 顶层 Application、Environment、Deployment 路由是默认关闭的工程样例，与正式 Project 范围 API 相互隔离。
