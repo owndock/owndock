@@ -109,12 +109,11 @@ func (r *ExecutionResolver) ResolveExecution(
 	if err != nil {
 		return biz.ExecutionPlan{}, fmt.Errorf("resolve runtime target: %w", err)
 	}
-	scope := deployment.ProjectID + "\x00" + deployment.ApplicationID + "\x00" +
-		deployment.EnvironmentID + "\x00" + deployment.RuntimeTargetID
-	sum := sha256.Sum256([]byte(scope))
+	sum := sha256.Sum256([]byte(deployment.CutoverScope()))
 	return biz.ExecutionPlan{
 		DeploymentID: deployment.ID, WorkerID: deployment.Lease.Owner,
-		FencingToken: deployment.Lease.Generation, ProjectID: deployment.ProjectID,
+		FencingToken:    deployment.Lease.Generation,
+		CutoverSequence: deployment.CutoverSequence, ProjectID: deployment.ProjectID,
 		ApplicationID: deployment.ApplicationID, EnvironmentID: deployment.EnvironmentID,
 		RuntimeTargetID: deployment.RuntimeTargetID, ImageDigest: image,
 		TargetConnection: targetConnection,

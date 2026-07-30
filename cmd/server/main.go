@@ -147,13 +147,21 @@ func run() error {
 		if err != nil {
 			return err
 		}
+		loginAttemptWindow, err :=
+			cfg.Security.LoginAttemptWindowDuration()
+		if err != nil {
+			return err
+		}
 		passwords, err := identitydata.NewPasswordHasher()
 		if err != nil {
 			return fmt.Errorf("create password hasher: %w", err)
 		}
 		auditStore := platformaudit.NewMongoStore(mongoClient.Database())
+		identityRepository := identitydata.NewMongoRepository(
+			mongoClient.Database(),
+		)
 		identityUseCase := identitybiz.NewUseCase(
-			identitydata.NewMongoRepository(mongoClient.Database()),
+			identityRepository,
 			mongoClient,
 			auditStore,
 			passwords,
@@ -161,6 +169,12 @@ func run() error {
 			id.New,
 			time.Now,
 			sessionTTL,
+		).WithLoginProtection(
+			identityRepository,
+			cfg.Security.LoginAttemptLimitValue(),
+			loginAttemptWindow,
+		).WithSessionPolicy(
+			cfg.Security.MaxActiveSessionsValue(),
 		)
 		identityHTTP := identityservice.NewHTTP(identityUseCase, cfg.Security.BootstrapToken)
 		controlPlaneStore := controlplanedata.NewMongoStore(mongoClient.Database())
@@ -172,6 +186,11 @@ func run() error {
 			id.New,
 			time.Now,
 		)
+		runtimeTargetProbers := map[runtimeaccess.Mode]controlplanebiz.RuntimeTargetProber{
+			runtimeaccess.ModeDirectDocker: controlplanedata.
+				NewDockerRuntimeTargetProber(),
+		}
+		var agentCommandDispatcher managedhostbiz.AgentCommandDispatcher
 		if cfg.Security.AgentPKI.Enabled {
 			enrollmentTTL, err := cfg.Security.AgentPKI.EnrollmentTTLDuration()
 			if err != nil {
@@ -227,6 +246,7 @@ func run() error {
 						registryErr,
 					)
 				}
+				agentCommandDispatcher = connectionRegistry
 				managedHostUseCase.WithAgentControl(
 					managedHostStore,
 					connectionRegistry,
@@ -267,6 +287,21 @@ func run() error {
 				if materialErr != nil {
 					return fmt.Errorf("create Agent server: %w", materialErr)
 				}
+				agentProber, proberErr :=
+					controlplanedata.NewAgentRuntimeTargetProber(
+						connectionRegistry,
+						id.New,
+						time.Now,
+						min(heartbeatTimeout, time.Minute),
+					)
+				if proberErr != nil {
+					return fmt.Errorf(
+						"create Agent runtime target prober: %w",
+						proberErr,
+					)
+				}
+				runtimeTargetProbers[runtimeaccess.ModeAgent] =
+					agentProber
 			}
 		}
 		managedHostHTTP := managedhostservice.NewHTTP(managedHostUseCase)
@@ -285,7 +320,9 @@ func run() error {
 		).WithManagedHosts(managedHostStore).
 			WithRuntimeTargetProbe(
 				controlPlaneStore,
-				controlplanedata.NewDockerRuntimeTargetProber(),
+				controlplanedata.NewRuntimeTargetProbeRouter(
+					runtimeTargetProbers,
+				),
 			)
 		controlPlaneHTTP := controlplaneservice.NewHTTP(controlPlaneUseCase)
 		deploymentStore := deploymentdata.NewMongoRepository(mongoClient.Database())
@@ -317,15 +354,34 @@ func run() error {
 			if err != nil {
 				return err
 			}
+			runtimeGateways := map[runtimeaccess.Mode]deploymentbiz.RuntimeGateway{
+				runtimeaccess.ModeDirectDocker: deploymentdata.
+					NewDockerGateway().
+					WithFence(deploymentStore),
+			}
+			if agentCommandDispatcher != nil {
+				agentGateway, gatewayErr :=
+					deploymentdata.NewAgentDockerGateway(
+						agentCommandDispatcher,
+						deploymentStore,
+						id.New,
+						time.Now,
+						operationTimeout,
+					)
+				if gatewayErr != nil {
+					return fmt.Errorf(
+						"create Agent deployment gateway: %w",
+						gatewayErr,
+					)
+				}
+				runtimeGateways[runtimeaccess.ModeAgent] =
+					agentGateway
+			}
 			executor, err := deploymentworker.NewRuntimeExecutor(
 				deploymentdata.NewExecutionResolver(controlPlaneStore),
 				deploymentdata.NewEnvironmentSecretResolver(),
 				deploymentdata.NewRuntimeGatewayRouter(
-					map[runtimeaccess.Mode]deploymentbiz.RuntimeGateway{
-						runtimeaccess.ModeDirectDocker: deploymentdata.
-							NewDockerGateway().
-							WithFence(deploymentStore),
-					},
+					runtimeGateways,
 				),
 			)
 			if err != nil {

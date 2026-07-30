@@ -56,9 +56,12 @@ func TestDockerRuntimeTargetProberClassifiesResults(t *testing.T) {
 					return runtimeTargetEngineStub{err: test.pingErr}, test.engineErr
 				},
 			}
-			status := prober.ProbeRuntimeTarget(t.Context(), biz.RuntimeTarget{
+			status, err := prober.ProbeRuntimeTarget(t.Context(), biz.RuntimeTarget{
 				CredentialRef: "secret://production",
 			})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if status != test.want {
 				t.Fatalf("status = %s, want %s", status, test.want)
 			}

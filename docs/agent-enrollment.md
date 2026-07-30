@@ -2,7 +2,7 @@
 
 OwnDock Agent 适合控制面无法主动访问的内网主机。主机上的 Agent 后续会主动向 OwnDock Server 建立出站连接；管理员不需要为了部署而把 Docker API 或 SSH 端口暴露到公网。
 
-当前已实现首次接入身份和 Server 端控制连接基础：Owner 创建一次性接入凭据，Agent 在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。Agent 可以通过独立 TLS 1.3 端口完成 mTLS 身份校验、`v1` 协商和心跳，Server 据此维护 `online/offline`；Server 端还可以安全传输只包含 Runtime Target ID 的 `runtime.probe`。OwnDock Agent 进程、实际命令执行器、证书轮换和 Docker 执行仍在后续阶段，因此在线 Host 目前仍不能执行 Agent Deployment。
+当前已实现首次接入身份和双端控制连接：Owner 创建一次性接入凭据，Agent 在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。兑换时提交的 capabilities 会写入 Agent Identity，成为该身份的能力授权上限；后续 mTLS hello 只能声明其子集，不能通过重连自行增加部署权限。`owndock-agent` 可以使用已落盘的证书通过独立 TLS 1.3 端口完成身份校验、`v1` 协商、心跳和安全重连，Server 据此维护 `online/offline`；类型化控制流可执行本机 Docker probe 和两阶段 Deployment，双端近期缓存只保留命令指纹与安全结果。自动生成私钥、兑换 enrollment 并安装配置的发行安装器以及证书轮换仍未实现；真实双主机、断线和网络分区系统验收也仍待完成。
 
 ## 通俗理解
 
@@ -48,6 +48,8 @@ sequenceDiagram
 
 完整字段和错误码以 [OpenAPI](../api/openapi.yaml) 为准。
 
+当前安装步骤仍需要管理员或安装脚本把兑换得到的 CA、Agent 证书和本机私钥安全写入主机，然后填写 Agent 配置；正式自动化安装器尚未交付。进程构建和运行配置见 [Agent 运行与配置](agent.md)。
+
 ## Server 配置
 
 该功能默认关闭。启用时，CA 证书和私钥只从配置指定的环境变量读取：
@@ -87,7 +89,7 @@ server:
     protocol_versions: [v1]
 ```
 
-`outbound_buffer` 限制单条连接中尚未发送的命令数，`completed_command_cache` 限制整个 Server 进程保存的近期命令结果数；两者都是内存保护边界，不是持久化任务队列。控制端口只服务 Agent mTLS，不承载浏览器或用户 Bearer API。生产防火墙可以允许 Agent 主动访问该端口，但不能关闭客户端证书校验。Wire 协议见 [Agent Control Protocol v1](../api/agent-control.md)。
+`outbound_buffer` 限制单条连接中尚未发送的命令数，`completed_command_cache` 限制整个 Server 进程保存的近期命令结果数；完成缓存只保留命令 kind、指纹和安全结果，不保留 Registry authorization、解析后的环境秘密或完整命令。两者都是内存保护边界，不是持久化任务队列。控制端口只服务 Agent mTLS，不承载浏览器或用户 Bearer API。生产防火墙可以允许 Agent 主动访问该端口，但不能关闭客户端证书校验。Wire 协议见 [Agent Control Protocol v1](../api/agent-control.md)。
 
 ## 安全边界
 
@@ -97,4 +99,5 @@ server:
 - 签发证书只有 `clientAuth` 用途，不可充当 Server 证书；
 - 同一 Host 只能激活一个首次接入身份；重复请求依赖 MongoDB 事务和条件更新拒绝；
 - Host 禁用后的数据库吊销、当前单实例连接取消以及重连/heartbeat 身份检查已经实现；多控制面实例跨进程断流和证书安全轮换仍未实现；
+- enrollment 保存的 capabilities 是身份授权上限；hello 能力必须是其子集，Server 路由还会在每次命令入队前检查对应 capability；
 - API、Access Log、Trace、审计和测试产物不得记录原始 token、私钥或 CSR 私钥材料。

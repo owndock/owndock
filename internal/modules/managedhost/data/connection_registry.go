@@ -2,26 +2,30 @@ package data
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
 
 type pendingAgentCommand struct {
-	command    biz.AgentCommand
-	done       chan struct{}
-	expiration chan struct{}
-	result     biz.AgentCommandResult
-	err        error
+	command     biz.AgentCommand
+	fingerprint [sha256.Size]byte
+	done        chan struct{}
+	expiration  chan struct{}
+	result      biz.AgentCommandResult
+	err         error
 }
 
 type agentConnection struct {
-	sessionID string
-	cancel    context.CancelFunc
-	commands  chan biz.AgentCommand
-	pending   map[string]*pendingAgentCommand
+	sessionID    string
+	capabilities map[string]struct{}
+	cancel       context.CancelFunc
+	commands     chan biz.AgentCommand
+	pending      map[string]*pendingAgentCommand
 }
 
 type completedCommandKey struct {
@@ -30,8 +34,9 @@ type completedCommandKey struct {
 }
 
 type completedAgentCommand struct {
-	command biz.AgentCommand
-	result  biz.AgentCommandResult
+	kind        biz.AgentCommandKind
+	fingerprint [sha256.Size]byte
+	result      biz.AgentCommandResult
 }
 
 // ConnectionRegistry owns only process-local routing, backpressure, command
@@ -66,16 +71,18 @@ func NewConnectionRegistry(
 
 func (r *ConnectionRegistry) Register(
 	hostID, sessionID string,
+	capabilities []string,
 	cancel context.CancelFunc,
 ) <-chan biz.AgentCommand {
 	if cancel == nil {
 		cancel = func() {}
 	}
 	connection := &agentConnection{
-		sessionID: sessionID,
-		cancel:    cancel,
-		commands:  make(chan biz.AgentCommand, r.outboundBuffer),
-		pending:   make(map[string]*pendingAgentCommand),
+		sessionID:    sessionID,
+		capabilities: capabilitySet(capabilities),
+		cancel:       cancel,
+		commands:     make(chan biz.AgentCommand, r.outboundBuffer),
+		pending:      make(map[string]*pendingAgentCommand),
 	}
 
 	r.mu.Lock()
@@ -109,12 +116,17 @@ func (r *ConnectionRegistry) Dispatch(
 	if err := command.Validate(); err != nil {
 		return biz.AgentCommandResult{}, err
 	}
+	fingerprint, err := command.Fingerprint()
+	if err != nil {
+		return biz.AgentCommandResult{}, err
+	}
 
 	r.mu.Lock()
 	key := completedCommandKey{hostID: hostID, commandID: command.ID}
-	if completed, exists := r.completed[key]; exists {
+	if completed, exists := r.completed[key]; command.Kind.DurableResult() && exists {
 		r.mu.Unlock()
-		if !completed.command.Equivalent(command) {
+		if completed.kind != command.Kind ||
+			completed.fingerprint != fingerprint {
 			return biz.AgentCommandResult{}, biz.ErrAgentCommandInvalid
 		}
 		return completed.result, nil
@@ -128,6 +140,18 @@ func (r *ConnectionRegistry) Dispatch(
 		r.mu.Unlock()
 		return biz.AgentCommandResult{}, biz.ErrAgentNotConnected
 	}
+	requiredCapability, exists := agentprotocol.RequiredCapability(
+		command.Kind,
+	)
+	if !exists {
+		r.mu.Unlock()
+		return biz.AgentCommandResult{}, biz.ErrAgentCommandInvalid
+	}
+	if _, supported := connection.capabilities[requiredCapability]; !supported {
+		r.mu.Unlock()
+		return biz.AgentCommandResult{},
+			biz.ErrAgentCapabilityUnavailable
+	}
 	pending := connection.pending[command.ID]
 	if pending != nil {
 		r.mu.Unlock()
@@ -138,9 +162,10 @@ func (r *ConnectionRegistry) Dispatch(
 	}
 
 	pending = &pendingAgentCommand{
-		command:    command,
-		done:       make(chan struct{}),
-		expiration: make(chan struct{}),
+		command:     command,
+		fingerprint: fingerprint,
+		done:        make(chan struct{}),
+		expiration:  make(chan struct{}),
 	}
 	connection.pending[command.ID] = pending
 	select {
@@ -155,6 +180,14 @@ func (r *ConnectionRegistry) Dispatch(
 		r.mu.Unlock()
 		return biz.AgentCommandResult{}, biz.ErrAgentBackpressure
 	}
+}
+
+func capabilitySet(values []string) map[string]struct{} {
+	result := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		result[value] = struct{}{}
+	}
+	return result
 }
 
 func (r *ConnectionRegistry) Complete(
@@ -185,7 +218,15 @@ func (r *ConnectionRegistry) Complete(
 
 	delete(connection.pending, result.CommandID)
 	pending.result = result
-	r.cacheCompletedLocked(hostID, pending.command, result)
+	if pending.command.Kind.DurableResult() {
+		r.cacheCompletedLocked(
+			hostID,
+			pending.command.ID,
+			pending.command.Kind,
+			pending.fingerprint,
+			result,
+		)
+	}
 	close(pending.expiration)
 	close(pending.done)
 	return nil
@@ -266,11 +307,17 @@ func (r *ConnectionRegistry) terminateLocked(
 
 func (r *ConnectionRegistry) cacheCompletedLocked(
 	hostID string,
-	command biz.AgentCommand,
+	commandID string,
+	kind biz.AgentCommandKind,
+	fingerprint [sha256.Size]byte,
 	result biz.AgentCommandResult,
 ) {
-	key := completedCommandKey{hostID: hostID, commandID: command.ID}
-	r.completed[key] = completedAgentCommand{command: command, result: result}
+	key := completedCommandKey{hostID: hostID, commandID: commandID}
+	r.completed[key] = completedAgentCommand{
+		kind:        kind,
+		fingerprint: fingerprint,
+		result:      result,
+	}
 	r.completedInsertion = append(r.completedInsertion, key)
 	if len(r.completedInsertion) <= r.completedCacheSize {
 		return

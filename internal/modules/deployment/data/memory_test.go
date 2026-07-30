@@ -137,6 +137,75 @@ func TestFormalIdempotencyKeyIsUnique(t *testing.T) {
 	}
 }
 
+func TestCutoverSequenceIsMonotonicWithinDeploymentScope(t *testing.T) {
+	repo := NewMemoryRepository()
+	create := func(
+		id, projectID, applicationID, environmentID, targetID string,
+	) biz.Deployment {
+		t.Helper()
+		item, err := biz.NewFormal(
+			id,
+			projectID,
+			"release-"+id,
+			applicationID,
+			environmentID,
+			targetID,
+			"request-"+id,
+			time.Unix(1, 0),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, err = repo.Create(t.Context(), item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+
+	first := create("one", "project", "application", "environment", "target")
+	second := create("two", "project", "application", "environment", "target")
+	otherTarget := create(
+		"other",
+		"project",
+		"application",
+		"environment",
+		"other-target",
+	)
+	if first.CutoverSequence != 1 || second.CutoverSequence != 2 {
+		t.Fatalf(
+			"same-scope sequences = %d, %d",
+			first.CutoverSequence,
+			second.CutoverSequence,
+		)
+	}
+	if otherTarget.CutoverSequence != 1 {
+		t.Fatalf(
+			"independent target sequence = %d",
+			otherTarget.CutoverSequence,
+		)
+	}
+	now := time.Unix(2, 0)
+	claimed, ok, err := repo.ClaimNext(t.Context(), biz.Claim{
+		WorkerID:  "worker",
+		Now:       now,
+		ExpiresAt: now.Add(time.Minute),
+	})
+	if err != nil || !ok || claimed.ID != first.ID {
+		t.Fatalf("claim first deployment = %+v, %t, %v", claimed, ok, err)
+	}
+	if err := repo.ValidateFence(
+		t.Context(),
+		claimed.ProjectID,
+		claimed.ID,
+		"worker",
+		claimed.Lease.Generation,
+		now,
+	); !errors.Is(err, biz.ErrStaleExecution) {
+		t.Fatalf("superseded deployment fence error = %v", err)
+	}
+}
+
 func TestHasSucceededUsesCompleteDeploymentScope(t *testing.T) {
 	repo := NewMemoryRepository()
 	item, err := biz.NewFormal(

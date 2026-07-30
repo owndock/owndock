@@ -39,6 +39,9 @@ runtime:
 security:
   bootstrap_token_env: OWNDOCK_BOOTSTRAP_TOKEN
   session_ttl: 24h
+  max_active_sessions: 10
+  login_attempt_limit: 5
+  login_attempt_window: 15m
   agent_pki:
     enabled: false
     ca_certificate_env: OWNDOCK_AGENT_CA_CERT_PEM

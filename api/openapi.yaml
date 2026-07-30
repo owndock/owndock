@@ -75,7 +75,7 @@ paths:
       tags: [Managed Hosts]
       operationId: createManagedHost
       summary: Register an Organization-owned managed host
-      description: Only an Owner may register a host. Agent hosts remain enrolling until the separate enrollment flow creates a fixed Agent identity, then remain offline until the future authenticated control flow establishes liveness.
+      description: Only an Owner may register a host. Agent hosts remain enrolling until the separate enrollment flow creates a fixed Agent identity, then remain offline until the authenticated Agent Control flow establishes liveness.
       security:
         - bearerAuth: []
       requestBody:
@@ -255,6 +255,20 @@ paths:
           $ref: "#/components/responses/APIError"
         "415":
           $ref: "#/components/responses/APIError"
+        "429":
+          description: Login attempt limit exceeded.
+          headers:
+            Retry-After:
+              description: Seconds before another login attempt is allowed.
+              schema:
+                type: integer
+                minimum: 1
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/APIError"
   /api/v1/auth/me:
@@ -287,6 +301,50 @@ paths:
             X-Request-ID:
               $ref: "#/components/headers/RequestID"
         "401":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/sessions:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Identity]
+      operationId: listCurrentUserSessions
+      summary: List active sessions owned by the current user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    delete:
+      tags: [Identity]
+      operationId: revokeCurrentUserSession
+      summary: Revoke one active session owned by the current user
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Session revoked.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "404":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
@@ -467,7 +525,7 @@ paths:
       tags: [Runtime Targets]
       operationId: createRuntimeTarget
       summary: Register a Docker runtime target on a managed host
-      description: The connection mode must match the Organization-owned Managed Host. Direct mode requires the protected Docker endpoint fields. Agent mode forbids direct connection fields. Agent enrollment is implemented, but an Agent target cannot be probed or deployed until the authenticated control flow and Agent Runtime Gateway are implemented.
+      description: The connection mode must match the Organization-owned Managed Host. Direct mode requires the protected Docker endpoint fields. Agent mode forbids direct connection fields. When Agent Control is enabled, target probing and the two-phase Agent Deployment Gateway are registered together; offline Agent targets never fall back to direct mode.
       security:
         - bearerAuth: []
       requestBody:
@@ -503,7 +561,8 @@ paths:
     post:
       tags: [Runtime Targets]
       operationId: probeRuntimeTarget
-      summary: Probe a runtime target using its external TLS credential
+      summary: Probe a runtime target through its registered connection mode
+      description: Direct mode resolves the external TLS credential and pings Docker Engine. Agent mode dispatches a typed runtime probe to the fixed Managed Host when Agent Control is enabled; the matching Agent Deployment Gateway is part of the same server composition, so a ready target has an executable deployment path.
       security:
         - bearerAuth: []
       responses:
@@ -1071,6 +1130,22 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/IdentityUser"
+    SessionList:
+      description: Active sessions owned by the current user.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionSummary"
     ProjectList:
       description: Project collection.
       headers:
@@ -1511,6 +1586,22 @@ components:
         role:
           type: string
           enum: [owner, maintainer, developer, viewer]
+    SessionSummary:
+      type: object
+      additionalProperties: false
+      required: [id, created_at, expires_at, current]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        current:
+          type: boolean
     Organization:
       type: object
       additionalProperties: false
@@ -1803,6 +1894,7 @@ components:
           minLength: 1
           maxLength: 64
         capabilities:
+          description: Capabilities approved for this Agent Identity. A later authenticated hello may advertise only a subset of this grant.
           type: array
           maxItems: 16
           uniqueItems: true
@@ -1810,6 +1902,7 @@ components:
             type: string
             minLength: 1
             maxLength: 64
+            pattern: "^[a-z0-9][a-z0-9._-]{0,63}$"
         csr_pem:
           type: string
           minLength: 1

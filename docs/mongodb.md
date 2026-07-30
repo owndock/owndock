@@ -36,7 +36,9 @@ database:
 - Kratos 停止接收请求后关闭连接池；
 - 业务模块不能直接创建 Client，也不能从 `internal/platform/mongo` 推导业务 schema。
 
-正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`sessions`、`managed_hosts`、`agent_enrollments`、`agent_identities`、`projects`、`product_applications`、`releases`、`registry_credentials`、`environments`、`runtime_targets`、`deployments`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。Agent enrollment 只保存 token 的 SHA-256 hash；兑换时在事务中条件消费 token、创建固定身份并绑定 Host，重复兑换会整体回滚。Agent 连接在 `managed_hosts` 保存当前 boot/session fence、版本、能力和 `last_seen_at`；heartbeat 与 disconnect 必须匹配当前 session，避免旧连接覆盖新连接状态，连接/断开审计仍使用事务。Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Application、Environment 与 Runtime Target 上曾成功部署的 Release”建立回滚查询索引。Migration v4 准备 Deployment 执行元数据，v5 建立 Registry Credential 索引，v6 为早期 Release 回填默认 CPU/内存运行规格，v7 允许同一 image digest 使用不同的不可变运行规格创建 Release，v8 建立 Organization Host 唯一命名和 Runtime Target Host 查询索引，v9 建立 enrollment token、过期清理、证书序列号/指纹和 Host 身份查询索引。
+正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`sessions`、`login_attempts`、`managed_hosts`、`agent_enrollments`、`agent_identities`、`projects`、`product_applications`、`releases`、`registry_credentials`、`environments`、`runtime_targets`、`deployments`、`deployment_cutover_sequences`、`runtime_inventory_observations`、`runtime_inventory_chunks`、`runtime_inventory_resources`、`runtime_inventory_heads`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。`login_attempts` 只保存 normalized email 的 SHA-256 键、窗口、计数和阻断/过期时间，通过 revision 条件更新避免多实例并发绕过限制，成功登录会删除记录。新 Session 与“只保留该用户最新 N 个未过期 Session”的清理处于同一事务；Session 查询和撤销都固定当前 `user_id`，撤销与审计也原子提交，API 永不返回 `token_hash`。Agent enrollment 只保存 token 的 SHA-256 hash；兑换时在事务中条件消费 token、创建固定身份并绑定 Host，重复兑换会整体回滚。Agent 连接在 `managed_hosts` 保存当前 boot/session fence、版本、能力和 `last_seen_at`；heartbeat 与 disconnect 必须匹配当前 session，避免旧连接覆盖新连接状态，连接/断开审计仍使用事务。Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Application、Environment 与 Runtime Target 上曾成功部署的 Release”建立回滚查询索引。`deployment_cutover_sequences` 只保存部署槽位及其当前序号，不保存运行凭据；Deployment 与审计在同一事务中创建时，序号分配也处于该事务内。Runtime Inventory 把新 observation 写成独立 generation，所有声明分块完成后才事务切换 current head；open generation 先设置两小时 TTL，完成时移除当前 generation 的 TTL，上一 generation 在被替换七天后回收。Migration v4 准备 Deployment 执行元数据，v5 建立 Registry Credential 索引，v6 为早期 Release 回填默认 CPU/内存运行规格，v7 允许同一 image digest 使用不同的不可变运行规格创建 Release，v8 建立 Organization Host 唯一命名和 Runtime Target Host 查询索引，v9 建立 enrollment token、过期清理、证书序列号/指纹和 Host 身份查询索引，v10 为已有 Deployment 回填槽位级 cutover sequence 并初始化序号计数器，v11 为登录尝试建立 TTL 回收索引，v12 建立 Runtime Inventory observation/chunk/resource/head 的唯一、查询和 TTL 索引。
+
+Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Target 原子分配单调 generation；多 Server 不使用本机时间判断 observation 新旧。
 
 启动和事务写入时序见 [flows.md](flows.md)。
 
@@ -48,7 +50,7 @@ database:
 make check
 ```
 
-MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、Agent token 只存哈希/原子消费/重放回滚、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、审计原子回滚和注销失效：
+MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、共享登录尝试并发阈值与成功清理、活跃 Session 上限/查询/撤销、Agent token 只存哈希/原子消费/重放回滚、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、Runtime Inventory open TTL/分块幂等/完整视图切换/旧批次 fence、审计原子回滚和注销失效：
 
 ```bash
 make test-integration

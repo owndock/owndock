@@ -111,6 +111,31 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if err != nil || sessionTTL != defaultSessionTTL {
 		t.Fatalf("session TTL = %v, %v; want %v", sessionTTL, err, defaultSessionTTL)
 	}
+	if maximum := cfg.Security.MaxActiveSessionsValue(); maximum !=
+		defaultMaximumActiveSessions {
+		t.Fatalf(
+			"maximum active sessions = %d, want %d",
+			maximum,
+			defaultMaximumActiveSessions,
+		)
+	}
+	if cfg.Security.LoginAttemptLimitValue() !=
+		defaultLoginAttemptLimit {
+		t.Fatalf(
+			"login attempt limit = %d, want %d",
+			cfg.Security.LoginAttemptLimitValue(),
+			defaultLoginAttemptLimit,
+		)
+	}
+	loginWindow, err := cfg.Security.LoginAttemptWindowDuration()
+	if err != nil || loginWindow != defaultLoginAttemptWindow {
+		t.Fatalf(
+			"login attempt window = %v, %v; want %v",
+			loginWindow,
+			err,
+			defaultLoginAttemptWindow,
+		)
+	}
 	if cfg.Security.AgentPKI.Enabled ||
 		cfg.Security.AgentPKI.CACertificateEnv != defaultAgentCACertEnv ||
 		cfg.Security.AgentPKI.CAPrivateKeyEnv != defaultAgentCAKeyEnv {
@@ -218,6 +243,42 @@ func TestProductRequiresMongoDBAndSecurity(t *testing.T) {
 	cfg.Security.BootstrapTokenEnv = ""
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() error = nil without bootstrap token env")
+	}
+}
+
+func TestLoginProtectionConfigurationValidation(t *testing.T) {
+	securityConfig := Security{
+		BootstrapTokenEnv:  "TEST_BOOTSTRAP_TOKEN",
+		SessionTTL:         "1h",
+		LoginAttemptLimit:  5,
+		LoginAttemptWindow: "15m",
+	}
+	if err := securityConfig.Validate(true); err != nil {
+		t.Fatal(err)
+	}
+	securityConfig.LoginAttemptLimit = 101
+	if err := securityConfig.Validate(true); err == nil {
+		t.Fatal("accepted excessive login attempt limit")
+	}
+	securityConfig.LoginAttemptLimit = 5
+	securityConfig.LoginAttemptWindow = "30s"
+	if err := securityConfig.Validate(true); err == nil {
+		t.Fatal("accepted login attempt window below one minute")
+	}
+}
+
+func TestSessionPolicyConfigurationValidation(t *testing.T) {
+	securityConfig := Security{
+		BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN",
+		SessionTTL:        "1h",
+		MaxActiveSessions: 10,
+	}
+	if err := securityConfig.Validate(true); err != nil {
+		t.Fatal(err)
+	}
+	securityConfig.MaxActiveSessions = 101
+	if err := securityConfig.Validate(true); err == nil {
+		t.Fatal("accepted excessive active session limit")
 	}
 }
 

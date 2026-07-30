@@ -1,0 +1,32 @@
+control:
+  endpoint: https://control.example.com:8443/api/v1/agent/connect
+  organization_id: replace-with-organization-id
+  managed_host_id: replace-with-managed-host-id
+  identity_id: replace-with-agent-identity-id
+  instance_id: replace-with-installation-instance-id
+  boot_id_file: /proc/sys/kernel/random/boot_id
+  ca_certificate_file: /etc/owndock/agent-ca.pem
+  client_certificate_file: /etc/owndock/agent.pem
+  client_private_key_file: /etc/owndock/agent-key.pem
+  handshake_timeout: 10s
+  server_silence_timeout: 45s
+  reconnect_minimum: 1s
+  reconnect_maximum: 30s
+  reconnect_stable_after: 1m
+  max_frame_bytes: 65536
+  max_concurrent_commands: 4
+  capabilities:
+    - runtime.probe
+    - deployment.prepare
+    - deployment.stage
+    - deployment.activate
+    - deployment.cancel
+    - runtime.inventory.prepare
+    - runtime.inventory.chunk
+    - runtime.inventory.release
+
+runtime:
+  docker_socket: /var/run/docker.sock
+  state_directory: /var/lib/owndock-agent
+  result_cache_size: 256
+  cutover_watermark_size: 16384

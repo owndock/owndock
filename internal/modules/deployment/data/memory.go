@@ -10,11 +10,16 @@ import (
 )
 
 type MemoryRepository struct {
-	mu    sync.RWMutex
-	items []biz.Deployment
+	mu               sync.RWMutex
+	items            []biz.Deployment
+	cutoverSequences map[string]uint64
 }
 
-func NewMemoryRepository() *MemoryRepository { return &MemoryRepository{} }
+func NewMemoryRepository() *MemoryRepository {
+	return &MemoryRepository{
+		cutoverSequences: make(map[string]uint64),
+	}
+}
 
 func (r *MemoryRepository) List(ctx context.Context, projectID, applicationID, environmentID string) ([]biz.Deployment, error) {
 	if err := ctx.Err(); err != nil {
@@ -97,6 +102,9 @@ func (r *MemoryRepository) Create(ctx context.Context, item biz.Deployment) (biz
 	if item.Version == 0 {
 		item.Version = 1
 	}
+	scope := item.CutoverScope()
+	r.cutoverSequences[scope]++
+	item.CutoverSequence = r.cutoverSequences[scope]
 	r.items = append(r.items, item)
 	return item, nil
 }
@@ -226,7 +234,8 @@ func (r *MemoryRepository) ValidateFence(
 			continue
 		}
 		if item.Lease.Owner != workerID || item.Lease.Generation != generation ||
-			!item.Lease.Active(now) || item.Terminal() {
+			!item.Lease.Active(now) || item.Terminal() ||
+			r.cutoverSequences[item.CutoverScope()] != item.CutoverSequence {
 			return biz.ErrStaleExecution
 		}
 		return nil

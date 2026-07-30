@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test test-integration test-runtime-integration build api-validate api-breaking check vuln run
+.PHONY: fmt fmt-check mod-verify vet test test-integration test-runtime-integration build build-server build-agent api-validate api-breaking check vuln run run-agent
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -27,9 +27,15 @@ test-integration:
 
 test-runtime-integration:
 	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run TestDockerGatewayEngineIntegration -count=1 -timeout=5m
+	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/agent/runtime -run TestDockerExecutorIntegration -count=1 -timeout=5m
 
-build:
+build: build-server build-agent
+
+build-server:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock ./cmd/server
+
+build-agent:
+	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock-agent ./cmd/agent
 
 api-validate:
 	go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) validate --allow-external-refs=false --fail-on WARN api/openapi.yaml
@@ -45,3 +51,6 @@ vuln:
 
 run:
 	go run ./cmd/server -conf configs/config.yaml
+
+run-agent:
+	go run ./cmd/agent -conf configs/agent.yaml

@@ -67,6 +67,7 @@ type ExecutionPlan struct {
 	DeploymentID        string
 	WorkerID            string
 	FencingToken        uint64
+	CutoverSequence     uint64
 	ProjectID           string
 	ApplicationID       string
 	EnvironmentID       string

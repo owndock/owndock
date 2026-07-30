@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
@@ -14,10 +15,16 @@ import (
 
 // MongoRepository is the persistence boundary for formal deployments. Worker
 // lease updates always include the expected version to prevent stale workers.
-type MongoRepository struct{ deployments *mongo.Collection }
+type MongoRepository struct {
+	deployments      *mongo.Collection
+	cutoverSequences *mongo.Collection
+}
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
-	return &MongoRepository{deployments: database.Collection("deployments")}
+	return &MongoRepository{
+		deployments:      database.Collection("deployments"),
+		cutoverSequences: database.Collection("deployment_cutover_sequences"),
+	}
 }
 
 func (r *MongoRepository) List(ctx context.Context, projectID, applicationID, environmentID string) ([]biz.Deployment, error) {
@@ -97,7 +104,45 @@ func (r *MongoRepository) HasSucceeded(
 }
 
 func (r *MongoRepository) Create(ctx context.Context, item biz.Deployment) (biz.Deployment, error) {
-	_, err := r.deployments.InsertOne(ctx, deploymentDocumentFromDomain(item))
+	if mongo.SessionFromContext(ctx) != nil {
+		return r.createWithinTransaction(ctx, item)
+	}
+	session, err := r.deployments.Database().Client().StartSession()
+	if err != nil {
+		return biz.Deployment{}, fmt.Errorf(
+			"start deployment creation transaction: %w",
+			err,
+		)
+	}
+	defer session.EndSession(ctx)
+	var created biz.Deployment
+	_, err = session.WithTransaction(
+		ctx,
+		func(transactionContext context.Context) (any, error) {
+			var createErr error
+			created, createErr = r.createWithinTransaction(
+				transactionContext,
+				item,
+			)
+			return nil, createErr
+		},
+	)
+	if err != nil {
+		return biz.Deployment{}, err
+	}
+	return created, nil
+}
+
+func (r *MongoRepository) createWithinTransaction(
+	ctx context.Context,
+	item biz.Deployment,
+) (biz.Deployment, error) {
+	sequence, err := r.nextCutoverSequence(ctx, item)
+	if err != nil {
+		return biz.Deployment{}, err
+	}
+	item.CutoverSequence = sequence
+	_, err = r.deployments.InsertOne(ctx, deploymentDocumentFromDomain(item))
 	if mongo.IsDuplicateKeyError(err) {
 		var serverError mongo.ServerError
 		if errors.As(err, &serverError) && serverError.HasErrorMessage("uniq_deployment_idempotency") {
@@ -109,6 +154,39 @@ func (r *MongoRepository) Create(ctx context.Context, item biz.Deployment) (biz.
 		return biz.Deployment{}, fmt.Errorf("insert deployment: %w", err)
 	}
 	return item, nil
+}
+
+func (r *MongoRepository) nextCutoverSequence(
+	ctx context.Context,
+	item biz.Deployment,
+) (uint64, error) {
+	scopeHash := sha256.Sum256([]byte(item.CutoverScope()))
+	var counter struct {
+		Sequence uint64 `bson:"sequence"`
+	}
+	result := r.cutoverSequences.FindOneAndUpdate(
+		ctx,
+		bson.D{{Key: "_id", Value: fmt.Sprintf("%x", scopeHash[:])}},
+		bson.D{
+			{Key: "$inc", Value: bson.D{{Key: "sequence", Value: 1}}},
+			{Key: "$setOnInsert", Value: bson.D{
+				{Key: "project_id", Value: item.ProjectID},
+				{Key: "application_id", Value: item.ApplicationID},
+				{Key: "environment_id", Value: item.EnvironmentID},
+				{Key: "runtime_target_id", Value: item.RuntimeTargetID},
+			}},
+		},
+		options.FindOneAndUpdate().
+			SetUpsert(true).
+			SetReturnDocument(options.After),
+	)
+	if err := result.Decode(&counter); err != nil {
+		return 0, fmt.Errorf("allocate deployment cutover sequence: %w", err)
+	}
+	if counter.Sequence == 0 {
+		return 0, fmt.Errorf("allocate deployment cutover sequence: zero sequence")
+	}
+	return counter.Sequence, nil
 }
 
 func (r *MongoRepository) Save(ctx context.Context, item biz.Deployment, expectedVersion uint64) (biz.Deployment, error) {
@@ -225,7 +303,14 @@ func (r *MongoRepository) ValidateFence(
 	if projectID == "" || deploymentID == "" || workerID == "" || generation == 0 || now.IsZero() {
 		return biz.ErrStaleExecution
 	}
-	count, err := r.deployments.CountDocuments(ctx, bson.D{
+	var deployment struct {
+		ProjectID       string `bson:"project_id"`
+		ApplicationID   string `bson:"application_id"`
+		EnvironmentID   string `bson:"environment_id"`
+		RuntimeTargetID string `bson:"runtime_target_id"`
+		CutoverSequence uint64 `bson:"cutover_sequence"`
+	}
+	err := r.deployments.FindOne(ctx, bson.D{
 		{Key: "_id", Value: deploymentID},
 		{Key: "project_id", Value: projectID},
 		{Key: "lease.owner", Value: workerID},
@@ -234,11 +319,37 @@ func (r *MongoRepository) ValidateFence(
 		{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
 			string(biz.StatusPreparing), string(biz.StatusDeploying), string(biz.StatusCanceling),
 		}}}},
-	})
+	}, options.FindOne().SetProjection(bson.D{
+		{Key: "project_id", Value: 1},
+		{Key: "application_id", Value: 1},
+		{Key: "environment_id", Value: 1},
+		{Key: "runtime_target_id", Value: 1},
+		{Key: "cutover_sequence", Value: 1},
+	})).Decode(&deployment)
+	if err == mongo.ErrNoDocuments {
+		return biz.ErrStaleExecution
+	}
 	if err != nil {
 		return fmt.Errorf("validate deployment fence: %w", err)
 	}
-	if count != 1 {
+	scope := deployment.ProjectID + "\x00" + deployment.ApplicationID + "\x00" +
+		deployment.EnvironmentID + "\x00" + deployment.RuntimeTargetID
+	scopeHash := sha256.Sum256([]byte(scope))
+	var counter struct {
+		Sequence uint64 `bson:"sequence"`
+	}
+	err = r.cutoverSequences.FindOne(
+		ctx,
+		bson.D{{Key: "_id", Value: fmt.Sprintf("%x", scopeHash[:])}},
+		options.FindOne().SetProjection(bson.D{{Key: "sequence", Value: 1}}),
+	).Decode(&counter)
+	if err == mongo.ErrNoDocuments {
+		return biz.ErrStaleExecution
+	}
+	if err != nil {
+		return fmt.Errorf("validate deployment cutover sequence: %w", err)
+	}
+	if counter.Sequence != deployment.CutoverSequence {
 		return biz.ErrStaleExecution
 	}
 	return nil
@@ -258,6 +369,7 @@ type deploymentDocument struct {
 	Revision           string                  `bson:"revision"`
 	Status             string                  `bson:"status"`
 	FailureCategory    string                  `bson:"failure_category,omitempty"`
+	CutoverSequence    uint64                  `bson:"cutover_sequence,omitempty"`
 	CreatedAt          time.Time               `bson:"created_at"`
 	UpdatedAt          time.Time               `bson:"updated_at"`
 	Version            uint64                  `bson:"version"`
@@ -275,7 +387,8 @@ func deploymentDocumentFromDomain(d biz.Deployment) deploymentDocument {
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
 		RuntimeTargetID: d.RuntimeTargetID, IdempotencyKey: d.IdempotencyKey,
 		Operation: string(d.Operation), SourceDeploymentID: d.SourceDeploymentID,
-		Revision: d.Revision, Status: string(d.Status), FailureCategory: string(d.FailureCategory), CreatedAt: d.CreatedAt,
+		Revision: d.Revision, Status: string(d.Status), FailureCategory: string(d.FailureCategory),
+		CutoverSequence: d.CutoverSequence, CreatedAt: d.CreatedAt,
 		UpdatedAt: d.UpdatedAt, Version: d.Version,
 		Lease: deploymentLeaseDocument{
 			Owner: d.Lease.Owner, ExpiresAt: d.Lease.ExpiresAt,
@@ -293,7 +406,8 @@ func (d deploymentDocument) domain() biz.Deployment {
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
 		RuntimeTargetID: d.RuntimeTargetID, IdempotencyKey: d.IdempotencyKey,
 		Operation: operation, SourceDeploymentID: d.SourceDeploymentID,
-		Revision: d.Revision, Status: biz.Status(d.Status), FailureCategory: biz.FailureCategory(d.FailureCategory), CreatedAt: d.CreatedAt,
+		Revision: d.Revision, Status: biz.Status(d.Status), FailureCategory: biz.FailureCategory(d.FailureCategory),
+		CutoverSequence: d.CutoverSequence, CreatedAt: d.CreatedAt,
 		UpdatedAt: d.UpdatedAt, Version: d.Version,
 		Lease: biz.Lease{
 			Owner: d.Lease.Owner, ExpiresAt: d.Lease.ExpiresAt,

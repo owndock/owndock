@@ -424,6 +424,18 @@ func TestInvalidAgentMetadataIsRejectedBeforeCertificateSigning(t *testing.T) {
 	); err != ErrInvalidAgentIdentity {
 		t.Fatalf("exchange error = %v", err)
 	}
+	if _, err := useCase.ExchangeEnrollment(
+		t.Context(),
+		enrollment.Token,
+		"instance-1",
+		"1.0.0",
+		"v1",
+		[]string{"deployment stage"},
+		[]byte("csr"),
+		"request-3",
+	); err != ErrInvalidAgentIdentity {
+		t.Fatalf("capability validation error = %v", err)
+	}
 	if issuer.calls != 0 {
 		t.Fatalf("certificate issuer calls = %d, want 0", issuer.calls)
 	}
@@ -436,6 +448,7 @@ func TestAgentControlAuthenticatesNegotiatesHeartbeatsAndFencesReconnect(t *test
 		ManagedHostID: "host-1", InstanceID: "instance-1",
 		CertificateSerial: "serial-1", CertificateSHA256: "fingerprint-1",
 		CertificateExpires: now.Add(time.Hour),
+		Capabilities:       []string{"docker"},
 	}
 	repository := &repositoryStub{
 		items: []ManagedHost{{
@@ -519,6 +532,7 @@ func TestAgentControlRejectsCertificateBindingAndUnsupportedProtocol(t *testing.
 		ManagedHostID: "host-1", InstanceID: "instance-1",
 		CertificateSerial: "serial-1", CertificateSHA256: "fingerprint-1",
 		CertificateExpires: now.Add(time.Hour),
+		Capabilities:       []string{"docker"},
 	}}}
 	useCase := NewUseCase(
 		repository, transaction.Passthrough{}, &auditStub{},
@@ -547,5 +561,16 @@ func TestAgentControlRejectsCertificateBindingAndUnsupportedProtocol(t *testing.
 		t.Context(), certificate, hello, "",
 	); err != ErrAgentProtocolUnsupported {
 		t.Fatalf("protocol error = %v", err)
+	}
+	repository.identities[0].Capabilities = []string{"runtime.probe"}
+	hello.ProtocolVersion = "v1"
+	hello.Capabilities = []string{"deployment.stage"}
+	if _, err := useCase.OpenAgentSession(
+		t.Context(),
+		certificate,
+		hello,
+		"",
+	); err != ErrInvalidAgentIdentity {
+		t.Fatalf("capability escalation error = %v", err)
 	}
 }

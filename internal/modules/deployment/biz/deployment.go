@@ -78,10 +78,19 @@ type Deployment struct {
 	Revision           string
 	Status             Status
 	FailureCategory    FailureCategory
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	Version            uint64
-	Lease              Lease
+	// CutoverSequence is monotonic within one deployment slot
+	// (Project/Application/Environment/Runtime Target). Unlike the worker
+	// lease generation, it is comparable across separate Deployments.
+	CutoverSequence uint64
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	Version         uint64
+	Lease           Lease
+}
+
+func (d Deployment) CutoverScope() string {
+	return d.ProjectID + "\x00" + d.ApplicationID + "\x00" +
+		d.EnvironmentID + "\x00" + d.RuntimeTargetID
 }
 
 // NewFormal creates the immutable product deployment reference. Runtime execution

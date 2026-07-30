@@ -74,11 +74,51 @@ sequenceDiagram
 
     O->>API: POST /api/v1/auth/login<br/>email + password
     API->>UC: Login(...)
-    UC->>K: 校验 Argon2id password hash
-    UC->>K: 生成新 session token 和 token hash
-    UC->>M: 事务写 Session hash + login 审计
-    M-->>UC: 提交
-    UC-->>O: Bearer access token
+    UC->>M: 用 normalized email 的 SHA-256 键原子预留登录尝试
+    alt 已超过共享阈值
+        UC->>K: 执行 dummy Argon2id 校验
+        UC-->>O: 429 + Retry-After
+    else 允许本次尝试
+        UC->>K: 校验 Argon2id password hash
+        alt 凭据错误
+            UC-->>O: 401 通用凭据错误
+        else 凭据正确
+            UC->>M: 清理该邮箱登录尝试
+            UC->>K: 生成新 session token 和 token hash
+            UC->>M: 事务写 Session hash + login 审计
+            M-->>UC: 提交
+            UC-->>O: Bearer access token
+        end
+    end
+```
+
+登录尝试限制保存在 MongoDB，而不是单个 Server 进程内存中，因此多实例共享同一阈值。默认同一 normalized email 在 15 分钟窗口内允许 5 次尝试，第 6 次开始返回 `429 login_rate_limited`；正确登录会清理计数。记录只保存邮箱的 SHA-256 键、计数、窗口和过期时间，TTL 自动清理。它解决账号维度的密码猜测，不替代反向代理/WAF 的来源 IP 限流和全局连接保护。
+
+每次成功登录在创建新 Session 的同一事务中保留该用户最新的 `security.max_active_sessions` 个活跃 Session，默认 10 个；更早的 Session 会被撤销。用户可以通过 `GET /api/v1/auth/sessions` 查看不含 Token/hash 的 Session ID、创建/过期时间和当前会话标记，再通过 `DELETE /api/v1/auth/sessions/{session_id}` 撤销自己的任意 Session。删除条件同时固定 Session ID 与当前 User ID，不能用猜测到的 ID 撤销其他用户会话。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 已登录用户
+    participant API as Identity API
+    participant I as Session Authenticator
+    participant M as MongoDB Transaction
+    participant A as Audit Store
+
+    U->>API: GET /api/v1/auth/sessions
+    API->>I: 校验 Bearer token hash
+    I-->>API: 当前 user/session
+    API->>M: 只查询该 user 的未过期 Session
+    M-->>U: id + created/expires + current
+    U->>API: DELETE /api/v1/auth/sessions/{id}
+    API->>M: 删除 id AND 当前 user_id
+    alt 不属于当前用户或不存在
+        M-->>U: 404（不暴露所有者）
+    else 删除成功
+        API->>A: identity.session.revoke
+        M-->>API: 同事务提交
+        API-->>U: 204
+    end
 ```
 
 ## 已实现：认证、授权、资源写入与审计
@@ -195,7 +235,7 @@ sequenceDiagram
         T-->>M: 422 runtime_target_host_mismatch
     else agent 模式
         T->>DB: 写 pending Agent Target + 审计
-        T-->>M: Agent 控制流和 Runtime Gateway 完成前不可探测或部署
+        T-->>M: Agent 执行器和 Runtime Gateway 完成前不可探测或部署
     else direct 模式
         T->>DB: 写 pending Direct Target + 审计
         T-->>M: 显式 probe 成功后可部署
@@ -232,9 +272,9 @@ sequenceDiagram
 
 过期 token、重复兑换、Host 已禁用、跨 Host 绑定和无效 CSR 都会被拒绝。Owner 禁用 Host 时，当前数据库身份会被标记吊销，所有未消费 enrollment 立即过期。配置和客户可读说明见 [agent-enrollment.md](agent-enrollment.md)。
 
-## 部分实现：Agent mTLS 控制连接与在线状态
+## 已实现基础：Agent mTLS 控制连接与在线状态
 
-Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前已实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流，以及 Server 端 `runtime.probe` 类型化 command/result、有界队列、并发去重和近期结果缓存；Agent 进程、实际探测执行和 Runtime Gateway 尚未实现。
+Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前双端已经实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流、有上限的抖动退避和优雅停止；Server 端提供 `runtime.probe` 与 `deployment.prepare/stage/activate/cancel` 类型化 command/result、有界队列、并发去重和 secret-safe 近期结果缓存。Agent 侧本机 Docker executor、deadline、并发去重和跨重启结果缓存也已实现，并通过双端流一致性与真实 Engine 测试。Agent Control Server 启用时，Agent probe 与 Deployment Gateway 在 composition root 配套注册。
 
 ```mermaid
 sequenceDiagram
@@ -258,13 +298,15 @@ sequenceDiagram
         TLS->>DB: 条件更新当前 session last_seen_at
         TLS-->>A: heartbeat_ack
     end
-    opt 后端已授权的 Runtime Target 探测
+    opt 双端命令流与配套 Gateway 已实现
         U->>R: Dispatch(runtime.probe, target ID, command ID, deadline)
         alt Agent 发送队列已满
             R-->>U: backpressure（不无限等待或增长内存）
         else 已排队
             R-->>TLS: 类型化 command（不含地址、Socket 或 Shell）
             TLS-->>A: runtime.probe
+            A->>A: 查持久结果；未命中则在 deadline 内 Ping 本机 Docker Unix Socket
+            A->>A: 原子持久化安全结果（不保存原始错误）
             A->>TLS: command_result(ready/unreachable/unsupported)
             TLS->>R: 校验 session、command ID、结果类型
             R-->>U: 唤醒相同 command ID 的等待方并缓存结果
@@ -289,7 +331,7 @@ sequenceDiagram
 
 ## 部分实现：从 Release 到 Docker Deployment
 
-下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 Runtime Gateway、安全失败分类和状态审计。当前只注册 direct Docker Gateway；Agent Gateway 尚未实现。Docker Gateway 已实现候选容器健康门禁与 lease generation fencing，本地真实 Docker Engine 已覆盖健康切换、失败保留、过期执行隔离和取消清理；远程 mTLS Engine、实际入口流量和故障注入系统测试尚未完成，因此仍不是生产闭环。
+下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换和 Agent 两阶段部署/取消，单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令；远程 mTLS Engine、双主机断线/过期 fence、网络层延迟、实际入口流量和故障注入系统测试尚未完成，因此仍不是生产闭环。
 
 ```mermaid
 sequenceDiagram
@@ -306,6 +348,7 @@ sequenceDiagram
     D->>API: 创建 Deployment<br/>release + environment + runtime target + idempotency key
     API->>U: CreateDeployment(...)
     U->>M: 校验 Project 范围、引用资源和 Runtime Target=ready
+    U->>M: 为部署槽位递增 cutover sequence
     U->>M: 事务创建 queued Deployment + 审计
     U-->>D: 201 Created + deployment ID
 
@@ -316,13 +359,19 @@ sequenceDiagram
     W->>S: 按连接模式解析 Runtime TLS、Registry 密码和配置秘密
     S-->>W: 单次执行材料（不进入 Deployment 或审计）
     W->>G: Gateway Router 按 connection mode 选择适配器
-    W->>G: 检查本地 digest；缺失时携带 Registry auth 拉取
-    W->>G: 创建带 lease generation 的候选容器
+    alt direct Runtime Target
+        W->>G: 检查本地 digest；缺失时携带 Registry auth 拉取
+        W->>G: 创建带 generation + cutover sequence 的候选容器
+    else agent Runtime Target
+        W->>G: deployment.prepare（可含 Registry auth）
+        W->>G: deployment.stage（运行规格与已解析环境）
+        Note over G: Agent 只缓存命令指纹和安全结果<br/>不缓存秘密或完整命令
+    end
     G->>G: 应用端口、环境、资源和 HEALTHCHECK
     G->>G: 等待 candidate healthy
-    W->>M: 再验证 owner + generation + lease expiry
+    W->>M: 再验证 owner + generation + lease + current cutover
     M-->>W: fence 仍有效
-    W->>G: 把旧容器改为 previous 回退名称
+    W->>G: direct 切换，或 agent deployment.activate
     W->>M: 切换前再次验证 fence
     alt fence 有效且 candidate 接管成功
         W->>G: candidate 改为稳定名称并清理 previous

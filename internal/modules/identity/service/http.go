@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +40,29 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		s.authenticated(s.logout).ServeHTTP(w, r)
 	case "/api/v1/auth/me":
 		s.authenticated(s.me).ServeHTTP(w, r)
+	case "/api/v1/auth/sessions":
+		s.authenticated(s.sessions).ServeHTTP(w, r)
 	default:
+		segments := strings.Split(
+			strings.TrimPrefix(r.URL.Path, "/"),
+			"/",
+		)
+		if len(segments) == 5 &&
+			segments[0] == "api" &&
+			segments[1] == "v1" &&
+			segments[2] == "auth" &&
+			segments[3] == "sessions" &&
+			segments[4] != "" {
+			s.authenticated(
+				func(
+					w http.ResponseWriter,
+					r *http.Request,
+				) {
+					s.session(w, r, segments[4])
+				},
+			).ServeHTTP(w, r)
+			return
+		}
 		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
 	}
 }
@@ -141,6 +164,60 @@ func (s *HTTP) me(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *HTTP) sessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpx.ErrorRequest(
+			w,
+			r,
+			http.StatusMethodNotAllowed,
+			"method_not_allowed",
+		)
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	items, err := s.useCase.ListSessions(r.Context(), principal)
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	result := make([]map[string]any, len(items))
+	for index, item := range items {
+		result[index] = map[string]any{
+			"id":         item.ID,
+			"created_at": item.CreatedAt.UTC().Format(time.RFC3339),
+			"expires_at": item.ExpiresAt.UTC().Format(time.RFC3339),
+			"current":    item.ID == principal.SessionID,
+		}
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *HTTP) session(
+	w http.ResponseWriter,
+	r *http.Request,
+	sessionID string,
+) {
+	if r.Method != http.MethodDelete {
+		httpx.ErrorRequest(
+			w,
+			r,
+			http.StatusMethodNotAllowed,
+			"method_not_allowed",
+		)
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	err := s.useCase.RevokeSession(
+		r.Context(),
+		principal,
+		sessionID,
+		httpx.RequestIDFromContext(r.Context()),
+	)
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func decodeRequest(w http.ResponseWriter, r *http.Request, target any) bool {
 	if err := httpx.DecodeJSON(w, r, target); errors.Is(err, httpx.ErrUnsupportedMediaType) {
 		httpx.ErrorRequest(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type")
@@ -160,10 +237,30 @@ func writeIdentityError(w http.ResponseWriter, r *http.Request, err error) bool 
 		httpx.ErrorRequest(w, r, http.StatusConflict, "already_bootstrapped")
 	case errors.Is(err, biz.ErrInvalidCredentials):
 		unauthenticated(w, r)
+	case errors.Is(err, biz.ErrLoginRateLimited):
+		var rateLimit *biz.LoginRateLimitError
+		if errors.As(err, &rateLimit) {
+			seconds := int64(
+				(rateLimit.RetryAfter + time.Second - 1) /
+					time.Second,
+			)
+			w.Header().Set(
+				"Retry-After",
+				strconv.FormatInt(max(seconds, 1), 10),
+			)
+		}
+		httpx.ErrorRequest(
+			w,
+			r,
+			http.StatusTooManyRequests,
+			"login_rate_limited",
+		)
 	case errors.Is(err, biz.ErrInvalidEmail),
 		errors.Is(err, biz.ErrInvalidName),
 		errors.Is(err, biz.ErrInvalidPassword):
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_identity")
+	case errors.Is(err, biz.ErrNotFound):
+		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
 	default:
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 	}

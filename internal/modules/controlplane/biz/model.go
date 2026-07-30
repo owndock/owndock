@@ -145,7 +145,10 @@ type RuntimeTargetProbeRepository interface {
 }
 
 type RuntimeTargetProber interface {
-	ProbeRuntimeTarget(context.Context, RuntimeTarget) RuntimeTargetStatus
+	ProbeRuntimeTarget(
+		context.Context,
+		RuntimeTarget,
+	) (RuntimeTargetStatus, error)
 }
 
 type RegistryCredentialRepository interface {

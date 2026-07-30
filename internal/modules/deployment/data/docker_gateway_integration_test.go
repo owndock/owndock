@@ -64,10 +64,13 @@ func TestDockerGatewayEngineIntegration(t *testing.T) {
 	}
 	first := integrationExecutionPlan(stableName, "deployment-first", healthCommand)
 	second := integrationExecutionPlan(stableName, "deployment-second", healthCommand)
+	second.CutoverSequence = 2
 	unhealthy := integrationExecutionPlan(stableName, "deployment-unhealthy", []string{
 		"/bin/sh", "-c", "exit 1",
 	})
+	unhealthy.CutoverSequence = 3
 	stale := integrationExecutionPlan(stableName, "deployment-stale", healthCommand)
+	stale.CutoverSequence = 4
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
@@ -132,7 +135,8 @@ func integrationExecutionPlan(
 	}
 	return biz.ExecutionPlan{
 		DeploymentID: deploymentID, WorkerID: "integration-worker", FencingToken: 1,
-		ProjectID: "integration-project", ApplicationID: "integration-application",
+		CutoverSequence: 1,
+		ProjectID:       "integration-project", ApplicationID: "integration-application",
 		EnvironmentID: "integration-environment", RuntimeTargetID: "integration-target",
 		ImageDigest: dockerIntegrationImage, ContainerName: stableName,
 		TargetConnection: connection,
@@ -188,7 +192,6 @@ func assertContainerMissing(
 func localDockerClient() (*mobyclient.Client, error) {
 	engine, err := mobyclient.New(
 		mobyclient.FromEnv,
-		mobyclient.WithAPIVersionNegotiation(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create local Docker client: %w", err)

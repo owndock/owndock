@@ -20,6 +20,7 @@ import (
 
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
 	managedhostdata "github.com/owndock/owndock/internal/modules/managedhost/data"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/transaction"
@@ -111,6 +112,7 @@ func (a *agentAuditStub) Record(_ context.Context, event sharedaudit.Event) erro
 
 type agentRegistryStub struct {
 	hostID, sessionID string
+	capabilities      []string
 	cancel            context.CancelFunc
 	commands          chan biz.AgentCommand
 	results           []biz.AgentCommandResult
@@ -118,9 +120,11 @@ type agentRegistryStub struct {
 
 func (r *agentRegistryStub) Register(
 	hostID, sessionID string,
+	capabilities []string,
 	cancel context.CancelFunc,
 ) <-chan biz.AgentCommand {
 	r.hostID, r.sessionID, r.cancel = hostID, sessionID, cancel
+	r.capabilities = append([]string(nil), capabilities...)
 	if r.commands == nil {
 		r.commands = make(chan biz.AgentCommand)
 	}
@@ -243,6 +247,9 @@ func TestAgentStreamNegotiatesAndAcknowledgesHeartbeat(t *testing.T) {
 			CertificateSerial:  "2a",
 			CertificateSHA256:  hex.EncodeToString(fingerprint[:]),
 			CertificateExpires: now.Add(time.Hour),
+			Capabilities: []string{
+				agentprotocol.CapabilityRuntimeProbe,
+			},
 		},
 		host: biz.ManagedHost{
 			ID: "host-1", OrganizationID: "organization-1",
@@ -269,7 +276,7 @@ func TestAgentStreamNegotiatesAndAcknowledgesHeartbeat(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := strings.Join([]string{
-		`{"type":"hello","sequence":1,"hello":{"organization_id":"organization-1","managed_host_id":"host-1","agent_identity_id":"identity-1","instance_id":"instance-1","boot_id":"boot-1","agent_version":"1.0.0","protocol_version":"v1","capabilities":["docker"]}}`,
+		`{"type":"hello","sequence":1,"hello":{"organization_id":"organization-1","managed_host_id":"host-1","agent_identity_id":"identity-1","instance_id":"instance-1","boot_id":"boot-1","agent_version":"1.0.0","protocol_version":"v1","capabilities":["runtime.probe"]}}`,
 		`{"type":"heartbeat","sequence":2}`,
 		"",
 	}, "\n")
@@ -287,7 +294,9 @@ func TestAgentStreamNegotiatesAndAcknowledgesHeartbeat(t *testing.T) {
 	}
 	if repository.heartbeats != 1 ||
 		repository.host.Status != biz.StatusOffline ||
-		len(audits.events) != 2 {
+		len(audits.events) != 2 ||
+		len(registry.capabilities) != 1 ||
+		registry.capabilities[0] != "runtime.probe" {
 		t.Fatalf(
 			"repository = %+v, audits = %+v",
 			repository, audits.events,
@@ -335,6 +344,9 @@ func TestAgentStreamDeliversAndCompletesRuntimeProbe(t *testing.T) {
 			CertificateSerial:  "2a",
 			CertificateSHA256:  hex.EncodeToString(fingerprint[:]),
 			CertificateExpires: now.Add(time.Hour),
+			Capabilities: []string{
+				agentprotocol.CapabilityRuntimeProbe,
+			},
 		},
 		host: biz.ManagedHost{
 			ID: "host-1", OrganizationID: "organization-1",

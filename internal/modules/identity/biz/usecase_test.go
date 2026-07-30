@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/security"
 	"github.com/owndock/owndock/internal/shared/transaction"
 )
 
@@ -27,7 +28,11 @@ func TestBootstrapLoginAuthenticateAndLogout(t *testing.T) {
 		},
 		func() time.Time { return time.Unix(100, 0) },
 		time.Hour,
-	)
+	).WithLoginProtection(
+		&fakeLoginGuard{allowed: true},
+		5,
+		time.Minute,
+	).WithSessionPolicy(10)
 
 	credentials, err := useCase.Bootstrap(context.Background(), "Example Company", "OWNER@example.com", "long-enough-password", "request-1")
 	if err != nil {
@@ -68,6 +73,176 @@ func TestBootstrapLoginAuthenticateAndLogout(t *testing.T) {
 	}
 }
 
+func TestLoginProtectionUsesHashedKeyAndResetsAfterSuccess(
+	t *testing.T,
+) {
+	repository := &fakeRepository{
+		user: User{
+			ID:              "user-1",
+			OrganizationID:  "organization-1",
+			Email:           "owner@example.com",
+			EmailNormalized: "owner@example.com",
+			PasswordHash:    "hash:correct-password",
+			Role:            "owner",
+		},
+		sessions: make(map[string]Session),
+	}
+	guard := &fakeLoginGuard{
+		allowed: false,
+		retryAt: time.Unix(160, 0),
+	}
+	useCase := NewUseCase(
+		repository,
+		transaction.Passthrough{},
+		&fakeAudit{},
+		fakePasswords{},
+		fakeTokens{},
+		func() (string, error) { return "session-1", nil },
+		func() time.Time { return time.Unix(100, 0) },
+		time.Hour,
+	).WithLoginProtection(guard, 5, time.Minute).
+		WithSessionPolicy(10)
+
+	_, loginError := useCase.Login(
+		context.Background(),
+		"OWNER@example.com",
+		"correct-password",
+		"request-1",
+	)
+	if !errors.Is(loginError, ErrLoginRateLimited) {
+		t.Fatalf("rate-limited Login() error = %v", loginError)
+	}
+	var rateLimit *LoginRateLimitError
+	if !errors.As(loginError, &rateLimit) ||
+		rateLimit.RetryAfter != time.Minute {
+		t.Fatalf("rate limit detail = %+v", rateLimit)
+	}
+	if guard.key == "owner@example.com" || len(guard.key) != 64 {
+		t.Fatalf("login guard key = %q", guard.key)
+	}
+
+	guard.allowed = true
+	if _, err := useCase.Login(
+		context.Background(),
+		"owner@example.com",
+		"correct-password",
+		"request-2",
+	); err != nil {
+		t.Fatalf("successful Login() error = %v", err)
+	}
+	if guard.resetKey != guard.key {
+		t.Fatalf(
+			"reset key = %q, reserve key = %q",
+			guard.resetKey,
+			guard.key,
+		)
+	}
+}
+
+func TestLoginFailsClosedWithoutProtection(t *testing.T) {
+	repository := &fakeRepository{
+		user: User{
+			ID:              "user-1",
+			OrganizationID:  "organization-1",
+			Email:           "owner@example.com",
+			EmailNormalized: "owner@example.com",
+			PasswordHash:    "hash:correct-password",
+			Role:            "owner",
+		},
+		sessions: make(map[string]Session),
+	}
+	useCase := NewUseCase(
+		repository,
+		transaction.Passthrough{},
+		&fakeAudit{},
+		fakePasswords{},
+		fakeTokens{},
+		func() (string, error) { return "session-1", nil },
+		func() time.Time { return time.Unix(100, 0) },
+		time.Hour,
+	)
+	if _, err := useCase.Login(
+		context.Background(),
+		"owner@example.com",
+		"correct-password",
+		"request",
+	); !errors.Is(err, ErrLoginGuardMissing) {
+		t.Fatalf("Login() without protection error = %v", err)
+	}
+}
+
+func TestSessionGovernanceListsAndRevokesOnlyOwnedSession(t *testing.T) {
+	now := time.Unix(100, 0)
+	repository := &fakeRepository{
+		user: User{
+			ID:             "user-1",
+			OrganizationID: "organization-1",
+			Role:           "owner",
+		},
+		sessions: map[string]Session{
+			"hash-current": {
+				ID:        "session-current",
+				UserID:    "user-1",
+				TokenHash: "hash-current",
+				CreatedAt: now,
+				ExpiresAt: now.Add(time.Hour),
+			},
+			"hash-other": {
+				ID:        "session-other",
+				UserID:    "other-user",
+				TokenHash: "hash-other",
+				CreatedAt: now,
+				ExpiresAt: now.Add(time.Hour),
+			},
+		},
+	}
+	audits := &fakeAudit{}
+	useCase := NewUseCase(
+		repository,
+		transaction.Passthrough{},
+		audits,
+		fakePasswords{},
+		fakeTokens{},
+		func() (string, error) { return "audit-1", nil },
+		func() time.Time { return now },
+		time.Hour,
+	)
+	principal := security.Principal{
+		UserID:         "user-1",
+		OrganizationID: "organization-1",
+		Role:           security.RoleOwner,
+		SessionID:      "session-current",
+	}
+	sessions, err := useCase.ListSessions(
+		context.Background(),
+		principal,
+	)
+	if err != nil || len(sessions) != 1 ||
+		sessions[0].ID != "session-current" {
+		t.Fatalf("ListSessions() = %+v, %v", sessions, err)
+	}
+	if err := useCase.RevokeSession(
+		context.Background(),
+		principal,
+		"session-other",
+		"request-1",
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoke another user's session error = %v", err)
+	}
+	if err := useCase.RevokeSession(
+		context.Background(),
+		principal,
+		"session-current",
+		"request-2",
+	); err != nil {
+		t.Fatalf("revoke own session error = %v", err)
+	}
+	if len(audits.events) != 1 ||
+		audits.events[0].Action != "identity.session.revoke" {
+		t.Fatalf("session revoke audits = %+v", audits.events)
+	}
+}
+
 type fakeRepository struct {
 	organization Organization
 	user         User
@@ -92,7 +267,12 @@ func (r *fakeRepository) FindUserByEmail(_ context.Context, email string) (User,
 	return r.user, nil
 }
 
-func (r *fakeRepository) CreateSession(_ context.Context, session Session) error {
+func (r *fakeRepository) CreateSession(
+	_ context.Context,
+	session Session,
+	_ time.Time,
+	_ int,
+) error {
 	r.sessions[session.TokenHash] = session
 	return nil
 }
@@ -103,6 +283,20 @@ func (r *fakeRepository) FindSession(_ context.Context, tokenHash string, now ti
 		return Session{}, User{}, ErrNotFound
 	}
 	return session, r.user, nil
+}
+
+func (r *fakeRepository) ListSessions(
+	_ context.Context,
+	userID string,
+	now time.Time,
+) ([]Session, error) {
+	var result []Session
+	for _, session := range r.sessions {
+		if session.UserID == userID && session.ExpiresAt.After(now) {
+			result = append(result, session)
+		}
+	}
+	return result, nil
 }
 
 func (r *fakeRepository) DeleteSession(_ context.Context, sessionID, userID string) error {
@@ -128,6 +322,32 @@ func (fakeTokens) Hash(value string) string     { return "hash:" + value }
 
 type fakeAudit struct {
 	events []sharedaudit.Event
+}
+
+type fakeLoginGuard struct {
+	allowed  bool
+	retryAt  time.Time
+	key      string
+	resetKey string
+}
+
+func (g *fakeLoginGuard) ReserveLoginAttempt(
+	_ context.Context,
+	key string,
+	_ time.Time,
+	_ int,
+	_ time.Duration,
+) (bool, time.Time, error) {
+	g.key = key
+	return g.allowed, g.retryAt, nil
+}
+
+func (g *fakeLoginGuard) ResetLoginAttempts(
+	_ context.Context,
+	key string,
+) error {
+	g.resetKey = key
+	return nil
 }
 
 func (a *fakeAudit) Record(_ context.Context, event sharedaudit.Event) error {

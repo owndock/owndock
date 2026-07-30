@@ -21,8 +21,9 @@ import (
 )
 
 const (
-	deploymentLabel = "net.owndock.deployment_id"
-	fencingLabel    = "net.owndock.fencing_token"
+	deploymentLabel      = "net.owndock.deployment_id"
+	fencingLabel         = "net.owndock.fencing_token"
+	cutoverSequenceLabel = "net.owndock.cutover_sequence"
 )
 
 type dockerEngine interface {
@@ -103,13 +104,18 @@ func (g *DockerGateway) Deploy(
 
 	current, err := engine.ContainerInspect(ctx, plan.ContainerName, mobyclient.ContainerInspectOptions{})
 	if err == nil {
+		if !managedContainer(current) {
+			return runtimeConflictError()
+		}
 		if hasNewerFence(current, plan) {
+			g.removeNamedOwnedCandidate(plan, engine)
 			return staleExecutionError()
 		}
 		if ownsExecution(current, plan) {
 			if err := g.waitUntilReady(ctx, engine, current.Container.ID, plan); err != nil {
 				return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 			}
+			g.removeNamedOwnedCandidate(plan, engine)
 			g.removeContainer(previousContainerName(plan), engine)
 			return nil
 		}
@@ -127,12 +133,19 @@ func (g *DockerGateway) Deploy(
 		return staleExecutionError()
 	case candidateErr == nil && ownsExecution(candidate, plan):
 		candidateID = candidate.Container.ID
-	case candidateErr == nil:
+	case candidateErr == nil &&
+		ownsDeployment(candidate, plan.DeploymentID) &&
+		cutoverSequence(candidate) == plan.CutoverSequence &&
+		fencingToken(candidate) < plan.FencingToken:
 		if _, err := engine.ContainerRemove(
-			ctx, candidate.Container.ID, mobyclient.ContainerRemoveOptions{Force: true},
+			ctx,
+			candidate.Container.ID,
+			mobyclient.ContainerRemoveOptions{Force: true},
 		); err != nil {
 			return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 		}
+	case candidateErr == nil:
+		return runtimeConflictError()
 	case !cerrdefs.IsNotFound(candidateErr):
 		return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: candidateErr}
 	}
@@ -191,6 +204,10 @@ func (g *DockerGateway) Deploy(
 			ctx, previousContainerName(plan), mobyclient.ContainerInspectOptions{},
 		)
 		if previousErr == nil {
+			if !managedContainer(previous) {
+				g.removeCandidate(candidateID, engine)
+				return runtimeConflictError()
+			}
 			previousID = previous.Container.ID
 		} else if !cerrdefs.IsNotFound(previousErr) {
 			return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: previousErr}
@@ -252,20 +269,35 @@ func (g *DockerGateway) Cancel(
 }
 
 func ownsDeployment(result mobyclient.ContainerInspectResult, deploymentID string) bool {
-	return result.Container.Config != nil &&
+	return managedContainer(result) &&
 		result.Container.Config.Labels[deploymentLabel] == deploymentID
+}
+
+func managedContainer(result mobyclient.ContainerInspectResult) bool {
+	return result.Container.Config != nil &&
+		result.Container.Config.Labels[deploymentLabel] != ""
 }
 
 func ownsExecution(result mobyclient.ContainerInspectResult, plan biz.ExecutionPlan) bool {
 	return ownsDeployment(result, plan.DeploymentID) &&
-		fencingToken(result) == plan.FencingToken
+		fencingToken(result) == plan.FencingToken &&
+		cutoverSequence(result) == plan.CutoverSequence
 }
 
 func hasNewerFence(result mobyclient.ContainerInspectResult, plan biz.ExecutionPlan) bool {
-	// A lease generation is monotonic only within one Deployment. A separate,
-	// newer Deployment starts at generation 1 and must still be able to replace
-	// an older Deployment that happened to be reclaimed several times.
-	return ownsDeployment(result, plan.DeploymentID) &&
+	currentCutover := cutoverSequence(result)
+	if currentCutover > plan.CutoverSequence {
+		return true
+	}
+	if currentCutover == plan.CutoverSequence &&
+		!ownsDeployment(result, plan.DeploymentID) {
+		// A cutover sequence belongs to exactly one Deployment. Treat a
+		// duplicate sequence owned by another Deployment as stale rather than
+		// allowing an ambiguous destructive replacement.
+		return true
+	}
+	return currentCutover == plan.CutoverSequence &&
+		ownsDeployment(result, plan.DeploymentID) &&
 		fencingToken(result) > plan.FencingToken
 }
 
@@ -275,6 +307,18 @@ func fencingToken(result mobyclient.ContainerInspectResult) uint64 {
 	}
 	token, _ := strconv.ParseUint(result.Container.Config.Labels[fencingLabel], 10, 64)
 	return token
+}
+
+func cutoverSequence(result mobyclient.ContainerInspectResult) uint64 {
+	if result.Container.Config == nil {
+		return 0
+	}
+	sequence, _ := strconv.ParseUint(
+		result.Container.Config.Labels[cutoverSequenceLabel],
+		10,
+		64,
+	)
+	return sequence
 }
 
 func candidateContainerName(plan biz.ExecutionPlan) string {
@@ -308,6 +352,7 @@ func dockerCreateOptions(plan biz.ExecutionPlan, name string) mobyclient.Contain
 		Labels: map[string]string{
 			deploymentLabel:              plan.DeploymentID,
 			fencingLabel:                 strconv.FormatUint(plan.FencingToken, 10),
+			cutoverSequenceLabel:         strconv.FormatUint(plan.CutoverSequence, 10),
 			"net.owndock.project_id":     plan.ProjectID,
 			"net.owndock.application_id": plan.ApplicationID,
 			"net.owndock.environment_id": plan.EnvironmentID,
@@ -387,6 +432,30 @@ func (g *DockerGateway) removeCandidate(containerID string, engine dockerEngine)
 	)
 }
 
+func (g *DockerGateway) removeNamedOwnedCandidate(
+	plan biz.ExecutionPlan,
+	engine dockerEngine,
+) {
+	cleanupContext, cancel := context.WithTimeout(
+		context.Background(),
+		10*time.Second,
+	)
+	defer cancel()
+	candidate, err := engine.ContainerInspect(
+		cleanupContext,
+		candidateContainerName(plan),
+		mobyclient.ContainerInspectOptions{},
+	)
+	if err != nil || !ownsExecution(candidate, plan) {
+		return
+	}
+	_, _ = engine.ContainerRemove(
+		cleanupContext,
+		candidate.Container.ID,
+		mobyclient.ContainerRemoveOptions{Force: true},
+	)
+}
+
 func (g *DockerGateway) removeContainer(container string, engine dockerEngine) {
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -416,6 +485,13 @@ func (g *DockerGateway) restorePrevious(
 
 func staleExecutionError() error {
 	return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: biz.ErrStaleExecution}
+}
+
+func runtimeConflictError() error {
+	return &biz.ExecutionError{
+		Category: biz.FailureRuntime,
+		Cause:    errors.New("Docker container name is not owned by OwnDock"),
+	}
 }
 
 func newTLSDockerEngine(
@@ -455,6 +531,5 @@ func newTLSDockerEngine(
 		mobyclient.WithHTTPClient(httpClient),
 		mobyclient.WithHost(connection.Endpoint),
 		mobyclient.WithScheme("https"),
-		mobyclient.WithAPIVersionNegotiation(),
 	)
 }

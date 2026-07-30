@@ -3,18 +3,20 @@ package data
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
 
 func TestConnectionRegistryReplacesAndConditionallyUnregisters(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 2, 4)
 	firstContext, firstCancel := context.WithCancel(t.Context())
-	firstCommands := registry.Register("host-1", "session-1", firstCancel)
+	firstCommands := registerTestAgent(registry, "host-1", "session-1", firstCancel)
 	secondContext, secondCancel := context.WithCancel(t.Context())
-	registry.Register("host-1", "session-2", secondCancel)
+	registerTestAgent(registry, "host-1", "session-2", secondCancel)
 	if firstContext.Err() != context.Canceled {
 		t.Fatal("replaced connection was not canceled")
 	}
@@ -33,7 +35,7 @@ func TestConnectionRegistryReplacesAndConditionallyUnregisters(t *testing.T) {
 
 func TestConnectionRegistryDispatchCompletesAndCachesResult(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 2, 4)
-	commands := registry.Register("host-1", "session-1", func() {})
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
 	command := testAgentCommand("command-1")
 	result := biz.AgentCommandResult{
 		CommandID: command.ID, Status: biz.AgentCommandSucceeded,
@@ -77,7 +79,7 @@ func TestConnectionRegistryDispatchCompletesAndCachesResult(t *testing.T) {
 		t.Fatalf("duplicate result error = %v", err)
 	}
 	registry.DisconnectHost("host-1")
-	registry.Register("host-1", "session-2", func() {})
+	registerTestAgent(registry, "host-1", "session-2", func() {})
 	cached, err = registry.Dispatch(t.Context(), "host-1", command)
 	if err != nil || !cached.Equivalent(result) {
 		t.Fatalf("cached result after reconnect = %+v, error = %v", cached, err)
@@ -86,7 +88,7 @@ func TestConnectionRegistryDispatchCompletesAndCachesResult(t *testing.T) {
 
 func TestConnectionRegistryBoundsCompletedResultCache(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 1, 1)
-	commands := registry.Register("host-1", "session-1", func() {})
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
 	first := testAgentCommand("command-1")
 	second := testAgentCommand("command-2")
 	dispatchAndCompleteAgentCommand(t, registry, commands, first)
@@ -108,9 +110,67 @@ func TestConnectionRegistryBoundsCompletedResultCache(t *testing.T) {
 	registry.DisconnectHost("host-1")
 }
 
+func TestConnectionRegistryCompletedCacheDoesNotRetainCommandSecrets(
+	t *testing.T,
+) {
+	registry := newTestConnectionRegistry(t, 1, 4)
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
+	command := biz.AgentCommand{
+		ID:       "deployment-prepare-1",
+		Kind:     biz.AgentCommandDeploymentPrepare,
+		Deadline: time.Now().Add(time.Minute).UTC(),
+		Deployment: &biz.DeploymentCommand{
+			DeploymentID:    "deployment-1",
+			WorkerID:        "worker-1",
+			FencingToken:    1,
+			CutoverSequence: 1,
+			RuntimeTargetID: "target-secret-value",
+			ContainerName:   "owndock-runtime",
+			ImageDigest: "registry.example/team/api@sha256:" +
+				strings.Repeat("a", 64),
+			RegistryAuthorization: []byte("registry-secret-value"),
+		},
+	}
+	completed := make(chan error, 1)
+	go func() {
+		_, err := registry.Dispatch(t.Context(), "host-1", command)
+		completed <- err
+	}()
+	<-commands
+	if err := registry.Complete(
+		"host-1",
+		"session-1",
+		biz.AgentCommandResult{
+			CommandID: command.ID,
+			Status:    biz.AgentCommandSucceeded,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-completed; err != nil {
+		t.Fatal(err)
+	}
+
+	key := completedCommandKey{
+		hostID:    "host-1",
+		commandID: command.ID,
+	}
+	registry.mu.Lock()
+	cached := registry.completed[key]
+	registry.mu.Unlock()
+	if cached.kind != command.Kind ||
+		cached.fingerprint == ([32]byte{}) ||
+		!cached.result.Equivalent(biz.AgentCommandResult{
+			CommandID: command.ID,
+			Status:    biz.AgentCommandSucceeded,
+		}) {
+		t.Fatalf("cached metadata = %+v", cached)
+	}
+}
+
 func TestConnectionRegistryAppliesBackpressure(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 1, 4)
-	registry.Register("host-1", "session-1", func() {})
+	registerTestAgent(registry, "host-1", "session-1", func() {})
 	first := testAgentCommand("command-1")
 	second := testAgentCommand("command-2")
 
@@ -133,9 +193,72 @@ func TestConnectionRegistryAppliesBackpressure(t *testing.T) {
 	}
 }
 
+func TestConnectionRegistryEnforcesAuthenticatedCapabilities(
+	t *testing.T,
+) {
+	registry := newTestConnectionRegistry(t, 2, 4)
+	commands := registry.Register(
+		"host-1",
+		"session-1",
+		[]string{agentprotocol.CapabilityRuntimeProbe},
+		func() {},
+	)
+	deployment := biz.AgentCommand{
+		ID:       "deployment-activate-1",
+		Kind:     biz.AgentCommandDeploymentActivate,
+		Deadline: time.Now().Add(time.Minute),
+		Deployment: &biz.DeploymentCommand{
+			DeploymentID:    "deployment-1",
+			WorkerID:        "worker-1",
+			FencingToken:    1,
+			CutoverSequence: 1,
+			RuntimeTargetID: "target-1",
+			ContainerName:   "owndock-runtime",
+		},
+	}
+	if _, err := registry.Dispatch(
+		t.Context(),
+		"host-1",
+		deployment,
+	); !errors.Is(err, biz.ErrAgentCapabilityUnavailable) {
+		t.Fatalf("deployment capability error = %v", err)
+	}
+	select {
+	case command := <-commands:
+		t.Fatalf("unsupported command was queued: %+v", command)
+	default:
+	}
+
+	probe := testAgentCommand("probe-1")
+	done := make(chan error, 1)
+	go func() {
+		_, err := registry.Dispatch(t.Context(), "host-1", probe)
+		done <- err
+	}()
+	if command := <-commands; !command.Equivalent(probe) {
+		t.Fatalf("probe command = %+v", command)
+	}
+	if err := registry.Complete(
+		"host-1",
+		"session-1",
+		biz.AgentCommandResult{
+			CommandID: probe.ID,
+			Status:    biz.AgentCommandSucceeded,
+			RuntimeProbe: &biz.RuntimeProbeResult{
+				Status: biz.RuntimeProbeReady,
+			},
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConnectionRegistryFailsPendingCommandOnReconnect(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 1, 4)
-	commands := registry.Register("host-1", "session-1", func() {})
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
 	result := make(chan error, 1)
 	go func() {
 		_, err := registry.Dispatch(
@@ -144,7 +267,7 @@ func TestConnectionRegistryFailsPendingCommandOnReconnect(t *testing.T) {
 		result <- err
 	}()
 	<-commands
-	registry.Register("host-1", "session-2", func() {})
+	registerTestAgent(registry, "host-1", "session-2", func() {})
 	if err := <-result; !errors.Is(err, biz.ErrAgentDisconnected) {
 		t.Fatalf("Dispatch() error = %v, want disconnected", err)
 	}
@@ -152,7 +275,7 @@ func TestConnectionRegistryFailsPendingCommandOnReconnect(t *testing.T) {
 
 func TestConnectionRegistryRejectsConflictingCommandAndResult(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 2, 4)
-	commands := registry.Register("host-1", "session-1", func() {})
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
 	command := testAgentCommand("command-1")
 	dispatchError := make(chan error, 1)
 	go func() {
@@ -185,7 +308,7 @@ func TestConnectionRegistryRejectsConflictingCommandAndResult(t *testing.T) {
 
 func TestConnectionRegistryExpiresPendingCommand(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 1, 4)
-	commands := registry.Register("host-1", "session-1", func() {})
+	commands := registerTestAgent(registry, "host-1", "session-1", func() {})
 	command := testAgentCommand("command-1")
 	command.Deadline = time.Now().Add(20 * time.Millisecond)
 	result := make(chan error, 1)
@@ -203,12 +326,59 @@ func TestConnectionRegistryCloseCancelsAllConnections(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 2, 4)
 	firstContext, firstCancel := context.WithCancel(t.Context())
 	secondContext, secondCancel := context.WithCancel(t.Context())
-	registry.Register("host-1", "session-1", firstCancel)
-	registry.Register("host-2", "session-2", secondCancel)
+	registerTestAgent(registry, "host-1", "session-1", firstCancel)
+	registerTestAgent(registry, "host-2", "session-2", secondCancel)
 	registry.Close()
 	if firstContext.Err() != context.Canceled ||
 		secondContext.Err() != context.Canceled {
 		t.Fatal("registry close did not cancel every connection")
+	}
+}
+
+func TestConnectionRegistryDoesNotRetainInventoryResults(t *testing.T) {
+	registry := newTestConnectionRegistry(t, 2, 4)
+	commands := registerTestAgent(
+		registry,
+		"host-1",
+		"session-1",
+		func() {},
+	)
+	command := biz.AgentCommand{
+		ID:       "inventory-release-1",
+		Kind:     biz.AgentCommandInventoryRelease,
+		Deadline: time.Now().Add(time.Minute).UTC(),
+		Inventory: &biz.RuntimeInventoryCommand{
+			RuntimeTargetID: "target-1",
+			ObservationID:   "observation-1",
+		},
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		completed := make(chan error, 1)
+		go func() {
+			_, err := registry.Dispatch(t.Context(), "host-1", command)
+			completed <- err
+		}()
+		if got := <-commands; !got.Equivalent(command) {
+			t.Fatalf("attempt %d command = %+v", attempt, got)
+		}
+		if err := registry.Complete(
+			"host-1",
+			"session-1",
+			biz.AgentCommandResult{
+				CommandID: command.ID,
+				Status:    biz.AgentCommandSucceeded,
+			},
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-completed; err != nil {
+			t.Fatal(err)
+		}
+	}
+	registry.mu.Lock()
+	defer registry.mu.Unlock()
+	if len(registry.completed) != 0 {
+		t.Fatalf("inventory results retained in Server cache: %+v", registry.completed)
 	}
 }
 
@@ -222,6 +392,19 @@ func newTestConnectionRegistry(
 		t.Fatal(err)
 	}
 	return registry
+}
+
+func registerTestAgent(
+	registry *ConnectionRegistry,
+	hostID, sessionID string,
+	cancel context.CancelFunc,
+) <-chan biz.AgentCommand {
+	return registry.Register(
+		hostID,
+		sessionID,
+		agentprotocol.SupportedCapabilities(),
+		cancel,
+	)
 }
 
 func testAgentCommand(id string) biz.AgentCommand {

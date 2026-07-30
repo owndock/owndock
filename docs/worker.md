@@ -10,15 +10,15 @@ queued → preparing → deploying → succeeded
 
 Deployment Worker 不执行源码构建。已接受但尚未实现的 Git-to-Deploy 会由隔离 Build Worker/BuildKit 生成 digest Artifact，再创建 Release；构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段创建或替换目标容器。
 
-当前只注册 `direct` Docker Gateway：Server 使用目标的 mTLS 配置直接连接 Docker Engine。Agent 首次 enrollment、固定证书身份和 Server 端 `runtime.probe` 类型化传输已经实现，但 Agent 进程、实际探测执行和 Agent Gateway 尚未开放；未来 Agent Gateway 会复用相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机。未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
+当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。Agent Gateway 对 Worker 保持相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机；内部把 Deploy 拆为候选 stage、Server Mongo fence 验证和 activate。Agent Control Server 启用时，Agent prober 与 Gateway 配套注册；未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
 
 Worker 不再使用“全量 List 后 Update”的领取方式。Repository 的 `ClaimNext` 原子领取 `queued` 任务，或接管租约已过期的 `preparing/deploying` 任务，同时写入 worker ID、租约截止时间和递增版本。Runner 再通过带期望版本的事务更新进入 `preparing`，确保状态审计与状态写入一起提交。后续 `SaveClaimed` 同时校验 owner、租约和期望版本，阻止旧 Worker 覆盖新状态。
 
 Worker 通过 `biz.Executor` 接口调用准备、部署和取消清理。失败时只持久化稳定的 `failure_category`，不保存 Docker 原始错误、Endpoint 或秘密内容。`preparing`、`deploying`、`succeeded`、`failed` 和 `canceled` 均形成以 `system:{worker_id}` 为 Actor 的审计事件。
 
-Docker 稳定容器名由 Project、Application、Environment 和 Runtime Target 的组合哈希生成；候选名和回退名还包含 Deployment 身份与 lease generation，既保证相同执行幂等，也避免不同 Deployment 的 generation 都从 1 开始时发生临时名称冲突。generation 只在同一 Deployment 内比较，不能跨 Deployment 判断新旧。取消旧操作时会先校验容器上的 Deployment 与 generation 标签，避免删除已由其他执行替换的容器。
+Docker 稳定容器名由 Project、Application、Environment 和 Runtime Target 的组合哈希生成；这四个字段共同表示一个“部署槽位”。MongoDB 在创建 Deployment 时为同一槽位原子分配递增的 `cutover_sequence`，它表示不同 Deployment 的先后顺序。候选名和回退名仍包含 Deployment 身份与 lease generation，既保证同一次执行幂等，也避免不同 Deployment 的 generation 都从 1 开始时发生临时名称冲突。容器同时保存 Deployment ID、generation 和 cutover sequence：generation 判断同一 Deployment 的 Worker 尝试是否过期，cutover sequence 判断跨 Deployment 的延迟命令是否已经落后。取消旧操作时会校验完整执行身份，避免删除已由其他执行替换的容器。
 
-租约接管意味着 Prepare/Deploy 可能在进程失联后重试，因此 Executor 以 Deployment ID 和 lease generation 作为执行身份。generation 只在重新领取时递增，心跳只更新 expiry/version。Runner 在步骤执行期间按租约时长的三分之一发送心跳；Docker 候选容器带 generation 标签，并在破坏性切换前通过 Repository 再次确认 owner、generation、状态和 expiry，已经失去租约的 Worker 无法删除当前容器。
+租约接管意味着 Prepare/Deploy 可能在进程失联后重试，因此 Executor 以 Deployment ID、lease generation 和 cutover sequence 作为执行身份。generation 只在重新领取同一 Deployment 时递增，心跳只更新 expiry/version；cutover sequence 在创建 Deployment 时分配，重试同一记录不会改变。Runner 在步骤执行期间按租约时长的三分之一发送心跳；Docker 候选容器带两类 fence 标签，并在破坏性切换前通过 Repository 再次确认 owner、generation、状态、expiry，以及该 Deployment 的 cutover sequence 仍是槽位当前值。创建更新的 Deployment 后，旧 Deployment 即使租约仍有效也不能开始切换；已经到达运行目标的旧命令还会再次通过容器标签比较被拒绝。
 
 Worker 通过 `internal/platform/lifecycle.Server` 加入 Kratos App，启动、停止和 MongoDB 清理顺序受统一生命周期管理。启用方式：
 

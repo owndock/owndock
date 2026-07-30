@@ -16,6 +16,8 @@ Artifact 1 --0..1 Release
 Release 1 --* Deployment *--1 Environment
 Deployment *--1 Runtime Target
 Release *--0..1 Registry Credential
+Runtime Target 1 --* Runtime Inventory Observation
+Runtime Inventory Observation 1 --* Container/Image/Network/Volume
 ```
 
 - Managed Host 是 Organization 纳管的实际 Linux 主机；
@@ -28,9 +30,10 @@ Release *--0..1 Registry Credential
 - Environment 是 dev/staging/prod 等逻辑阶段；
 - Runtime Target 是 Project 获准使用某台 Managed Host 上 Docker Engine 的部署入口；
 - Deployment 是不可变部署操作，重试和回滚产生新操作；
+- Runtime Inventory Observation 是一次完整 Docker 资源观测 generation，只有全部分块完成后才成为当前视图；
 - Template 是可选的 Application 创建预设，不参与运行期隐式继承。
 
-Template、Source Repository、Build Configuration、Build 和 Artifact 已进入产品模型，但尚未进入当前代码/API。Agent Enrollment、Agent Identity 和 Server 端 mTLS/版本/心跳在线基础已经实现，Server 端还具备首个 `runtime.probe` 类型化命令传输；Agent 进程、实际命令执行器和 Runtime Gateway 仍未实现。
+Template、Source Repository、Build Configuration、Build 和 Artifact 已进入产品模型，但尚未进入当前代码/API。Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Runtime Inventory 已实现不依赖 Docker SDK 的安全领域投影、分块 generation、MongoDB Repository、direct/Agent 编排和 Agent 内存拉取协议，但 Runtime Target source/credential 接线、周期调度与公开查询尚未实现。自动安装、证书轮换和多主机故障系统验收仍未实现。
 
 ## 已实现的状态规则
 
@@ -53,21 +56,24 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Registry Credential 位于 Project 下，只保存 registry server、username 和外部 `password_ref`，不保存密码正文；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
 - Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
-- Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；受管 Worker 使用原子领取、租约 heartbeat、generation fence 和安全失败分类；
-- Session 只保存 access token 的单向哈希；写操作与对应 Audit Event 在同一 MongoDB 事务中提交。
+- Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；受管 Worker 使用原子领取、租约 heartbeat、同 Deployment generation fence、跨 Deployment cutover sequence 和安全失败分类；
+- Session 只保存 access token 的单向哈希；每个用户的活跃 Session 数有配置上限，用户可查看安全摘要并撤销自己的 Session，撤销与 Audit Event 在同一 MongoDB 事务中提交；
+- 登录尝试按 normalized email 的 SHA-256 键在 MongoDB 共享计数，达到配置阈值后返回统一 `429` 和 `Retry-After`；正确登录清理计数，TTL 回收过期窗口。
+- Runtime Inventory 以 observation generation 写入 Container、Image、Network、Volume 的安全投影；新 generation 完整提交前不会替换当前视图，旧 observation 不能覆盖新视图。
 
 当前采用 Organization 级内置角色 Owner、Maintainer、Developer、Viewer。自定义角色、细粒度 Project 成员绑定和 OIDC 不在当前社区切片内。
 
-Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取消部署，Maintainer 还可执行回滚，Viewer 仅可读取部署记录。创建、重试或回滚前都要求所选 Runtime Target 已处于 `ready`；否则返回 `409 runtime_target_not_ready`，不会先创建一个注定无法执行的排队任务。当前只有显式探测成功的 direct Target 可以进入 `ready`。
+Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取消部署，Maintainer 还可执行回滚，Viewer 仅可读取部署记录。创建、重试或回滚前都要求所选 Runtime Target 已处于 `ready`；否则返回 `409 runtime_target_not_ready`，不会先创建一个注定无法执行的排队任务。direct Target 通过受约束的 mTLS Docker Ping 探测，agent Target 通过当前已认证 Host 连接上的类型化 `runtime.probe` 探测；两种模式都只有显式探测成功后才进入 `ready`。
 
 ## 已接受但尚未实现
 
 - Template 创建和快照实例化；
 - Source Repository、Repository Credential、Build Configuration、Build、Artifact、Build Worker/BuildKit 和 Webhook Adapter；
-- Agent 进程、Agent 侧命令执行与持久幂等结果、证书安全轮换和 Agent Runtime Gateway；
+- Docker Runtime Inventory 的 Runtime Target 接线与周期采集、Event 收敛、Host/Project 权限和公开查询 API；
+- Agent 自动安装、部署/取消执行、证书安全轮换和 Agent Runtime Gateway；
 - 多主机部署选址系统验收；
 - TerminalSession、容器 exec、主机 PTY、WSS 终端传输和终端访问策略；
-- 用户管理、Project 成员绑定、登录限流和完整安全运维。
+- 用户管理、Project 成员绑定、来源 IP/全局入口限流、管理员级全用户会话治理和完整安全运维。
 
 这些能力不能通过占位路由、假状态或工程样例提前声明为可用。
 
@@ -75,15 +81,16 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 顶层 Application、Environment、Deployment 路由由开发配置显式启用，使用进程内存仓储且没有认证授权。它们仅用于验证 `service → biz.UseCase → Repository/Gateway` 依赖方向，不能进入共享或生产网络，也不能作为正式 Project API 的兼容入口。
 
-正式 HTTP Service 使用独立响应 DTO，领域实体不声明 JSON tag。Deployment 的内部 `Version`、`Lease.Owner`、`Lease.ExpiresAt` 与 Agent token/certificate hash 不属于普通公开 API；Mongo BSON 映射由 data adapter 独立定义。
+正式 HTTP Service 使用独立响应 DTO，领域实体不声明 JSON tag。Deployment 的内部 `Version`、`Lease.Owner`、`Lease.ExpiresAt`、`CutoverSequence` 与 Agent token/certificate hash 不属于普通公开 API；Mongo BSON 映射由 data adapter 独立定义。
 
 ## 下一步实现顺序
 
-1. 在已实现 enrollment、固定身份、心跳连接和 Server 端 `runtime.probe` 传输上完成 Agent 进程、Agent 侧持久幂等结果和证书轮换；
-2. 接入 Agent Docker Runtime Gateway，并完成两主机不得串目标的系统验收；
-3. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
-4. 完成 Terminal 权限、TerminalSession、容器 exec、主机 PTY 和 WSS 安全链路；
-5. 建立 Template、用户/成员管理以及生产安全运维能力；
-6. 完成远程 mTLS Engine、入口流量、网络故障注入后移除或重塑工程样例。
+1. 在已实现 enrollment、固定身份、双端心跳连接、`runtime.probe`、两阶段部署和持久结果缓存上完成安装自动化和证书轮换；
+2. 使用两台真实 Agent 主机完成选址、断线、网络分区、延迟旧命令和过期 fence 系统验收；
+3. 完成 Runtime Inventory 的 source/credential 接线与周期调度、Event 对账和权限查询；
+4. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
+5. 完成 Terminal 权限、TerminalSession、容器 exec、主机 PTY 和 WSS 安全链路；
+6. 建立 Template、用户/成员管理以及生产安全运维能力；
+7. 完成远程 mTLS Engine、入口流量、网络故障注入后移除或重塑工程样例。
 
 当前和目标链路的时序见 [flows.md](flows.md)。

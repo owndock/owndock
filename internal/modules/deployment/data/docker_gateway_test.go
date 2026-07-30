@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"iter"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -233,6 +234,7 @@ func testExecutionPlan() biz.ExecutionPlan {
 	return biz.ExecutionPlan{
 		DeploymentID: "deployment", ProjectID: "project", ApplicationID: "application",
 		EnvironmentID: "environment", RuntimeTargetID: "target",
+		WorkerID: "worker", FencingToken: 1, CutoverSequence: 1,
 		ImageDigest:      "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
 		ContainerName:    "owndock-scope",
 		TargetConnection: connection,
@@ -258,9 +260,16 @@ func TestDockerGatewayPreparesAndDeploysIdempotently(t *testing.T) {
 
 	probe.inspectErr = nil
 	probe.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{
-		ID:     "existing",
-		State:  &container.State{Running: true},
-		Config: &container.Config{Labels: map[string]string{deploymentLabel: plan.DeploymentID}},
+		ID:    "existing",
+		State: &container.State{Running: true},
+		Config: &container.Config{Labels: map[string]string{
+			deploymentLabel: plan.DeploymentID,
+			fencingLabel:    strconv.FormatUint(plan.FencingToken, 10),
+			cutoverSequenceLabel: strconv.FormatUint(
+				plan.CutoverSequence,
+				10,
+			),
+		}},
 	}}
 	probe.created, probe.started = false, false
 	if err := gateway.Deploy(t.Context(), plan, biz.RuntimeCredential{}); err != nil {
@@ -288,6 +297,26 @@ func TestDockerGatewayCancelDoesNotRemoveNewerDeployment(t *testing.T) {
 	}
 }
 
+func TestDockerGatewayDoesNotReplaceUnmanagedStableContainer(t *testing.T) {
+	plan := testExecutionPlan()
+	probe := &dockerEngineProbe{
+		inspect: mobyclient.ContainerInspectResult{Container: container.InspectResponse{
+			ID: "user-container",
+			Config: &container.Config{Labels: map[string]string{
+				"owner": "user",
+			}},
+		}},
+	}
+	gateway := NewDockerGateway()
+	gateway.newEngine = func(biz.ExecutionPlan, biz.RuntimeCredential) (dockerEngine, error) {
+		return probe, nil
+	}
+	err := gateway.Deploy(t.Context(), plan, biz.RuntimeCredential{})
+	if err == nil || probe.created || probe.removed || probe.renamed {
+		t.Fatalf("error = %v, probe = %+v", err, probe)
+	}
+}
+
 func TestDockerGatewayReplacesOlderDeploymentAndCancelsOwnedContainer(t *testing.T) {
 	plan := testExecutionPlan()
 	probe := &dockerEngineProbe{inspect: mobyclient.ContainerInspectResult{Container: container.InspectResponse{
@@ -306,8 +335,15 @@ func TestDockerGatewayReplacesOlderDeploymentAndCancelsOwnedContainer(t *testing
 
 	probe.removed = false
 	probe.inspect = mobyclient.ContainerInspectResult{Container: container.InspectResponse{
-		ID:     "current",
-		Config: &container.Config{Labels: map[string]string{deploymentLabel: plan.DeploymentID}},
+		ID: "current",
+		Config: &container.Config{Labels: map[string]string{
+			deploymentLabel: plan.DeploymentID,
+			fencingLabel:    strconv.FormatUint(plan.FencingToken, 10),
+			cutoverSequenceLabel: strconv.FormatUint(
+				plan.CutoverSequence,
+				10,
+			),
+		}},
 	}}
 	if err := gateway.Cancel(t.Context(), plan, biz.RuntimeCredential{}); err != nil {
 		t.Fatal(err)
@@ -392,6 +428,10 @@ func TestDockerGatewayRejectsContainerWithNewerFence(t *testing.T) {
 		ID: "newer", State: &container.State{Running: true},
 		Config: &container.Config{Labels: map[string]string{
 			deploymentLabel: plan.DeploymentID, fencingLabel: "3",
+			cutoverSequenceLabel: strconv.FormatUint(
+				plan.CutoverSequence,
+				10,
+			),
 		}},
 	}}}
 	gateway := NewDockerGateway()
@@ -408,10 +448,12 @@ func TestDockerGatewayDoesNotCompareFencesAcrossDeployments(t *testing.T) {
 	plan := testExecutionPlan()
 	plan.DeploymentID = "new-deployment"
 	plan.FencingToken = 1
+	plan.CutoverSequence = 8
 	probe := &dockerEngineProbe{inspect: mobyclient.ContainerInspectResult{Container: container.InspectResponse{
 		ID: "older", State: &container.State{Running: true},
 		Config: &container.Config{Labels: map[string]string{
 			deploymentLabel: "old-deployment", fencingLabel: "7",
+			cutoverSequenceLabel: "7",
 		}},
 	}}}
 	gateway := NewDockerGateway()
@@ -423,6 +465,30 @@ func TestDockerGatewayDoesNotCompareFencesAcrossDeployments(t *testing.T) {
 	}
 	if !probe.created || !probe.renamed {
 		t.Fatalf("new deployment did not replace older generation: %+v", probe)
+	}
+}
+
+func TestDockerGatewayRejectsOlderCutoverAcrossDeployments(t *testing.T) {
+	plan := testExecutionPlan()
+	plan.DeploymentID = "older-deployment"
+	plan.FencingToken = 9
+	plan.CutoverSequence = 7
+	probe := &dockerEngineProbe{inspect: mobyclient.ContainerInspectResult{Container: container.InspectResponse{
+		ID: "newer", State: &container.State{Running: true},
+		Config: &container.Config{Labels: map[string]string{
+			deploymentLabel:      "newer-deployment",
+			fencingLabel:         "1",
+			cutoverSequenceLabel: "8",
+		}},
+	}}}
+	gateway := NewDockerGateway()
+	gateway.newEngine = func(biz.ExecutionPlan, biz.RuntimeCredential) (dockerEngine, error) {
+		return probe, nil
+	}
+	err := gateway.Deploy(t.Context(), plan, biz.RuntimeCredential{})
+	if !errors.Is(err, biz.ErrStaleExecution) ||
+		probe.created || probe.removed || probe.renamed {
+		t.Fatalf("error = %v, probe = %+v", err, probe)
 	}
 }
 

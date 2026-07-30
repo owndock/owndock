@@ -35,7 +35,11 @@ func TestIdentityHTTPBootstrapAuthenticationAndLogout(t *testing.T) {
 		},
 		func() time.Time { return time.Unix(100, 0) },
 		time.Hour,
-	)
+	).WithLoginProtection(
+		allowedLoginGuard{},
+		5,
+		15*time.Minute,
+	).WithSessionPolicy(10)
 	handler := NewHTTP(useCase, func() (string, error) { return "bootstrap-secret", nil })
 
 	denied := request(handler, http.MethodPost, "/api/v1/auth/bootstrap",
@@ -66,6 +70,42 @@ func TestIdentityHTTPBootstrapAuthenticationAndLogout(t *testing.T) {
 	if rawToken == "" {
 		t.Fatal("test repository did not capture raw token")
 	}
+	sessionList := request(
+		handler,
+		http.MethodGet,
+		"/api/v1/auth/sessions",
+		"",
+		rawToken,
+	)
+	if sessionList.Code != http.StatusOK ||
+		!strings.Contains(sessionList.Body.String(), `"current":true`) {
+		t.Fatalf(
+			"session list status=%d body=%s",
+			sessionList.Code,
+			sessionList.Body.String(),
+		)
+	}
+	var bootstrapSessionID string
+	for _, session := range repository.sessions {
+		if session.TokenHash != tokens.Hash(rawToken) {
+			bootstrapSessionID = session.ID
+			break
+		}
+	}
+	revoke := request(
+		handler,
+		http.MethodDelete,
+		"/api/v1/auth/sessions/"+bootstrapSessionID,
+		"",
+		rawToken,
+	)
+	if revoke.Code != http.StatusNoContent {
+		t.Fatalf(
+			"session revoke status=%d body=%s",
+			revoke.Code,
+			revoke.Body.String(),
+		)
+	}
 
 	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 	meRequest.Header.Set("Authorization", "Bearer "+rawToken)
@@ -86,6 +126,51 @@ func TestIdentityHTTPBootstrapAuthenticationAndLogout(t *testing.T) {
 	handler.ServeHTTP(meAfterLogout, meRequest)
 	if meAfterLogout.Code != http.StatusUnauthorized {
 		t.Fatalf("me after logout status=%d", meAfterLogout.Code)
+	}
+}
+
+func TestIdentityHTTPReturnsRetryAfterWhenLoginIsLimited(t *testing.T) {
+	passwords, err := identitydata.NewPasswordHasher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	useCase := biz.NewUseCase(
+		&memoryIdentityRepository{},
+		transaction.Passthrough{},
+		discardAudit{},
+		passwords,
+		&testTokens{},
+		func() (string, error) { return "id-1", nil },
+		func() time.Time { return time.Unix(100, 0) },
+		time.Hour,
+	).WithLoginProtection(
+		deniedLoginGuard{retryAt: time.Unix(190, 0)},
+		5,
+		15*time.Minute,
+	).WithSessionPolicy(10)
+	handler := NewHTTP(
+		useCase,
+		func() (string, error) { return "bootstrap-secret", nil },
+	)
+	response := request(
+		handler,
+		http.MethodPost,
+		"/api/v1/auth/login",
+		`{"email":"owner@example.com","password":"wrong-password"}`,
+		"",
+	)
+	if response.Code != http.StatusTooManyRequests ||
+		response.Header().Get("Retry-After") != "90" ||
+		!strings.Contains(
+			response.Body.String(),
+			`"code":"login_rate_limited"`,
+		) {
+		t.Fatalf(
+			"limited login status=%d retry=%q body=%s",
+			response.Code,
+			response.Header().Get("Retry-After"),
+			response.Body.String(),
+		)
 	}
 }
 
@@ -131,7 +216,12 @@ func (r *memoryIdentityRepository) FindUserByEmail(_ context.Context, email stri
 	return r.user, nil
 }
 
-func (r *memoryIdentityRepository) CreateSession(_ context.Context, session biz.Session) error {
+func (r *memoryIdentityRepository) CreateSession(
+	_ context.Context,
+	session biz.Session,
+	_ time.Time,
+	_ int,
+) error {
 	r.sessions[session.TokenHash] = session
 	return nil
 }
@@ -142,6 +232,20 @@ func (r *memoryIdentityRepository) FindSession(_ context.Context, tokenHash stri
 		return biz.Session{}, biz.User{}, biz.ErrNotFound
 	}
 	return session, r.user, nil
+}
+
+func (r *memoryIdentityRepository) ListSessions(
+	_ context.Context,
+	userID string,
+	now time.Time,
+) ([]biz.Session, error) {
+	var result []biz.Session
+	for _, session := range r.sessions {
+		if session.UserID == userID && session.ExpiresAt.After(now) {
+			result = append(result, session)
+		}
+	}
+	return result, nil
 }
 
 func (r *memoryIdentityRepository) DeleteSession(_ context.Context, sessionID, userID string) error {
@@ -161,6 +265,46 @@ func (discardAudit) Record(context.Context, sharedaudit.Event) error { return ni
 type testTokens struct {
 	count   int
 	lastRaw string
+}
+
+type deniedLoginGuard struct {
+	retryAt time.Time
+}
+
+type allowedLoginGuard struct{}
+
+func (allowedLoginGuard) ReserveLoginAttempt(
+	context.Context,
+	string,
+	time.Time,
+	int,
+	time.Duration,
+) (bool, time.Time, error) {
+	return true, time.Time{}, nil
+}
+
+func (allowedLoginGuard) ResetLoginAttempts(
+	context.Context,
+	string,
+) error {
+	return nil
+}
+
+func (g deniedLoginGuard) ReserveLoginAttempt(
+	context.Context,
+	string,
+	time.Time,
+	int,
+	time.Duration,
+) (bool, time.Time, error) {
+	return false, g.retryAt, nil
+}
+
+func (deniedLoginGuard) ResetLoginAttempts(
+	context.Context,
+	string,
+) error {
+	return nil
 }
 
 func (t *testTokens) New() (string, string, error) {

@@ -75,10 +75,61 @@ func TestDomainTypesDoNotDeclareJSONTransportTags(t *testing.T) {
 	}
 }
 
+func TestDeprecatedMobyClientOptionsAreNotUsed(t *testing.T) {
+	root := repositoryRoot(t)
+	deprecated := "WithAPI" + "VersionNegotiation"
+	err := filepath.WalkDir(root, func(
+		path string,
+		entry os.DirEntry,
+		walkErr error,
+	) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			if entry.Name() == ".git" || entry.Name() == "vendor" ||
+				entry.Name() == "bin" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		value, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(string(value), deprecated) {
+			relative, relativeErr := filepath.Rel(root, path)
+			if relativeErr != nil {
+				return relativeErr
+			}
+			t.Errorf(
+				"%s: deprecated Moby Client option %s must not be used; automatic API negotiation is enabled by default",
+				filepath.ToSlash(relative),
+				deprecated,
+			)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func checkImport(t *testing.T, file, imported string) {
 	t.Helper()
 	if strings.HasPrefix(file, "internal/platform/") && strings.Contains(imported, modulePath+"/internal/modules/") {
 		t.Errorf("%s: platform packages must not import business modules: %s", file, imported)
+	}
+	if strings.HasPrefix(file, "internal/agent/") &&
+		strings.Contains(imported, modulePath+"/internal/modules/") {
+		t.Errorf(
+			"%s: Agent packages must use shared protocol contracts, not Server modules: %s",
+			file,
+			imported,
+		)
 	}
 
 	domain, isBiz := bizDomain(file)

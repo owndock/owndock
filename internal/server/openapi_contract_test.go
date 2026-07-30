@@ -59,6 +59,16 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "list current user sessions", method: http.MethodGet,
+			target:  "/api/v1/auth/sessions",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "reject unknown session revoke", method: http.MethodDelete,
+			target:  "/api/v1/auth/sessions/missing-session",
+			headers: bearerHeaders(), wantStatus: http.StatusNotFound,
+		},
+		{
 			name: "create project", method: http.MethodPost, target: "/api/v1/projects",
 			body: `{"name":"Delivery"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},

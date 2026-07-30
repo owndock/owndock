@@ -16,6 +16,8 @@ var (
 	ErrInvalidEmail        = errors.New("email is invalid")
 	ErrInvalidName         = errors.New("organization name is invalid")
 	ErrInvalidPassword     = errors.New("password must contain between 12 and 128 characters")
+	ErrLoginGuardMissing   = errors.New("login protection is unavailable")
+	ErrLoginRateLimited    = errors.New("login attempt rate limit exceeded")
 	ErrNotFound            = errors.New("identity was not found")
 )
 
@@ -47,9 +49,36 @@ type Repository interface {
 	HasUsers(context.Context) (bool, error)
 	CreateBootstrap(context.Context, Organization, User, Session) error
 	FindUserByEmail(context.Context, string) (User, error)
-	CreateSession(context.Context, Session) error
+	CreateSession(context.Context, Session, time.Time, int) error
 	FindSession(context.Context, string, time.Time) (Session, User, error)
+	ListSessions(context.Context, string, time.Time) ([]Session, error)
 	DeleteSession(context.Context, string, string) error
+}
+
+// LoginGuard persists failed-login admission state independently from
+// application process memory so multiple Server instances enforce one limit.
+// The key is a one-way hash of the normalized email address.
+type LoginGuard interface {
+	ReserveLoginAttempt(
+		context.Context,
+		string,
+		time.Time,
+		int,
+		time.Duration,
+	) (allowed bool, retryAt time.Time, err error)
+	ResetLoginAttempts(context.Context, string) error
+}
+
+type LoginRateLimitError struct {
+	RetryAfter time.Duration
+}
+
+func (e *LoginRateLimitError) Error() string {
+	return ErrLoginRateLimited.Error()
+}
+
+func (e *LoginRateLimitError) Is(target error) bool {
+	return target == ErrLoginRateLimited
 }
 
 type PasswordHasher interface {

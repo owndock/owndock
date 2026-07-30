@@ -398,10 +398,10 @@ func (u *UseCase) ProbeRuntimeTarget(
 	if err != nil {
 		return RuntimeTarget{}, err
 	}
-	if target.ConnectionMode != runtimeaccess.ModeDirectDocker {
-		return RuntimeTarget{}, ErrRuntimeTargetProbeUnavailable
+	status, err := u.targetProber.ProbeRuntimeTarget(ctx, target)
+	if err != nil {
+		return RuntimeTarget{}, err
 	}
-	status := u.targetProber.ProbeRuntimeTarget(ctx, target)
 	if err := ctx.Err(); err != nil {
 		return RuntimeTarget{}, err
 	}

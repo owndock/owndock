@@ -24,6 +24,9 @@ const (
 	defaultMongoMaxPoolSize      = 100
 	defaultBootstrapTokenEnv     = "OWNDOCK_BOOTSTRAP_TOKEN"
 	defaultSessionTTL            = 24 * time.Hour
+	defaultMaximumActiveSessions = 10
+	defaultLoginAttemptLimit     = 5
+	defaultLoginAttemptWindow    = 15 * time.Minute
 	defaultWorkerPoll            = 2 * time.Second
 	defaultWorkerLease           = 30 * time.Second
 	defaultWorkerOperation       = 10 * time.Minute
@@ -112,9 +115,12 @@ type DeploymentWorker struct {
 }
 
 type Security struct {
-	BootstrapTokenEnv string   `json:"bootstrap_token_env"`
-	SessionTTL        string   `json:"session_ttl"`
-	AgentPKI          AgentPKI `json:"agent_pki"`
+	BootstrapTokenEnv  string   `json:"bootstrap_token_env"`
+	SessionTTL         string   `json:"session_ttl"`
+	MaxActiveSessions  int      `json:"max_active_sessions"`
+	LoginAttemptLimit  int      `json:"login_attempt_limit"`
+	LoginAttemptWindow string   `json:"login_attempt_window"`
+	AgentPKI           AgentPKI `json:"agent_pki"`
 }
 
 type AgentPKI struct {
@@ -175,8 +181,11 @@ func Load(path string) (Config, error) {
 			},
 		},
 		Security: Security{
-			BootstrapTokenEnv: defaultBootstrapTokenEnv,
-			SessionTTL:        defaultSessionTTL.String(),
+			BootstrapTokenEnv:  defaultBootstrapTokenEnv,
+			SessionTTL:         defaultSessionTTL.String(),
+			MaxActiveSessions:  defaultMaximumActiveSessions,
+			LoginAttemptLimit:  defaultLoginAttemptLimit,
+			LoginAttemptWindow: defaultLoginAttemptWindow.String(),
 			AgentPKI: AgentPKI{
 				CACertificateEnv: defaultAgentCACertEnv,
 				CAPrivateKeyEnv:  defaultAgentCAKeyEnv,
@@ -407,6 +416,21 @@ func (s Security) Validate(productEnabled bool) error {
 	if _, err := s.SessionTTLDuration(); err != nil {
 		return fmt.Errorf("session_ttl: %w", err)
 	}
+	if maximum := s.MaxActiveSessionsValue(); maximum < 1 ||
+		maximum > 100 {
+		return fmt.Errorf(
+			"max_active_sessions must be between 1 and 100",
+		)
+	}
+	if limit := s.LoginAttemptLimitValue(); limit < 1 || limit > 100 {
+		return fmt.Errorf("login_attempt_limit must be between 1 and 100")
+	}
+	window, err := s.LoginAttemptWindowDuration()
+	if err != nil || window < time.Minute || window > 24*time.Hour {
+		return fmt.Errorf(
+			"login_attempt_window must be between 1m and 24h",
+		)
+	}
 	if err := s.AgentPKI.Validate(); err != nil {
 		return fmt.Errorf("agent_pki: %w", err)
 	}
@@ -459,6 +483,27 @@ func (p AgentPKI) Materials() ([]byte, []byte, error) {
 
 func (s Security) SessionTTLDuration() (time.Duration, error) {
 	return parseDuration(s.SessionTTL, defaultSessionTTL)
+}
+
+func (s Security) MaxActiveSessionsValue() int {
+	if s.MaxActiveSessions == 0 {
+		return defaultMaximumActiveSessions
+	}
+	return s.MaxActiveSessions
+}
+
+func (s Security) LoginAttemptLimitValue() int {
+	if s.LoginAttemptLimit == 0 {
+		return defaultLoginAttemptLimit
+	}
+	return s.LoginAttemptLimit
+}
+
+func (s Security) LoginAttemptWindowDuration() (time.Duration, error) {
+	return parseDuration(
+		s.LoginAttemptWindow,
+		defaultLoginAttemptWindow,
+	)
 }
 
 func (s Security) BootstrapToken() (string, error) {

@@ -143,8 +143,8 @@ func (s managedHostLookupStub) ConnectionMode(
 func (p runtimeTargetProberStub) ProbeRuntimeTarget(
 	context.Context,
 	RuntimeTarget,
-) RuntimeTargetStatus {
-	return p.status
+) (RuntimeTargetStatus, error) {
+	return p.status, nil
 }
 
 func TestProbeRuntimeTargetPersistsSafeStatusAndAudit(t *testing.T) {
@@ -213,7 +213,7 @@ func TestCreateRuntimeTargetRequiresMatchingManagedHostMode(t *testing.T) {
 	}
 }
 
-func TestAgentRuntimeTargetProbeRemainsClosed(t *testing.T) {
+func TestAgentRuntimeTargetProbeUsesConfiguredProber(t *testing.T) {
 	store := &fakeStore{
 		projects: []Project{{
 			ID: "project", OrganizationID: "organization",
@@ -235,10 +235,14 @@ func TestAgentRuntimeTargetProbeRemainsClosed(t *testing.T) {
 		UserID: "owner", OrganizationID: "organization",
 		SessionID: "session", Role: security.RoleOwner,
 	}
-	if _, err := useCase.ProbeRuntimeTarget(
+	target, err := useCase.ProbeRuntimeTarget(
 		t.Context(), owner, "project", "target", "request",
-	); err != ErrRuntimeTargetProbeUnavailable {
-		t.Fatalf("error = %v", err)
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Status != RuntimeTargetStatusReady {
+		t.Fatalf("status = %s", target.Status)
 	}
 }
 

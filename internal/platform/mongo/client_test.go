@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 	identityservice "github.com/owndock/owndock/internal/modules/identity/service"
 	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
 	managedhostdata "github.com/owndock/owndock/internal/modules/managedhost/data"
+	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	"github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/id"
@@ -30,9 +33,11 @@ import (
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
+	"github.com/owndock/owndock/internal/shared/security"
 	"github.com/testcontainers/testcontainers-go"
 	testmongo "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/v2/bson"
+	drivermongo "go.mongodb.org/mongo-driver/v2/mongo"
 )
 
 const integrationImage = "mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3"
@@ -42,8 +47,8 @@ type readyRuntimeTargetProber struct{}
 func (readyRuntimeTargetProber) ProbeRuntimeTarget(
 	context.Context,
 	controlplanebiz.RuntimeTarget,
-) controlplanebiz.RuntimeTargetStatus {
-	return controlplanebiz.RuntimeTargetStatusReady
+) (controlplanebiz.RuntimeTargetStatus, error) {
+	return controlplanebiz.RuntimeTargetStatusReady, nil
 }
 
 func TestOpenRejectsDisabledConfig(t *testing.T) {
@@ -170,9 +175,11 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err := runner.Run(ctx, migration.Default()); err != nil {
 		t.Fatalf("rerun migrations: %v", err)
 	}
+	verifyRuntimeInventoryIntegration(t, ctx, client.Database())
 	var migratedDeployment struct {
-		OrganizationID string `bson:"organization_id"`
-		Status         string `bson:"status"`
+		OrganizationID  string `bson:"organization_id"`
+		Status          string `bson:"status"`
+		CutoverSequence uint64 `bson:"cutover_sequence"`
 	}
 	if err := client.Database().Collection("deployments").FindOne(
 		ctx, bson.D{{Key: "_id", Value: "legacy-deployment"}},
@@ -180,7 +187,8 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("read migrated deployment: %v", err)
 	}
 	if migratedDeployment.OrganizationID != "legacy-organization" ||
-		migratedDeployment.Status != "preparing" {
+		migratedDeployment.Status != "preparing" ||
+		migratedDeployment.CutoverSequence == 0 {
 		t.Fatalf("migrated deployment = %+v", migratedDeployment)
 	}
 	var migratedFailure struct {
@@ -235,16 +243,24 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("password hasher: %v", err)
 	}
+	identityRepository := identitydata.NewMongoRepository(
+		client.Database(),
+	)
+	identityNow := time.Now().UTC()
 	identityUseCase := identitybiz.NewUseCase(
-		identitydata.NewMongoRepository(client.Database()),
+		identityRepository,
 		client,
 		auditStore,
 		passwords,
 		identitydata.SessionTokens{},
 		id.New,
-		time.Now,
+		func() time.Time { return identityNow },
 		time.Hour,
-	)
+	).WithLoginProtection(
+		identityRepository,
+		3,
+		time.Minute,
+	).WithSessionPolicy(3)
 	bootstrap, err := identityUseCase.Bootstrap(
 		ctx, "Integration Company", "owner@example.com", "integration-password", "bootstrap-request",
 	)
@@ -255,6 +271,29 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authenticate bootstrap token: %v", err)
 	}
+	for attempt := 1; attempt <= 3; attempt++ {
+		if _, err := identityUseCase.Login(
+			ctx,
+			"owner@example.com",
+			"wrong-password",
+			"failed-login-request",
+		); !errors.Is(err, identitybiz.ErrInvalidCredentials) {
+			t.Fatalf(
+				"failed login attempt %d error = %v",
+				attempt,
+				err,
+			)
+		}
+	}
+	if _, err := identityUseCase.Login(
+		ctx,
+		"owner@example.com",
+		"integration-password",
+		"limited-login-request",
+	); !errors.Is(err, identitybiz.ErrLoginRateLimited) {
+		t.Fatalf("rate-limited login error = %v", err)
+	}
+	identityNow = identityNow.Add(2 * time.Minute)
 	login, err := identityUseCase.Login(ctx, "owner@example.com", "integration-password", "login-request")
 	if err != nil {
 		t.Fatalf("login: %v", err)
@@ -262,6 +301,134 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	loginPrincipal, err := identityUseCase.Authenticate(ctx, login.AccessToken)
 	if err != nil {
 		t.Fatalf("authenticate login token: %v", err)
+	}
+	loginAttemptCount, err := client.Database().
+		Collection("login_attempts").
+		CountDocuments(ctx, bson.D{})
+	if err != nil {
+		t.Fatalf("count login attempts: %v", err)
+	}
+	if loginAttemptCount != 0 {
+		t.Fatalf(
+			"login attempt count after successful login = %d",
+			loginAttemptCount,
+		)
+	}
+	const concurrentLoginAttempts = 12
+	var loginAttemptWait sync.WaitGroup
+	allowedAttempts := make(chan bool, concurrentLoginAttempts)
+	loginAttemptErrors := make(chan error, concurrentLoginAttempts)
+	for range concurrentLoginAttempts {
+		loginAttemptWait.Add(1)
+		go func() {
+			defer loginAttemptWait.Done()
+			allowed, _, reserveErr :=
+				identityRepository.ReserveLoginAttempt(
+					ctx,
+					strings.Repeat("a", 64),
+					identityNow,
+					3,
+					time.Minute,
+				)
+			allowedAttempts <- allowed
+			loginAttemptErrors <- reserveErr
+		}()
+	}
+	loginAttemptWait.Wait()
+	close(allowedAttempts)
+	close(loginAttemptErrors)
+	for reserveErr := range loginAttemptErrors {
+		if reserveErr != nil {
+			t.Fatalf("reserve concurrent login attempt: %v", reserveErr)
+		}
+	}
+	allowedCount := 0
+	for allowed := range allowedAttempts {
+		if allowed {
+			allowedCount++
+		}
+	}
+	if allowedCount != 3 {
+		t.Fatalf(
+			"concurrent allowed login attempts = %d, want 3",
+			allowedCount,
+		)
+	}
+	if err := identityRepository.ResetLoginAttempts(
+		ctx,
+		strings.Repeat("a", 64),
+	); err != nil {
+		t.Fatalf("reset concurrent login attempts: %v", err)
+	}
+	latestAccessToken := login.AccessToken
+	for index := 0; index < 2; index++ {
+		credentials, err := identityUseCase.Login(
+			ctx,
+			"owner@example.com",
+			"integration-password",
+			"session-cap-login-request",
+		)
+		if err != nil {
+			t.Fatalf(
+				"create capped session %d: %v",
+				index,
+				err,
+			)
+		}
+		latestAccessToken = credentials.AccessToken
+	}
+	latestPrincipal, err := identityUseCase.Authenticate(
+		ctx,
+		latestAccessToken,
+	)
+	if err != nil {
+		t.Fatalf("authenticate latest capped session: %v", err)
+	}
+	activeSessions, err := identityUseCase.ListSessions(
+		ctx,
+		loginPrincipal,
+	)
+	if err != nil {
+		t.Fatalf("list active sessions: %v", err)
+	}
+	if len(activeSessions) != 3 {
+		t.Fatalf(
+			"active sessions after cap = %d, want 3",
+			len(activeSessions),
+		)
+	}
+	if _, err := identityUseCase.Authenticate(
+		ctx,
+		bootstrap.AccessToken,
+	); !errors.Is(err, security.ErrUnauthenticated) {
+		t.Fatalf("evicted oldest bootstrap session error = %v", err)
+	}
+	var revokedSessionID string
+	for _, session := range activeSessions {
+		if session.ID != loginPrincipal.SessionID &&
+			session.ID != latestPrincipal.SessionID {
+			revokedSessionID = session.ID
+			break
+		}
+	}
+	if err := identityUseCase.RevokeSession(
+		ctx,
+		loginPrincipal,
+		revokedSessionID,
+		"session-revoke-request",
+	); err != nil {
+		t.Fatalf("revoke active session: %v", err)
+	}
+	activeSessions, err = identityUseCase.ListSessions(
+		ctx,
+		loginPrincipal,
+	)
+	if err != nil || len(activeSessions) != 2 {
+		t.Fatalf(
+			"active sessions after revoke = %d, %v; want 2",
+			len(activeSessions),
+			err,
+		)
 	}
 
 	var storedSession struct {
@@ -567,6 +734,9 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create formal deployment: %v", err)
 	}
+	if deployment.CutoverSequence == 0 {
+		t.Fatal("formal deployment has no cutover sequence")
+	}
 	replayed, err := deploymentUseCase.CreateFormal(
 		ctx, principal, project.ID, release.ID, application.ID, environment.ID, target.ID,
 		"integration-deployment", "deployment-replay-request",
@@ -771,11 +941,69 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("unauthenticated product API status = %d", unauthenticatedResponse.Code)
 	}
 	authenticatedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
-	authenticatedRequest.Header.Set("Authorization", "Bearer "+bootstrap.AccessToken)
+	authenticatedRequest.Header.Set("Authorization", "Bearer "+latestAccessToken)
 	authenticatedResponse := httptest.NewRecorder()
 	productAPI.ServeHTTP(authenticatedResponse, authenticatedRequest)
 	if authenticatedResponse.Code != http.StatusOK || !strings.Contains(authenticatedResponse.Body.String(), `"name":"Delivery"`) {
 		t.Fatalf("authenticated product API status=%d body=%s", authenticatedResponse.Code, authenticatedResponse.Body.String())
+	}
+	const concurrentSessionCreates = 8
+	var sessionCreateWait sync.WaitGroup
+	sessionCreateErrors := make(
+		chan error,
+		concurrentSessionCreates,
+	)
+	for index := 0; index < concurrentSessionCreates; index++ {
+		sessionID, err := id.New()
+		if err != nil {
+			t.Fatalf("create concurrent session ID: %v", err)
+		}
+		tokenHash, err := id.New()
+		if err != nil {
+			t.Fatalf("create concurrent token hash: %v", err)
+		}
+		session := identitybiz.Session{
+			ID:        sessionID,
+			UserID:    principal.UserID,
+			TokenHash: tokenHash,
+			CreatedAt: identityNow.Add(
+				time.Duration(index+1) * time.Second,
+			),
+			ExpiresAt: identityNow.Add(time.Hour),
+		}
+		sessionCreateWait.Add(1)
+		go func() {
+			defer sessionCreateWait.Done()
+			sessionCreateErrors <- client.WithinTransaction(
+				ctx,
+				func(transactionContext context.Context) error {
+					return identityRepository.CreateSession(
+						transactionContext,
+						session,
+						identityNow,
+						3,
+					)
+				},
+			)
+		}()
+	}
+	sessionCreateWait.Wait()
+	close(sessionCreateErrors)
+	for createErr := range sessionCreateErrors {
+		if createErr != nil {
+			t.Fatalf(
+				"create concurrent capped session: %v",
+				createErr,
+			)
+		}
+	}
+	activeSessions, err = identityUseCase.ListSessions(ctx, principal)
+	if err != nil || len(activeSessions) != 3 {
+		t.Fatalf(
+			"concurrent active sessions = %d, %v; want 3",
+			len(activeSessions),
+			err,
+		)
 	}
 
 	rollbackUseCase := controlplanebiz.NewUseCase(
@@ -830,4 +1058,208 @@ func directConnectionURI(t *testing.T, value string) string {
 	query.Set("directConnection", "true")
 	parsed.RawQuery = query.Encode()
 	return parsed.String()
+}
+
+func verifyRuntimeInventoryIntegration(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	repository := runtimeinventorydata.NewMongoRepository(database)
+	startedAt := time.Now().UTC().Add(-time.Minute)
+	first, err := runtimeinventorybiz.NewObservation(
+		"inventory-observation-1",
+		"inventory-organization",
+		"inventory-host",
+		"inventory-target",
+		1,
+		1,
+		startedAt,
+	)
+	if err != nil {
+		t.Fatalf("create runtime inventory observation: %v", err)
+	}
+	delayed, err := runtimeinventorybiz.NewObservation(
+		"inventory-observation-delayed",
+		first.OrganizationID,
+		first.ManagedHostID,
+		first.RuntimeTargetID,
+		0,
+		0,
+		startedAt.Add(10*time.Minute),
+	)
+	if err != nil {
+		t.Fatalf("create delayed runtime inventory observation: %v", err)
+	}
+	if err := repository.Begin(ctx, delayed); err != nil {
+		t.Fatalf("begin delayed runtime inventory observation: %v", err)
+	}
+	if err := repository.Begin(ctx, first); err != nil {
+		t.Fatalf("begin runtime inventory observation: %v", err)
+	}
+	assertRuntimeInventoryExpiry(
+		t, ctx,
+		database.Collection("runtime_inventory_observations"),
+		bson.D{{Key: "_id", Value: first.ID}},
+		true,
+	)
+	resource, err := runtimeinventorybiz.NewResource(
+		first,
+		runtimeinventorybiz.KindContainer,
+		"container-1",
+		"api",
+		startedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create runtime inventory resource: %v", err)
+	}
+	resource.Managed = true
+	resource.ProjectID = "inventory-project"
+	resource.DeploymentID = "inventory-deployment"
+	resource.Container = &runtimeinventorybiz.ContainerSummary{
+		ImageReference: "registry.example.com/team/api@sha256:" +
+			strings.Repeat("a", 64),
+		ImageDigest: "sha256:" + strings.Repeat("a", 64),
+		State:       "running",
+		Health:      "healthy",
+	}
+	resource.Labels["net.owndock.deployment_id"] = resource.DeploymentID
+	chunk, err := runtimeinventorybiz.NewChunk(
+		first,
+		0,
+		[]runtimeinventorybiz.Resource{resource},
+	)
+	if err != nil {
+		t.Fatalf("create runtime inventory chunk: %v", err)
+	}
+	if err := repository.Append(ctx, chunk); err != nil {
+		t.Fatalf("append runtime inventory chunk: %v", err)
+	}
+	assertRuntimeInventoryExpiry(
+		t, ctx,
+		database.Collection("runtime_inventory_chunks"),
+		bson.D{{Key: "observation_id", Value: first.ID}},
+		true,
+	)
+	assertRuntimeInventoryExpiry(
+		t, ctx,
+		database.Collection("runtime_inventory_resources"),
+		bson.D{{Key: "observation_id", Value: first.ID}},
+		true,
+	)
+	if err := repository.Append(ctx, chunk); err != nil {
+		t.Fatalf("replay runtime inventory chunk: %v", err)
+	}
+	query := runtimeinventorybiz.Query{
+		OrganizationID:  first.OrganizationID,
+		RuntimeTargetID: first.RuntimeTargetID,
+	}
+	if _, err := repository.Current(ctx, query); !errors.Is(
+		err,
+		runtimeinventorybiz.ErrNotFound,
+	) {
+		t.Fatalf("incomplete runtime inventory visibility error = %v", err)
+	}
+	if err := repository.Complete(
+		ctx,
+		first.ID,
+		first.RuntimeTargetID,
+		startedAt.Add(2*time.Second),
+	); err != nil {
+		t.Fatalf("complete runtime inventory observation: %v", err)
+	}
+	for _, collection := range []string{
+		"runtime_inventory_observations",
+		"runtime_inventory_chunks",
+		"runtime_inventory_resources",
+	} {
+		filter := bson.D{{Key: "observation_id", Value: first.ID}}
+		if collection == "runtime_inventory_observations" {
+			filter = bson.D{{Key: "_id", Value: first.ID}}
+		}
+		assertRuntimeInventoryExpiry(
+			t, ctx, database.Collection(collection), filter, false,
+		)
+	}
+	current, err := repository.Current(ctx, query)
+	if err != nil {
+		t.Fatalf("read current runtime inventory: %v", err)
+	}
+	if len(current) != 1 ||
+		current[0].RuntimeID != resource.RuntimeID ||
+		current[0].DeploymentID != resource.DeploymentID {
+		t.Fatalf("current runtime inventory = %+v", current)
+	}
+
+	if err := repository.Complete(
+		ctx,
+		delayed.ID,
+		delayed.RuntimeTargetID,
+		startedAt.Add(11*time.Minute),
+	); !errors.Is(err, runtimeinventorybiz.ErrConflict) {
+		t.Fatalf("delayed runtime inventory completion error = %v", err)
+	}
+
+	second, err := runtimeinventorybiz.NewObservation(
+		"inventory-observation-2",
+		first.OrganizationID,
+		first.ManagedHostID,
+		first.RuntimeTargetID,
+		0,
+		0,
+		startedAt.Add(4*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create empty runtime inventory observation: %v", err)
+	}
+	if err := repository.Begin(ctx, second); err != nil {
+		t.Fatalf("begin empty runtime inventory observation: %v", err)
+	}
+	if err := repository.Complete(
+		ctx,
+		second.ID,
+		second.RuntimeTargetID,
+		startedAt.Add(5*time.Second),
+	); err != nil {
+		t.Fatalf("complete empty runtime inventory observation: %v", err)
+	}
+	current, err = repository.Current(ctx, query)
+	if err != nil || len(current) != 0 {
+		t.Fatalf("empty current runtime inventory = %+v, %v", current, err)
+	}
+	for _, collection := range []string{
+		"runtime_inventory_observations",
+		"runtime_inventory_chunks",
+		"runtime_inventory_resources",
+		"runtime_inventory_heads",
+		"runtime_inventory_counters",
+	} {
+		if _, err := database.Collection(collection).DeleteMany(ctx, bson.D{}); err != nil {
+			t.Fatalf("clean runtime inventory collection %s: %v", collection, err)
+		}
+	}
+}
+
+func assertRuntimeInventoryExpiry(
+	t *testing.T,
+	ctx context.Context,
+	collection *drivermongo.Collection,
+	filter bson.D,
+	expected bool,
+) {
+	t.Helper()
+	var document bson.M
+	if err := collection.FindOne(ctx, filter).Decode(&document); err != nil {
+		t.Fatalf("find runtime inventory TTL document: %v", err)
+	}
+	_, present := document["expires_at"]
+	if present != expected {
+		t.Fatalf(
+			"runtime inventory %s expires_at present = %v, want %v",
+			collection.Name(),
+			present,
+			expected,
+		)
+	}
 }

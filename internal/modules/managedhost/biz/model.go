@@ -160,7 +160,12 @@ type AgentConnectionCloser interface {
 
 type AgentConnectionRegistry interface {
 	AgentConnectionCloser
-	Register(string, string, context.CancelFunc) <-chan AgentCommand
+	Register(
+		string,
+		string,
+		[]string,
+		context.CancelFunc,
+	) <-chan AgentCommand
 	Unregister(string, string)
 	Complete(string, string, AgentCommandResult) error
 }
@@ -350,7 +355,7 @@ func normalizeCapabilities(values []string) ([]string, error) {
 	result := make([]string, 0, len(values))
 	for _, value := range values {
 		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 64 {
+		if !validCapability(value) {
 			return nil, ErrInvalidAgentIdentity
 		}
 		if _, exists := seen[value]; exists {
@@ -360,4 +365,21 @@ func normalizeCapabilities(values []string) ([]string, error) {
 		result = append(result, value)
 	}
 	return result, nil
+}
+
+func validCapability(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for index, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' ||
+			index > 0 && (character == '.' ||
+				character == '-' ||
+				character == '_') {
+			continue
+		}
+		return false
+	}
+	return true
 }

@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口及除 Template、Git-to-Deploy 外的首个部署核心资源；Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Git-to-Deploy 已接受但尚未实现，后续必须进入隔离 Build Worker/BuildKit 边界；默认关闭的顶层工程样例不属于正式产品实现。
+产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口及除 Template、Git-to-Deploy 外的首个部署核心资源；Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全 mapper/List Reader、有界分块、Agent 内存拉取协议与 direct/Agent 持久化编排，但尚未接入 Runtime Target source/credential resolver、周期调度或公开 API。Git-to-Deploy 已接受但尚未实现，后续必须进入隔离 Build Worker/BuildKit 边界；默认关闭的顶层工程样例不属于正式产品实现。
 
 ## 模块边界
 
@@ -33,9 +33,11 @@ internal/modules/<domain>/
 
 这些规则由 `internal/architecture` 中的可执行测试守护。新增领域不能让 `biz` 直接导入其他领域、Kratos transport、数据库驱动或运行时 SDK，也不能直接把领域实体作为 HTTP JSON 契约。
 
+Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `LoginGuard`，Mongo adapter 以 normalized email 的 SHA-256 键和 revision 条件更新提供跨 Server 共享限制。阈值与窗口来自 Server 安全配置；达到阈值或极端并发重试耗尽时失败关闭，正确登录清理记录，TTL migration 回收过期状态。来源 IP 和全局连接限制属于可信入口职责，不能用该账号维度保护替代。
+
 ## 进程边界
 
-当前只建立 `cmd/server`，负责对外 API，并在启用时托管 Deployment Worker 生命周期。Agent 和 Build Worker 的职责已经确定，但完整实现前不创建空进程模板；CLI 等进程也只在职责和生命周期明确后创建。Web 前端由独立项目维护。
+当前建立两个有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker probe。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。Build Worker 和 CLI 仍只在职责与完整生命周期实现后创建。Web 前端由独立项目维护。
 
 常驻任务实现 `Run(context.Context) error`，通过 `internal/platform/lifecycle.Server` 接入 Kratos App。构造函数不得启动 goroutine；停止过程必须响应 context，并受统一 shutdown timeout 约束。
 
@@ -56,11 +58,21 @@ Git-to-Deploy 已进入产品架构，但当前代码尚未实现。构建链必
 
 Deployment `biz` 只定义 Execution Resolver、Credential Resolver、Executor 和 Runtime Gateway 端口，不导入 Docker SDK。执行计划使用与传输无关的 Runtime Connection 描述；Gateway Router 再按连接模式选择具体适配器。因此 Deployment 状态机不需要知道目标是控制面直连还是 Agent 转发。
 
-当前正式 API 可以登记 `direct` 或 `agent` Runtime Target；`data` 使用固定版本的 Moby API/Client 模块实现并只注册 Direct Docker Gateway。Agent 首次 enrollment、CSR 证书签发和固定身份已经落地；Server 端独立 TLS 1.3 listener 已支持 mTLS 数据库身份校验、`v1` hello/heartbeat、在线状态、单实例重连替换和禁用断流，并提供首个只接受 Runtime Target ID 的 `runtime.probe` command/result。进程内 registry 使用有界队列、相同命令等待复用、有界结果缓存和 deadline/断线收敛，协议不提供任意 Shell 或 Docker endpoint。Agent 进程、实际命令执行器、证书轮换和系统测试完成前不注册 Agent 执行实现，也不会静默回退到 direct。`worker` 负责编排领取、心跳、状态机和审计。direct Runtime Target 只保存 `secret://alias`，mTLS PEM 在执行时从受约束环境变量解析，并在单次 Gateway 调用结束后尽力清零解析器返回的字节切片。
+当前正式 API 可以登记 `direct` 或 `agent` Runtime Target；控制面 probe 与 Deployment Gateway 都通过按连接模式注册的 Router 分派。`data` 使用固定版本的 Moby API/Client 模块实现 direct Docker Gateway；Agent 首次 enrollment、CSR 证书签发和固定身份已经落地，Server 端独立 TLS 1.3 listener 支持 mTLS 数据库身份校验、`v1` hello/heartbeat、在线状态、单实例重连替换和禁用断流。enrollment 保存的 capabilities 是 Agent Identity 的授权上限，hello 只能声明其子集，连接 Registry 还会在每条命令入队前检查对应 capability。Registry 使用有界队列、相同命令等待复用、只保存 kind/指纹/安全结果的有界近期缓存和 deadline/断线收敛，协议不提供任意 Shell 或 Docker endpoint。`owndock-agent` 使用 TLS 1.3、严格帧校验、心跳和有上限的抖动退避主动连接 Server；它只接受本地绝对 Unix Socket 路径，可执行 runtime probe、digest 镜像准备、候选容器健康门禁、激活和安全取消。Agent 磁盘状态把可淘汰的安全结果缓存与不可淘汰的部署槽位水位分开，两者都使用受限目录、`0600`、fsync 和原子 rename；水位只保存稳定容器槽位、Deployment ID 与最高 cutover sequence，达到上限或损坏时失败关闭。部署命令使用严格的 `prepare/stage/activate/cancel` canonical wire；Agent 部署采用 `stage candidate → Server 重新验证 Mongo lease/cutover fence → activate stable name`，不能用一次远程 deploy 跨过控制面 fencing。Agent Control Server 启用时，composition root 会把 Agent prober 和 Agent Deployment Gateway 配套注册；未注册或能力不足不会静默回退到 direct。单机真实 Engine 已覆盖该两阶段路径，进程内双 Host 并发路由已覆盖不串 Target、单 Host 断开隔离和过期 fence 原 Host cancel，本机执行器回归覆盖重启、容器缺失和延迟旧命令；真实双主机、网络分区和故障注入仍待系统验收。`worker` 负责编排领取、心跳、状态机和审计。direct Runtime Target 只保存 `secret://alias`，mTLS PEM 在执行时从受约束环境变量解析，并在单次 Gateway 调用结束后尽力清零解析器返回的字节切片。
 
-Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent Runtime Gateway 尚未实现，所以即使 Host 在线，Agent Target 仍不会进入 `ready`。direct Host 可选保存外部 SSH 引用，但主机终端实现前不会读取该引用。
+Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent prober 与 Deployment Gateway 在 Agent Control Server 启用时配套注册，因此只有连接到可执行当前协议的 Agent 才能把 Target 探测为 `ready`；离线不会回退 direct。direct Host 可选保存外部 SSH 引用，但主机终端实现前不会读取该引用。
 
-基础 Docker 适配器使用作用域稳定的容器名、Deployment 标签和 fencing token 实现幂等及安全取消。适配器会应用 Release 声明的端口、环境变量、资源限制和 Docker HEALTHCHECK：候选容器启动并进入 healthy 后，Worker 再验证 MongoDB 活跃租约、移除旧容器并把候选容器改为稳定名称。不健康候选会被清理且旧容器保持运行。该策略仍需在真实 Engine、入口路由和端口所有权场景中验证实际停机窗口。
+基础 Docker 适配器使用作用域稳定的容器名、Deployment 标签、同 Deployment 的 lease fencing token 和跨 Deployment 的 cutover sequence 实现幂等及安全取消。cutover sequence 由 MongoDB 在创建同一 Project/Application/Environment/Runtime Target 槽位的 Deployment 时单调分配，并写入 Docker 标签；因此较旧 Deployment 的延迟命令不能覆盖已激活的新版本。适配器会应用 Release 声明的端口、环境变量、资源限制和 Docker HEALTHCHECK：候选容器启动并进入 healthy 后，Worker 再验证 MongoDB 活跃租约、移除旧容器并把候选容器改为稳定名称。不健康候选会被清理且旧容器保持运行。该策略仍需在真实 Engine、入口路由和端口所有权场景中验证实际停机窗口。
+
+## Runtime Inventory 边界
+
+Runtime Inventory 记录 Docker Engine 的可重建安全视图，不是 Deployment 的期望状态，也不是 Docker API Proxy。领域位于 `internal/modules/runtimeinventory`，`biz` 不导入 Moby SDK；`internal/adapters/dockerinventory` 只调用四类 List API，并把 Docker 类型转换成不依赖 Server 领域的 OwnDock 安全传输投影，供 direct 与 Agent 复用。
+
+一次 observation 声明分块数和资源总数。`Begin` 通过 MongoDB counter 为每个 Runtime Target 原子分配单调 generation，避免多 Server 时钟参与新旧裁决。每个分块在 MongoDB 事务中写入 receipt、资源和接收计数；读取始终先解析 `runtime_inventory_heads`，因此 open observation 不可见。全部分块完成后，Repository 在事务中把 observation 标记完成并切换 head；generation 较小的延迟 observation 不能覆盖当前 head。未完成 generation 两小时后回收；完成时移除当前 generation 的 TTL，上一 generation 在被替换七天后回收。
+
+持久化模型没有原始 Inspect、Container Env、Registry authorization、Volume options/status、宿主 Mount source 或 Docker 原始错误。采集 mapper 只保留三个结构化归属候选 Label，Server 投影不会直接信任这些 Label 并授予 `managed` 身份；Network IPAM 和 Container port/mount/attachment 使用固定类型与数量限制。默认分块上限为 48 KiB/500 资源，硬上限 512 KiB。Docker 日志、Stats 和高频原始 Event 不进入这些资源文档。完整设计与当前工程状态见 [Docker Runtime Inventory](runtime-inventory.md)。
+
+Agent 模式使用 `runtime.inventory.prepare/chunk/release`，不是一次性推送整机 JSON。prepare 在 Agent 内存创建最多 10 分钟、32 MiB 的安全快照，Server 按 index 一次拉取并落库一个不超过约定字节数的 chunk；三类结果都不进入 Agent 磁盘结果缓存或 Server completed cache。Agent 重连且进程仍在时可继续同一 observation，Agent 重启则重新开始；MongoDB open TTL 回收旧批次。direct 模式复用相同 transport projection 和 Repository 提交流程。
 
 ## 可观测性
 
@@ -82,7 +94,7 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 进程级 MongoDB Client 由 `internal/platform/mongo` 创建和关闭，业务模块只能通过自己在 `biz` 中定义的 Repository 接口使用持久化。MongoDB 默认关闭；启用时连接串来自指定环境变量，启动 Ping 失败会阻止服务启动，运行期 Ping 失败会使 `/readyz` 返回 503。
 
-开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从内存样例直接生成。启动时使用带租约锁的版本化 migration；资源写入和对应审计事件使用同一事务提交。
+开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从内存样例直接生成。启动时使用带租约锁的版本化 migration；资源写入和对应审计事件使用同一事务提交。Runtime Inventory 使用独立 observation/resource/head collection 和 generation 切换，不把动态 Docker 文档嵌入 Deployment。
 
 关键运行链路见 [flows.md](flows.md)。
 

@@ -2,6 +2,7 @@ package migration
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 
@@ -21,7 +22,216 @@ func Default() []Migration {
 		{Version: 7, Name: "allow_release_spec_variants", Up: allowReleaseSpecVariants},
 		{Version: 8, Name: "index_managed_hosts_and_target_connections", Up: indexManagedHostsAndTargetConnections},
 		{Version: 9, Name: "index_agent_enrollment_and_identity", Up: indexAgentEnrollmentAndIdentity},
+		{Version: 10, Name: "add_deployment_cutover_sequences", Up: addDeploymentCutoverSequences},
+		{Version: 11, Name: "index_login_attempt_expiry", Up: indexLoginAttemptExpiry},
+		{Version: 12, Name: "index_runtime_inventory", Up: indexRuntimeInventory},
 	}
+}
+
+func indexRuntimeInventory(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	if _, err := database.Collection("runtime_inventory_observations").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "status", Value: 1},
+				{Key: "started_at", Value: -1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_observation_target"),
+		},
+		{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_runtime_inventory_observations").
+				SetExpireAfterSeconds(0),
+		},
+	}); err != nil {
+		return fmt.Errorf("create runtime inventory observation indexes: %w", err)
+	}
+	if _, err := database.Collection("runtime_inventory_chunks").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex(
+			"uniq_runtime_inventory_chunk",
+			bson.D{
+				{Key: "observation_id", Value: 1},
+				{Key: "index", Value: 1},
+			},
+		),
+		{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_runtime_inventory_chunks").
+				SetExpireAfterSeconds(0),
+		},
+	}); err != nil {
+		return fmt.Errorf("create runtime inventory chunk indexes: %w", err)
+	}
+	if _, err := database.Collection("runtime_inventory_resources").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex(
+			"uniq_runtime_inventory_resource",
+			bson.D{
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "observation_id", Value: 1},
+				{Key: "kind", Value: 1},
+				{Key: "runtime_id", Value: 1},
+			},
+		),
+		{
+			Keys: bson.D{
+				{Key: "observation_id", Value: 1},
+				{Key: "organization_id", Value: 1},
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "kind", Value: 1},
+				{Key: "name", Value: 1},
+				{Key: "runtime_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_current"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "organization_id", Value: 1},
+				{Key: "project_id", Value: 1},
+				{Key: "managed", Value: 1},
+				{Key: "kind", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_project"),
+		},
+		{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_runtime_inventory_resources").
+				SetExpireAfterSeconds(0),
+		},
+	}); err != nil {
+		return fmt.Errorf("create runtime inventory resource indexes: %w", err)
+	}
+	if _, err := database.Collection("runtime_inventory_heads").
+		Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "organization_id", Value: 1},
+			{Key: "runtime_target_id", Value: 1},
+		},
+		Options: options.Index().
+			SetName("uniq_runtime_inventory_head").
+			SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("create runtime inventory head index: %w", err)
+	}
+	if _, err := database.Collection("runtime_inventory_counters").
+		Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "organization_id", Value: 1},
+			{Key: "runtime_target_id", Value: 1},
+		},
+		Options: options.Index().
+			SetName("uniq_runtime_inventory_counter").
+			SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("create runtime inventory counter index: %w", err)
+	}
+	return nil
+}
+
+func indexLoginAttemptExpiry(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("login_attempts").Indexes().CreateOne(
+		ctx,
+		mongo.IndexModel{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_login_attempt_expiry").
+				SetExpireAfterSeconds(0),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create login attempt expiry index: %w", err)
+	}
+	return nil
+}
+
+func addDeploymentCutoverSequences(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	deployments := database.Collection("deployments")
+	cursor, err := deployments.Find(
+		ctx,
+		bson.D{},
+		options.Find().SetSort(bson.D{
+			{Key: "project_id", Value: 1},
+			{Key: "application_id", Value: 1},
+			{Key: "environment_id", Value: 1},
+			{Key: "runtime_target_id", Value: 1},
+			{Key: "created_at", Value: 1},
+			{Key: "_id", Value: 1},
+		}),
+	)
+	if err != nil {
+		return fmt.Errorf("find deployments for cutover sequence migration: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	type deploymentScope struct {
+		ID              string `bson:"_id"`
+		ProjectID       string `bson:"project_id"`
+		ApplicationID   string `bson:"application_id"`
+		EnvironmentID   string `bson:"environment_id"`
+		RuntimeTargetID string `bson:"runtime_target_id"`
+		CutoverSequence uint64 `bson:"cutover_sequence,omitempty"`
+	}
+	sequences := make(map[string]uint64)
+	counters := database.Collection("deployment_cutover_sequences")
+	for cursor.Next(ctx) {
+		var item deploymentScope
+		if err := cursor.Decode(&item); err != nil {
+			return fmt.Errorf("decode deployment cutover scope: %w", err)
+		}
+		scope := item.ProjectID + "\x00" + item.ApplicationID + "\x00" +
+			item.EnvironmentID + "\x00" + item.RuntimeTargetID
+		sequence := sequences[scope] + 1
+		if item.CutoverSequence > sequence {
+			sequence = item.CutoverSequence
+		}
+		sequences[scope] = sequence
+		if item.CutoverSequence == 0 {
+			if _, err := deployments.UpdateByID(
+				ctx,
+				item.ID,
+				bson.D{{Key: "$set", Value: bson.D{
+					{Key: "cutover_sequence", Value: sequence},
+				}}},
+			); err != nil {
+				return fmt.Errorf("backfill deployment cutover sequence: %w", err)
+			}
+		}
+		scopeHash := sha256.Sum256([]byte(scope))
+		if _, err := counters.UpdateOne(
+			ctx,
+			bson.D{{Key: "_id", Value: fmt.Sprintf("%x", scopeHash[:])}},
+			bson.D{
+				{Key: "$max", Value: bson.D{{Key: "sequence", Value: sequence}}},
+				{Key: "$setOnInsert", Value: bson.D{
+					{Key: "project_id", Value: item.ProjectID},
+					{Key: "application_id", Value: item.ApplicationID},
+					{Key: "environment_id", Value: item.EnvironmentID},
+					{Key: "runtime_target_id", Value: item.RuntimeTargetID},
+				}},
+			},
+			options.UpdateOne().SetUpsert(true),
+		); err != nil {
+			return fmt.Errorf("seed deployment cutover counter: %w", err)
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("iterate deployment cutover scopes: %w", err)
+	}
+	return nil
 }
 
 func indexAgentEnrollmentAndIdentity(

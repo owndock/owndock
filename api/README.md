@@ -44,8 +44,9 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | --- | --- | --- |
 | Meta | `GET /api/v1/meta/version` | 查询服务版本、提交和构建时间 |
 | Identity | `POST /api/v1/auth/bootstrap` | 使用环境 bootstrap token 创建首个 Organization、Owner 和 Session |
-| Identity | `POST /api/v1/auth/login` | 创建本地 Bearer Session |
+| Identity | `POST /api/v1/auth/login` | 创建本地 Bearer Session；账号尝试超过共享阈值时返回 `429` 与 `Retry-After` |
 | Identity | `GET /api/v1/auth/me`、`POST /api/v1/auth/logout` | 查询当前身份或注销 Session |
+| Identity | `GET /api/v1/auth/sessions`、`DELETE /api/v1/auth/sessions/{session_id}` | 查询当前用户的活跃 Session，或撤销一个属于自己的 Session |
 | Managed Host | `GET/POST /api/v1/managed-hosts` | 查询或登记 Organization 主机 |
 | Managed Host | `GET /api/v1/managed-hosts/{managed_host_id}` | 查询 Host、连接模式和当前 Agent 身份摘要 |
 | Managed Host | `POST /api/v1/managed-hosts/{managed_host_id}:disable` | 禁用 Host、吊销数据库身份并使未用 enrollment 失效 |
@@ -65,7 +66,7 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Deployment | `POST /api/v1/projects/{project_id}/deployments/{deployment_id}/rollback` | 使用此前成功 Release 创建一个新回滚操作 |
 | Audit | `GET /api/v1/audit-events` | 查询当前 Organization 或指定 Project 的安全审计元数据 |
 
-该切片已具备内置 RBAC、范围校验、MongoDB Repository、事务审计和契约测试。direct Docker Gateway 和受管 Deployment Worker 已实现但默认关闭；Agent 首次身份接入以及 Server 端 mTLS 连接/版本/心跳和 `runtime.probe` 类型化传输已实现，Agent 进程、实际命令执行器和 Agent Runtime Gateway 尚未实现。Template、Git-to-Deploy、Terminal 和用户管理 API 尚未加入公开契约。
+该切片已具备内置 RBAC、范围校验、MongoDB Repository、事务审计和契约测试。direct/agent Docker Gateway 和受管 Deployment Worker 已实现但默认关闭；Agent 首次身份接入、双端 mTLS 连接/版本/心跳、类型化 probe/部署传输、抖动退避重连、本机 Docker 执行、secret-safe 结果缓存和持久切换水位已实现。Agent Server 与 Worker 同时启用时，Agent probe 和 Deployment Gateway 配套注册；自动安装、证书轮换和多主机系统验收仍未完成。Template、Git-to-Deploy、Terminal 和用户管理 API 尚未加入公开契约。
 
 凭据正文不通过资源 API 保存：Runtime、Registry、Environment Secret 与 Agent CA 都由受约束的外部秘密来源提供。
 

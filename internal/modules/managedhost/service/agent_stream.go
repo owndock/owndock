@@ -16,6 +16,8 @@ import (
 
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
 	"github.com/owndock/owndock/internal/platform/httpx"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
 const agentStreamContentType = "application/x-ndjson"
@@ -107,7 +109,12 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	streamContext, cancel := context.WithCancel(r.Context())
-	commands := s.registry.Register(session.ManagedHostID, session.ID, cancel)
+	commands := s.registry.Register(
+		session.ManagedHostID,
+		session.ID,
+		session.Capabilities,
+		cancel,
+	)
 	defer func() {
 		cancel()
 		s.registry.Unregister(session.ManagedHostID, session.ID)
@@ -294,14 +301,28 @@ type serverFrame struct {
 }
 
 type agentCommandResult struct {
-	CommandID    string                   `json:"command_id"`
-	Status       biz.AgentCommandStatus   `json:"status"`
-	ErrorCode    string                   `json:"error_code,omitempty"`
-	RuntimeProbe *agentRuntimeProbeResult `json:"runtime_probe,omitempty"`
+	CommandID    string                       `json:"command_id"`
+	Status       biz.AgentCommandStatus       `json:"status"`
+	ErrorCode    string                       `json:"error_code,omitempty"`
+	RuntimeProbe *agentRuntimeProbeResult     `json:"runtime_probe,omitempty"`
+	Inventory    *agentRuntimeInventoryResult `json:"runtime_inventory,omitempty"`
 }
 
 type agentRuntimeProbeResult struct {
 	Status biz.RuntimeProbeStatus `json:"status"`
+}
+
+type agentRuntimeInventoryResult struct {
+	Manifest *agentRuntimeInventoryManifest `json:"manifest,omitempty"`
+	Chunk    *runtimeinventory.Chunk        `json:"chunk,omitempty"`
+}
+
+type agentRuntimeInventoryManifest struct {
+	ObservationID     string `json:"observation_id"`
+	SchemaVersion     int    `json:"schema_version"`
+	ExpectedChunks    int    `json:"expected_chunks"`
+	ExpectedResources int    `json:"expected_resources"`
+	RetentionSeconds  int    `json:"retention_seconds"`
 }
 
 func (r agentCommandResult) domain() biz.AgentCommandResult {
@@ -315,32 +336,29 @@ func (r agentCommandResult) domain() biz.AgentCommandResult {
 			Status: r.RuntimeProbe.Status,
 		}
 	}
-	return result
-}
-
-type serverCommand struct {
-	CommandID    string                     `json:"command_id"`
-	Kind         biz.AgentCommandKind       `json:"kind"`
-	Deadline     time.Time                  `json:"deadline"`
-	RuntimeProbe *serverRuntimeProbeCommand `json:"runtime_probe,omitempty"`
-}
-
-type serverRuntimeProbeCommand struct {
-	RuntimeTargetID string `json:"runtime_target_id"`
-}
-
-func newServerCommand(command biz.AgentCommand) *serverCommand {
-	result := &serverCommand{
-		CommandID: command.ID,
-		Kind:      command.Kind,
-		Deadline:  command.Deadline.UTC(),
-	}
-	if command.RuntimeProbe != nil {
-		result.RuntimeProbe = &serverRuntimeProbeCommand{
-			RuntimeTargetID: command.RuntimeProbe.RuntimeTargetID,
+	if r.Inventory != nil {
+		result.Inventory = &biz.RuntimeInventoryResult{
+			Chunk: r.Inventory.Chunk,
+		}
+		if r.Inventory.Manifest != nil {
+			manifest := r.Inventory.Manifest
+			result.Inventory.Manifest = &biz.RuntimeInventoryManifest{
+				ObservationID:     manifest.ObservationID,
+				SchemaVersion:     manifest.SchemaVersion,
+				ExpectedChunks:    manifest.ExpectedChunks,
+				ExpectedResources: manifest.ExpectedResources,
+				RetentionSeconds:  manifest.RetentionSeconds,
+			}
 		}
 	}
 	return result
+}
+
+type serverCommand = agentprotocol.CommandDocument
+type serverRuntimeProbeCommand = agentprotocol.RuntimeProbeDocument
+
+func newServerCommand(command biz.AgentCommand) *serverCommand {
+	return agentprotocol.NewCommandDocument(command)
 }
 
 type agentRead struct {

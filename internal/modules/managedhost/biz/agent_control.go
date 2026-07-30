@@ -47,6 +47,12 @@ func (u *UseCase) OpenAgentSession(
 		!identity.RevokedAt.IsZero() {
 		return AgentSession{}, ErrInvalidAgentIdentity
 	}
+	if !capabilitiesAreSubset(
+		normalizedHello.Capabilities,
+		identity.Capabilities,
+	) {
+		return AgentSession{}, ErrInvalidAgentIdentity
+	}
 	sessionID, err := u.newID()
 	if err != nil {
 		return AgentSession{}, err
@@ -158,4 +164,19 @@ func normalizeCertificateIdentity(
 		strings.TrimSpace(identity.CertificateSHA256),
 	)
 	return identity
+}
+
+func capabilitiesAreSubset(
+	requested, granted []string,
+) bool {
+	allowed := make(map[string]struct{}, len(granted))
+	for _, capability := range granted {
+		allowed[capability] = struct{}{}
+	}
+	for _, capability := range requested {
+		if _, exists := allowed[capability]; !exists {
+			return false
+		}
+	}
+	return true
 }

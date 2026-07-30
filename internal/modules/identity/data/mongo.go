@@ -10,12 +10,14 @@ import (
 	"github.com/owndock/owndock/internal/shared/security"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 type MongoRepository struct {
 	organizations *mongo.Collection
 	users         *mongo.Collection
 	sessions      *mongo.Collection
+	loginAttempts *mongo.Collection
 }
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
@@ -23,6 +25,7 @@ func NewMongoRepository(database *mongo.Database) *MongoRepository {
 		organizations: database.Collection("organizations"),
 		users:         database.Collection("users"),
 		sessions:      database.Collection("sessions"),
+		loginAttempts: database.Collection("login_attempts"),
 	}
 }
 
@@ -72,8 +75,74 @@ func (r *MongoRepository) FindUserByEmail(ctx context.Context, normalizedEmail s
 	return document.domain(), nil
 }
 
-func (r *MongoRepository) CreateSession(ctx context.Context, session biz.Session) error {
-	return r.createSession(ctx, session)
+func (r *MongoRepository) CreateSession(
+	ctx context.Context,
+	session biz.Session,
+	now time.Time,
+	maximumActive int,
+) error {
+	if maximumActive < 1 {
+		return fmt.Errorf("active session limit is invalid")
+	}
+	// Serialize session creation per user inside the caller's transaction.
+	// Without this write, two concurrent logins could both observe room below
+	// the cap and commit more than maximumActive sessions (write skew).
+	lock, err := r.users.UpdateOne(
+		ctx,
+		bson.D{{Key: "_id", Value: session.UserID}},
+		bson.D{{Key: "$inc", Value: bson.D{
+			{Key: "session_revision", Value: 1},
+		}}},
+	)
+	if err != nil {
+		return fmt.Errorf("lock user session set: %w", err)
+	}
+	if lock.MatchedCount != 1 {
+		return biz.ErrNotFound
+	}
+	if err := r.createSession(ctx, session); err != nil {
+		return err
+	}
+	cursor, err := r.sessions.Find(
+		ctx,
+		bson.D{
+			{Key: "user_id", Value: session.UserID},
+			{Key: "expires_at", Value: bson.D{
+				{Key: "$gt", Value: now.UTC()},
+			}},
+		},
+		options.Find().
+			SetProjection(bson.D{{Key: "_id", Value: 1}}).
+			SetSort(bson.D{
+				{Key: "created_at", Value: -1},
+				{Key: "_id", Value: -1},
+			}).
+			SetSkip(int64(maximumActive)),
+	)
+	if err != nil {
+		return fmt.Errorf("find excess sessions: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var excess []struct {
+		ID string `bson:"_id"`
+	}
+	if err := cursor.All(ctx, &excess); err != nil {
+		return fmt.Errorf("decode excess sessions: %w", err)
+	}
+	if len(excess) == 0 {
+		return nil
+	}
+	ids := make(bson.A, len(excess))
+	for index, item := range excess {
+		ids[index] = item.ID
+	}
+	if _, err := r.sessions.DeleteMany(ctx, bson.D{
+		{Key: "_id", Value: bson.D{{Key: "$in", Value: ids}}},
+		{Key: "user_id", Value: session.UserID},
+	}); err != nil {
+		return fmt.Errorf("remove excess sessions: %w", err)
+	}
+	return nil
 }
 
 func (r *MongoRepository) createSession(ctx context.Context, session biz.Session) error {
@@ -108,6 +177,39 @@ func (r *MongoRepository) FindSession(ctx context.Context, tokenHash string, now
 		return biz.Session{}, biz.User{}, fmt.Errorf("find session user: %w", err)
 	}
 	return session.domain(), user.domain(), nil
+}
+
+func (r *MongoRepository) ListSessions(
+	ctx context.Context,
+	userID string,
+	now time.Time,
+) ([]biz.Session, error) {
+	cursor, err := r.sessions.Find(
+		ctx,
+		bson.D{
+			{Key: "user_id", Value: userID},
+			{Key: "expires_at", Value: bson.D{
+				{Key: "$gt", Value: now.UTC()},
+			}},
+		},
+		options.Find().SetSort(bson.D{
+			{Key: "created_at", Value: -1},
+			{Key: "_id", Value: -1},
+		}),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find user sessions: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []sessionDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode user sessions: %w", err)
+	}
+	result := make([]biz.Session, len(documents))
+	for index, document := range documents {
+		result[index] = document.domain()
+	}
+	return result, nil
 }
 
 func (r *MongoRepository) DeleteSession(ctx context.Context, sessionID, userID string) error {

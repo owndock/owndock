@@ -40,10 +40,10 @@ func NewDockerRuntimeTargetProber() *DockerRuntimeTargetProber {
 func (p *DockerRuntimeTargetProber) ProbeRuntimeTarget(
 	ctx context.Context,
 	target biz.RuntimeTarget,
-) biz.RuntimeTargetStatus {
+) (biz.RuntimeTargetStatus, error) {
 	alias, err := secretref.Alias(target.CredentialRef)
 	if err != nil {
-		return biz.RuntimeTargetStatusCredentialError
+		return biz.RuntimeTargetStatusCredentialError, nil
 	}
 	prefix := "OWNDOCK_RUNTIME_" +
 		strings.ToUpper(strings.ReplaceAll(alias, "-", "_"))
@@ -58,19 +58,19 @@ func (p *DockerRuntimeTargetProber) ProbeRuntimeTarget(
 	for index, suffix := range []string{"_CA_PEM", "_CERT_PEM", "_KEY_PEM"} {
 		value, ok := p.lookup(prefix + suffix)
 		if !ok || strings.TrimSpace(value) == "" {
-			return biz.RuntimeTargetStatusCredentialError
+			return biz.RuntimeTargetStatusCredentialError, nil
 		}
 		values[index] = []byte(value)
 	}
 	engine, err := p.newEngine(target, values[0], values[1], values[2])
 	if err != nil {
-		return biz.RuntimeTargetStatusCredentialError
+		return biz.RuntimeTargetStatusCredentialError, nil
 	}
 	defer func() { _ = engine.Close() }()
 	if _, err := engine.Ping(ctx, client.PingOptions{}); err != nil {
-		return biz.RuntimeTargetStatusUnreachable
+		return biz.RuntimeTargetStatusUnreachable, nil
 	}
-	return biz.RuntimeTargetStatusReady
+	return biz.RuntimeTargetStatusReady, nil
 }
 
 func newRuntimeTargetEngine(
@@ -95,7 +95,6 @@ func newRuntimeTargetEngine(
 		}),
 		client.WithHost(target.Endpoint),
 		client.WithScheme("https"),
-		client.WithAPIVersionNegotiation(),
 	)
 }
 

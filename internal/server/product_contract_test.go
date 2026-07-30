@@ -35,6 +35,25 @@ import (
 
 const contractAccessToken = "test-token-0123456789012345678901234567890123456789"
 
+type contractLoginGuard struct{}
+
+func (contractLoginGuard) ReserveLoginAttempt(
+	context.Context,
+	string,
+	time.Time,
+	int,
+	time.Duration,
+) (bool, time.Time, error) {
+	return true, time.Time{}, nil
+}
+
+func (contractLoginGuard) ResetLoginAttempts(
+	context.Context,
+	string,
+) error {
+	return nil
+}
+
 func newProductContractHTTPHandler(t *testing.T) http.Handler {
 	t.Helper()
 	now := func() time.Time { return time.Unix(100, 0).UTC() }
@@ -50,7 +69,11 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		newID,
 		now,
 		time.Hour,
-	)
+	).WithLoginProtection(
+		contractLoginGuard{},
+		5,
+		15*time.Minute,
+	).WithSessionPolicy(10)
 	identityHTTP := identityservice.NewHTTP(identityUseCase, func() (string, error) {
 		return "bootstrap-secret", nil
 	})
@@ -140,7 +163,12 @@ func (r *contractIdentityRepository) FindUserByEmail(_ context.Context, email st
 	return r.user, nil
 }
 
-func (r *contractIdentityRepository) CreateSession(_ context.Context, session identitybiz.Session) error {
+func (r *contractIdentityRepository) CreateSession(
+	_ context.Context,
+	session identitybiz.Session,
+	_ time.Time,
+	_ int,
+) error {
 	r.sessions[session.TokenHash] = session
 	return nil
 }
@@ -155,6 +183,20 @@ func (r *contractIdentityRepository) FindSession(
 		return identitybiz.Session{}, identitybiz.User{}, identitybiz.ErrNotFound
 	}
 	return session, r.user, nil
+}
+
+func (r *contractIdentityRepository) ListSessions(
+	_ context.Context,
+	userID string,
+	now time.Time,
+) ([]identitybiz.Session, error) {
+	var result []identitybiz.Session
+	for _, session := range r.sessions {
+		if session.UserID == userID && session.ExpiresAt.After(now) {
+			result = append(result, session)
+		}
+	}
+	return result, nil
 }
 
 func (r *contractIdentityRepository) DeleteSession(_ context.Context, sessionID, userID string) error {
@@ -282,8 +324,8 @@ func (s *contractManagedHostStore) ConnectionMode(
 func (contractRuntimeTargetProber) ProbeRuntimeTarget(
 	context.Context,
 	controlplanebiz.RuntimeTarget,
-) controlplanebiz.RuntimeTargetStatus {
-	return controlplanebiz.RuntimeTargetStatusReady
+) (controlplanebiz.RuntimeTargetStatus, error) {
+	return controlplanebiz.RuntimeTargetStatusReady, nil
 }
 
 func (s *contractControlStore) ListProjects(_ context.Context, organizationID string) ([]controlplanebiz.Project, error) {
