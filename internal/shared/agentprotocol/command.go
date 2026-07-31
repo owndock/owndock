@@ -239,6 +239,8 @@ type RuntimeInventoryManifest struct {
 	ExpectedChunks    int
 	ExpectedResources int
 	RetentionSeconds  int
+	Events            []runtimeinventory.Event
+	EventsTruncated   bool
 }
 
 func (r AgentCommandResult) Validate(command AgentCommand) error {
@@ -373,8 +375,18 @@ func validInventoryCommand(
 }
 
 func validInventoryManifest(value *RuntimeInventoryManifest) bool {
-	return value != nil &&
-		validIdentifier(value.ObservationID) &&
+	if value == nil ||
+		len(value.Events) > runtimeinventory.MaxEventsPerWindow ||
+		(value.EventsTruncated &&
+			len(value.Events) != runtimeinventory.MaxEventsPerWindow) {
+		return false
+	}
+	for _, event := range value.Events {
+		if event.Validate() != nil {
+			return false
+		}
+	}
+	return validIdentifier(value.ObservationID) &&
 		value.SchemaVersion == runtimeinventory.SchemaVersion &&
 		value.ExpectedChunks >= 0 &&
 		value.ExpectedChunks <= runtimeinventory.MaxChunks &&

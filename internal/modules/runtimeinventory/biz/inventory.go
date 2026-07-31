@@ -346,11 +346,66 @@ type Query struct {
 	Kind            Kind
 }
 
+// Presence describes whether the latest complete observation still contains
+// a runtime object. An incomplete observation can never change this value.
+type Presence string
+
+const (
+	PresencePresent Presence = "present"
+	PresenceAbsent  Presence = "absent"
+)
+
+func (p Presence) Valid() bool {
+	return p == PresencePresent || p == PresenceAbsent
+}
+
+// State is the materialized current view of a runtime object. Resource keeps
+// the last safe Docker projection, including after the object becomes absent,
+// so callers can explain what disappeared without retaining raw Inspect data.
+type State struct {
+	Resource
+	Presence     Presence
+	FirstSeenAt  time.Time
+	LastSeenAt   time.Time
+	AbsentAt     time.Time
+	ReconciledAt time.Time
+	Generation   uint64
+}
+
+func (s State) Validate() error {
+	if err := s.Resource.Validate(); err != nil || !s.Presence.Valid() ||
+		s.FirstSeenAt.IsZero() || s.LastSeenAt.Before(s.FirstSeenAt) ||
+		s.ReconciledAt.Before(s.LastSeenAt) || s.Generation == 0 {
+		return ErrInvalidResource
+	}
+	if (s.Presence == PresencePresent && !s.AbsentAt.IsZero()) ||
+		(s.Presence == PresenceAbsent &&
+			(s.AbsentAt.IsZero() || s.AbsentAt.Before(s.LastSeenAt) ||
+				s.ReconciledAt.Before(s.AbsentAt))) {
+		return ErrInvalidResource
+	}
+	return nil
+}
+
+type StateQuery struct {
+	OrganizationID  string
+	RuntimeTargetID string
+	Kind            Kind
+	IncludeAbsent   bool
+}
+
 type Repository interface {
 	Begin(context.Context, Observation) error
 	Append(context.Context, Chunk) error
 	Complete(context.Context, string, string, time.Time) error
 	Current(context.Context, Query) ([]Resource, error)
+}
+
+// StateRepository exposes explicit presence without widening the ingestion
+// contract used by collectors and Agent reconnect tests.
+type StateRepository interface {
+	Repository
+	CurrentState(context.Context, StateQuery) ([]State, error)
 }
 
 func chunkDigest(index int, resources []Resource) (string, error) {

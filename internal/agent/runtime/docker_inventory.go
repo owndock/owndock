@@ -20,6 +20,7 @@ const (
 
 type dockerInventoryEngine interface {
 	dockerinventory.Engine
+	dockerinventory.EventEngine
 	Close() error
 }
 
@@ -31,6 +32,8 @@ type inventorySnapshot struct {
 	maxChunkBytes   int
 	resourceCount   int
 	chunks          []inventory.Chunk
+	events          []inventory.Event
+	eventsTruncated bool
 	expiresAt       time.Time
 	expirationTimer *time.Timer
 }
@@ -69,7 +72,22 @@ func (e *DockerExecutor) prepareInventory(
 	if err != nil {
 		return inventoryFailure(command.ID, "inventory_configuration"), nil
 	}
+	eventSince := e.now().UTC()
 	resources, collectErr := dockerinventory.NewReader(engine).Collect(ctx)
+	if collectErr != nil {
+		_ = engine.Close()
+		if contextError := ctx.Err(); contextError != nil {
+			return agentprotocol.AgentCommandResult{}, contextError
+		}
+		return inventoryFailure(command.ID, "inventory_unavailable"), nil
+	}
+	eventUntil := e.now().UTC()
+	eventBatch := inventory.EventBatch{}
+	if eventUntil.After(eventSince) {
+		eventBatch, collectErr = dockerinventory.NewEventReader(engine).ReadWindow(
+			ctx, eventSince, eventUntil, inventory.MaxEventsPerWindow,
+		)
+	}
 	_ = engine.Close()
 	if collectErr != nil {
 		if contextError := ctx.Err(); contextError != nil {
@@ -91,6 +109,8 @@ func (e *DockerExecutor) prepareInventory(
 		maxChunkBytes:   request.MaxChunkBytes,
 		resourceCount:   len(resources),
 		chunks:          chunks,
+		events:          append([]inventory.Event(nil), eventBatch.Events...),
+		eventsTruncated: eventBatch.Truncated,
 		expiresAt:       e.now().UTC().Add(inventorySnapshotTTL),
 	}
 	stored, code := e.storeInventorySnapshot(snapshot)
@@ -218,6 +238,8 @@ func inventoryManifestResult(
 				ExpectedChunks:    len(snapshot.chunks),
 				ExpectedResources: snapshot.resourceCount,
 				RetentionSeconds:  int(inventorySnapshotTTL / time.Second),
+				Events:            append([]inventory.Event(nil), snapshot.events...),
+				EventsTruncated:   snapshot.eventsTruncated,
 			},
 		},
 	}

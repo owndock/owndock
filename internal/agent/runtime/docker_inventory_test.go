@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/events"
 	"github.com/moby/moby/client"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
@@ -18,6 +20,22 @@ import (
 
 type inventoryEngineStub struct {
 	containers client.ContainerListResult
+	events     []events.Message
+}
+
+func (s *inventoryEngineStub) Events(
+	_ context.Context,
+	_ client.EventsListOptions,
+) client.EventsResult {
+	messages := make(chan events.Message, len(s.events))
+	errorsChannel := make(chan error, 1)
+	for _, event := range s.events {
+		messages <- event
+	}
+	close(messages)
+	errorsChannel <- io.EOF
+	close(errorsChannel)
+	return client.EventsResult{Messages: messages, Err: errorsChannel}
 }
 
 func (s *inventoryEngineStub) ContainerList(
@@ -145,6 +163,22 @@ func TestDockerInventoryPreparePullReleaseStaysInMemory(t *testing.T) {
 		strings.Contains(string(cacheFile), chunkResult.Inventory.Chunk.Resources[0].RuntimeID) {
 		t.Fatalf("inventory entered durable result cache: %s", cacheFile)
 	}
+	restartedExecutor, err := NewDockerExecutor(
+		"/var/run/docker.sock",
+		cache,
+		noopCutoverStore{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedResult, err := restartedExecutor.Execute(t.Context(), chunkCommand)
+	if err != nil || restartedResult.ErrorCode != "inventory_snapshot_missing" {
+		t.Fatalf(
+			"chunk after Agent restart result/error = %+v/%v",
+			restartedResult,
+			err,
+		)
+	}
 
 	release := inventoryCommand(
 		"inventory-release-1",
@@ -202,6 +236,47 @@ func TestDockerInventorySnapshotExpiresWithoutDiskFallback(t *testing.T) {
 	result, err = executor.Execute(t.Context(), chunk)
 	if err != nil || result.ErrorCode != "inventory_snapshot_missing" {
 		t.Fatalf("expired chunk result/error = %+v/%v", result, err)
+	}
+}
+
+func TestDockerInventoryPrepareReportsEventsDuringSnapshotWindow(t *testing.T) {
+	cache, err := NewFileResultCache(filepath.Join(t.TempDir(), "state"), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewDockerExecutor(
+		"/var/run/docker.sock",
+		cache,
+		noopCutoverStore{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := time.Unix(3000, 0).UTC()
+	executor.now = func() time.Time {
+		current = current.Add(100 * time.Millisecond)
+		return current
+	}
+	executor.newInventoryEngine = func(string) (dockerInventoryEngine, error) {
+		return &inventoryEngineStub{events: []events.Message{{
+			Type: events.ContainerEventType, Action: events.ActionDestroy,
+			Actor:    events.Actor{ID: "container-removed-during-agent-snapshot"},
+			TimeNano: time.Unix(3000, 250*int64(time.Millisecond)).UnixNano(),
+		}}}, nil
+	}
+	result, err := executor.Execute(t.Context(), inventoryCommand(
+		"inventory-prepare-event-window",
+		agentprotocol.AgentCommandInventoryPrepare,
+		0,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := result.Inventory.Manifest
+	if len(manifest.Events) != 1 || manifest.EventsTruncated ||
+		manifest.Events[0].RuntimeID != "container-removed-during-agent-snapshot" ||
+		manifest.Events[0].Action != inventory.EventActionDestroy {
+		t.Fatalf("Agent snapshot events = %#v", manifest)
 	}
 }
 

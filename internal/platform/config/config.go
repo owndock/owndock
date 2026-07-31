@@ -30,6 +30,15 @@ const (
 	defaultWorkerPoll            = 2 * time.Second
 	defaultWorkerLease           = 30 * time.Second
 	defaultWorkerOperation       = 10 * time.Minute
+	defaultInventoryPoll         = 2 * time.Second
+	defaultInventorySync         = 5 * time.Minute
+	defaultInventoryRetry        = 30 * time.Second
+	defaultInventoryLease        = 2 * time.Minute
+	defaultInventoryOperation    = time.Minute
+	defaultInventoryCommand      = 20 * time.Second
+	defaultInventoryConcurrency  = 2
+	defaultInventoryCandidates   = 256
+	defaultInventoryChunkBytes   = 48 * 1024
 	defaultAgentCACertEnv        = "OWNDOCK_AGENT_CA_CERT_PEM"
 	defaultAgentCAKeyEnv         = "OWNDOCK_AGENT_CA_KEY_PEM"
 	defaultEnrollmentTTL         = 15 * time.Minute
@@ -105,6 +114,7 @@ type Product struct {
 
 type Runtime struct {
 	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
+	InventoryWorker  InventoryWorker  `json:"inventory_worker"`
 }
 
 type DeploymentWorker struct {
@@ -112,6 +122,19 @@ type DeploymentWorker struct {
 	PollInterval     string `json:"poll_interval"`
 	LeaseDuration    string `json:"lease_duration"`
 	OperationTimeout string `json:"operation_timeout"`
+}
+
+type InventoryWorker struct {
+	Enabled          bool   `json:"enabled"`
+	PollInterval     string `json:"poll_interval"`
+	SyncInterval     string `json:"sync_interval"`
+	RetryInterval    string `json:"retry_interval"`
+	LeaseDuration    string `json:"lease_duration"`
+	OperationTimeout string `json:"operation_timeout"`
+	CommandTimeout   string `json:"command_timeout"`
+	Concurrency      int    `json:"concurrency"`
+	CandidateLimit   int    `json:"candidate_limit"`
+	MaxChunkBytes    int    `json:"max_chunk_bytes"`
 }
 
 type Security struct {
@@ -193,11 +216,24 @@ func Load(path string) (Config, error) {
 				CertificateTTL:   defaultAgentCertTTL.String(),
 			},
 		},
-		Runtime: Runtime{DeploymentWorker: DeploymentWorker{
-			PollInterval:     defaultWorkerPoll.String(),
-			LeaseDuration:    defaultWorkerLease.String(),
-			OperationTimeout: defaultWorkerOperation.String(),
-		}},
+		Runtime: Runtime{
+			DeploymentWorker: DeploymentWorker{
+				PollInterval:     defaultWorkerPoll.String(),
+				LeaseDuration:    defaultWorkerLease.String(),
+				OperationTimeout: defaultWorkerOperation.String(),
+			},
+			InventoryWorker: InventoryWorker{
+				PollInterval:     defaultInventoryPoll.String(),
+				SyncInterval:     defaultInventorySync.String(),
+				RetryInterval:    defaultInventoryRetry.String(),
+				LeaseDuration:    defaultInventoryLease.String(),
+				OperationTimeout: defaultInventoryOperation.String(),
+				CommandTimeout:   defaultInventoryCommand.String(),
+				Concurrency:      defaultInventoryConcurrency,
+				CandidateLimit:   defaultInventoryCandidates,
+				MaxChunkBytes:    defaultInventoryChunkBytes,
+			},
+		},
 	}
 	if err := c.Scan(&cfg); err != nil {
 		return Config{}, fmt.Errorf("scan config: %w", err)
@@ -239,6 +275,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Runtime.DeploymentWorker.Validate(c.Product.Enabled, c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.deployment_worker: %w", err)
+	}
+	if err := c.Runtime.InventoryWorker.Validate(c.Product.Enabled, c.Database.Mongo.Enabled); err != nil {
+		return fmt.Errorf("runtime.inventory_worker: %w", err)
 	}
 	return nil
 }
@@ -352,6 +391,98 @@ func (w DeploymentWorker) LeaseDurationValue() (time.Duration, error) {
 
 func (w DeploymentWorker) OperationTimeoutDuration() (time.Duration, error) {
 	return parseDuration(w.OperationTimeout, defaultWorkerOperation)
+}
+
+func (w InventoryWorker) Validate(productEnabled, mongoEnabled bool) error {
+	if !w.Enabled {
+		return nil
+	}
+	if !productEnabled || !mongoEnabled {
+		return fmt.Errorf("enabled worker requires product and MongoDB")
+	}
+	if _, err := w.PollIntervalDuration(); err != nil {
+		return fmt.Errorf("poll_interval: %w", err)
+	}
+	if _, err := w.SyncIntervalDuration(); err != nil {
+		return fmt.Errorf("sync_interval: %w", err)
+	}
+	if _, err := w.RetryIntervalDuration(); err != nil {
+		return fmt.Errorf("retry_interval: %w", err)
+	}
+	lease, err := w.LeaseDurationValue()
+	if err != nil {
+		return fmt.Errorf("lease_duration: %w", err)
+	}
+	operation, err := w.OperationTimeoutDuration()
+	if err != nil {
+		return fmt.Errorf("operation_timeout: %w", err)
+	}
+	command, err := w.CommandTimeoutDuration()
+	if err != nil {
+		return fmt.Errorf("command_timeout: %w", err)
+	}
+	if lease <= operation {
+		return fmt.Errorf("lease_duration must exceed operation_timeout")
+	}
+	if command > operation || command > time.Minute {
+		return fmt.Errorf("command_timeout must not exceed operation_timeout or 1m")
+	}
+	if w.ConcurrencyValue() < 1 || w.ConcurrencyValue() > 32 {
+		return fmt.Errorf("concurrency must be between 1 and 32")
+	}
+	if w.CandidateLimitValue() < 1 || w.CandidateLimitValue() > 1000 {
+		return fmt.Errorf("candidate_limit must be between 1 and 1000")
+	}
+	if w.MaxChunkBytesValue() < 4*1024 ||
+		w.MaxChunkBytesValue() > defaultInventoryChunkBytes {
+		return fmt.Errorf("max_chunk_bytes must be between 4096 and 49152")
+	}
+	return nil
+}
+
+func (w InventoryWorker) PollIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.PollInterval, defaultInventoryPoll)
+}
+
+func (w InventoryWorker) SyncIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.SyncInterval, defaultInventorySync)
+}
+
+func (w InventoryWorker) RetryIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.RetryInterval, defaultInventoryRetry)
+}
+
+func (w InventoryWorker) LeaseDurationValue() (time.Duration, error) {
+	return parseDuration(w.LeaseDuration, defaultInventoryLease)
+}
+
+func (w InventoryWorker) OperationTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.OperationTimeout, defaultInventoryOperation)
+}
+
+func (w InventoryWorker) CommandTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.CommandTimeout, defaultInventoryCommand)
+}
+
+func (w InventoryWorker) ConcurrencyValue() int {
+	if w.Concurrency == 0 {
+		return defaultInventoryConcurrency
+	}
+	return w.Concurrency
+}
+
+func (w InventoryWorker) CandidateLimitValue() int {
+	if w.CandidateLimit == 0 {
+		return defaultInventoryCandidates
+	}
+	return w.CandidateLimit
+}
+
+func (w InventoryWorker) MaxChunkBytesValue() int {
+	if w.MaxChunkBytes == 0 {
+		return defaultInventoryChunkBytes
+	}
+	return w.MaxChunkBytes
 }
 
 func (m Mongo) Validate() error {

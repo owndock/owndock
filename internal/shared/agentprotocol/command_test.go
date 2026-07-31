@@ -195,11 +195,25 @@ func TestRuntimeInventoryCommandsAndResultsAreBoundedAndNonDurable(t *testing.T)
 				ExpectedChunks:    1,
 				ExpectedResources: 1,
 				RetentionSeconds:  600,
+				Events: []runtimeinventory.Event{{
+					Kind: runtimeinventory.KindContainer, RuntimeID: "container-removed",
+					Action:     runtimeinventory.EventActionDestroy,
+					OccurredAt: time.Unix(1001, 0).UTC(),
+				}},
 			},
 		},
 	}
 	if err := manifest.Validate(prepare); err != nil {
 		t.Fatal(err)
+	}
+	invalidManifest := manifest
+	invalidInventory := *manifest.Inventory
+	invalidValue := *manifest.Inventory.Manifest
+	invalidValue.EventsTruncated = true
+	invalidInventory.Manifest = &invalidValue
+	invalidManifest.Inventory = &invalidInventory
+	if !errors.Is(invalidManifest.Validate(prepare), ErrResultInvalid) {
+		t.Fatal("short event list accepted as a truncated manifest")
 	}
 
 	chunkCommand := runtimeInventoryCommand(AgentCommandInventoryChunk, 0)

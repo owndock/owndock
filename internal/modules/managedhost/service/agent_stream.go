@@ -318,11 +318,13 @@ type agentRuntimeInventoryResult struct {
 }
 
 type agentRuntimeInventoryManifest struct {
-	ObservationID     string `json:"observation_id"`
-	SchemaVersion     int    `json:"schema_version"`
-	ExpectedChunks    int    `json:"expected_chunks"`
-	ExpectedResources int    `json:"expected_resources"`
-	RetentionSeconds  int    `json:"retention_seconds"`
+	ObservationID     string                   `json:"observation_id"`
+	SchemaVersion     int                      `json:"schema_version"`
+	ExpectedChunks    int                      `json:"expected_chunks"`
+	ExpectedResources int                      `json:"expected_resources"`
+	RetentionSeconds  int                      `json:"retention_seconds"`
+	Events            []runtimeinventory.Event `json:"events,omitempty"`
+	EventsTruncated   bool                     `json:"events_truncated,omitempty"`
 }
 
 func (r agentCommandResult) domain() biz.AgentCommandResult {
@@ -348,6 +350,8 @@ func (r agentCommandResult) domain() biz.AgentCommandResult {
 				ExpectedChunks:    manifest.ExpectedChunks,
 				ExpectedResources: manifest.ExpectedResources,
 				RetentionSeconds:  manifest.RetentionSeconds,
+				Events:            append([]runtimeinventory.Event(nil), manifest.Events...),
+				EventsTruncated:   manifest.EventsTruncated,
 			}
 		}
 	}

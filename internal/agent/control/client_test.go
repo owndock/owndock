@@ -7,16 +7,53 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	inventory "github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
 type probeExecutorStub struct {
 	mu       sync.Mutex
 	commands []agentprotocol.AgentCommand
+}
+
+func TestMaximumInventoryEventManifestFitsDefaultControlFrame(t *testing.T) {
+	events := make([]inventory.Event, inventory.MaxEventsPerWindow)
+	for index := range events {
+		events[index] = inventory.Event{
+			Kind:       inventory.KindContainer,
+			RuntimeID:  strings.Repeat("a", 508) + string(rune('A'+index%26)),
+			Action:     inventory.EventActionUpdate,
+			OccurredAt: time.Unix(1000+int64(index), 0).UTC(),
+		}
+	}
+	result := agentprotocol.AgentCommandResult{
+		CommandID: "inventory-command-1",
+		Status:    agentprotocol.AgentCommandSucceeded,
+		Inventory: &agentprotocol.RuntimeInventoryResult{
+			Manifest: &agentprotocol.RuntimeInventoryManifest{
+				ObservationID:    "observation-1",
+				SchemaVersion:    inventory.SchemaVersion,
+				RetentionSeconds: 600,
+				Events:           events,
+				EventsTruncated:  true,
+			},
+		},
+	}
+	encoded, err := json.Marshal(agentFrame{
+		Type: "command_result", Sequence: 2,
+		CommandResult: newAgentResult(result),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= 64*1024 {
+		t.Fatalf("maximum inventory event frame = %d bytes", len(encoded))
+	}
 }
 
 func (e *probeExecutorStub) Execute(

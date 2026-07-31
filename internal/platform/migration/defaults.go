@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"time"
 
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -25,7 +26,199 @@ func Default() []Migration {
 		{Version: 10, Name: "add_deployment_cutover_sequences", Up: addDeploymentCutoverSequences},
 		{Version: 11, Name: "index_login_attempt_expiry", Up: indexLoginAttemptExpiry},
 		{Version: 12, Name: "index_runtime_inventory", Up: indexRuntimeInventory},
+		{Version: 13, Name: "schedule_runtime_inventory", Up: scheduleRuntimeInventory},
+		{Version: 14, Name: "reconcile_runtime_inventory_state", Up: reconcileRuntimeInventoryState},
 	}
+}
+
+func reconcileRuntimeInventoryState(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	if err := backfillRuntimeInventoryCurrent(ctx, database); err != nil {
+		return err
+	}
+	_, err := database.Collection("runtime_inventory_current").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex(
+			"uniq_runtime_inventory_current_resource",
+			bson.D{
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "kind", Value: 1},
+				{Key: "runtime_id", Value: 1},
+			},
+		),
+		{
+			Keys: bson.D{
+				{Key: "organization_id", Value: 1},
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "presence", Value: 1},
+				{Key: "kind", Value: 1},
+				{Key: "name", Value: 1},
+				{Key: "runtime_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_current_state"),
+		},
+		{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_runtime_inventory_current_absent").
+				SetExpireAfterSeconds(0),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime inventory current indexes: %w", err)
+	}
+	_, err = database.Collection("runtime_inventory_event_hints").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "runtime_target_id", Value: 1},
+				{Key: "received_at", Value: -1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_event_target"),
+		},
+		{
+			Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().
+				SetName("ttl_runtime_inventory_event_hints").
+				SetExpireAfterSeconds(0),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime inventory event hint indexes: %w", err)
+	}
+	return nil
+}
+
+func backfillRuntimeInventoryCurrent(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	type inventoryHead struct {
+		ObservationID   string    `bson:"observation_id"`
+		RuntimeTargetID string    `bson:"runtime_target_id"`
+		Generation      uint64    `bson:"generation"`
+		CompletedAt     time.Time `bson:"completed_at"`
+	}
+	heads, err := database.Collection("runtime_inventory_heads").Find(ctx, bson.D{})
+	if err != nil {
+		return fmt.Errorf("find runtime inventory heads for current backfill: %w", err)
+	}
+	defer heads.Close(ctx)
+	current := database.Collection("runtime_inventory_current")
+	resources := database.Collection("runtime_inventory_resources")
+	for heads.Next(ctx) {
+		var head inventoryHead
+		if err := heads.Decode(&head); err != nil {
+			return fmt.Errorf("decode runtime inventory head for current backfill: %w", err)
+		}
+		cursor, err := resources.Find(ctx, bson.D{
+			{Key: "observation_id", Value: head.ObservationID},
+			{Key: "runtime_target_id", Value: head.RuntimeTargetID},
+		})
+		if err != nil {
+			return fmt.Errorf("find runtime inventory resources for current backfill: %w", err)
+		}
+		models := make([]mongo.WriteModel, 0, 500)
+		for cursor.Next(ctx) {
+			var document bson.M
+			if err := cursor.Decode(&document); err != nil {
+				_ = cursor.Close(ctx)
+				return fmt.Errorf("decode runtime inventory resource for current backfill: %w", err)
+			}
+			kind, kindOK := document["kind"].(string)
+			runtimeID, runtimeIDOK := document["runtime_id"].(string)
+			if !kindOK || !runtimeIDOK || kind == "" || runtimeID == "" ||
+				head.Generation == 0 || head.CompletedAt.IsZero() {
+				_ = cursor.Close(ctx)
+				return fmt.Errorf("runtime inventory resource current backfill identity is invalid")
+			}
+			delete(document, "_id")
+			delete(document, "expires_at")
+			delete(document, "first_seen_at")
+			delete(document, "absent_at")
+			document["presence"] = "present"
+			document["last_seen_at"] = head.CompletedAt
+			document["reconciled_at"] = head.CompletedAt
+			document["generation"] = head.Generation
+			models = append(models, mongo.NewUpdateOneModel().
+				SetFilter(bson.D{{
+					Key:   "_id",
+					Value: runtimeInventoryCurrentID(head.RuntimeTargetID, kind, runtimeID),
+				}}).
+				SetUpdate(bson.D{
+					{Key: "$set", Value: document},
+					{Key: "$setOnInsert", Value: bson.D{{
+						Key: "first_seen_at", Value: head.CompletedAt,
+					}}},
+					{Key: "$unset", Value: bson.D{
+						{Key: "absent_at", Value: ""},
+						{Key: "expires_at", Value: ""},
+					}},
+				}).SetUpsert(true))
+			if len(models) == 500 {
+				if _, err := current.BulkWrite(ctx, models); err != nil {
+					_ = cursor.Close(ctx)
+					return fmt.Errorf("backfill runtime inventory current batch: %w", err)
+				}
+				models = models[:0]
+			}
+		}
+		if err := cursor.Err(); err != nil {
+			_ = cursor.Close(ctx)
+			return fmt.Errorf("iterate runtime inventory resources for current backfill: %w", err)
+		}
+		if err := cursor.Close(ctx); err != nil {
+			return fmt.Errorf("close runtime inventory resource backfill cursor: %w", err)
+		}
+		if len(models) > 0 {
+			if _, err := current.BulkWrite(ctx, models); err != nil {
+				return fmt.Errorf("backfill runtime inventory current batch: %w", err)
+			}
+		}
+	}
+	if err := heads.Err(); err != nil {
+		return fmt.Errorf("iterate runtime inventory heads for current backfill: %w", err)
+	}
+	return nil
+}
+
+func runtimeInventoryCurrentID(values ...string) string {
+	hash := sha256.New()
+	for _, value := range values {
+		_, _ = hash.Write([]byte(value))
+		_, _ = hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil))
+}
+
+func scheduleRuntimeInventory(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("runtime_inventory_schedule").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "next_due_at", Value: 1},
+				{Key: "lease_expires_at", Value: 1},
+				{Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_schedule_due"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "organization_id", Value: 1},
+				{Key: "managed_host_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_inventory_schedule_host"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime inventory schedule indexes: %w", err)
+	}
+	return nil
 }
 
 func indexRuntimeInventory(

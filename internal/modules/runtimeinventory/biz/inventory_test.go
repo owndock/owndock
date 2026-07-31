@@ -130,3 +130,65 @@ func TestNewObservationBoundsEmptyAndChunkedInventories(t *testing.T) {
 		t.Fatalf("oversized chunk declaration error = %v", err)
 	}
 }
+
+func TestStateValidationRequiresConsistentPresenceTimeline(t *testing.T) {
+	observedAt := time.Unix(100, 0).UTC()
+	observation, err := NewObservation(
+		"observation-1", "organization-1", "host-1", "target-1",
+		1, 1, observedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource, err := NewResource(
+		observation, KindContainer, "container-1", "api", observedAt,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resource.Container = &ContainerSummary{State: "running"}
+	present := State{
+		Resource: resource, Presence: PresencePresent,
+		FirstSeenAt: observedAt, LastSeenAt: observedAt,
+		ReconciledAt: observedAt.Add(time.Second), Generation: 1,
+	}
+	if err := present.Validate(); err != nil {
+		t.Fatalf("present state: %v", err)
+	}
+	absent := present
+	absent.Presence = PresenceAbsent
+	absent.AbsentAt = observedAt.Add(2 * time.Second)
+	absent.ReconciledAt = absent.AbsentAt
+	if err := absent.Validate(); err != nil {
+		t.Fatalf("absent state: %v", err)
+	}
+	absent.AbsentAt = time.Time{}
+	if err := absent.Validate(); !errors.Is(err, ErrInvalidResource) {
+		t.Fatalf("missing absent timestamp error = %v", err)
+	}
+}
+
+func TestEventHintIdentityIgnoresDeliveryOrderAndRejectsMutation(t *testing.T) {
+	occurredAt := time.Unix(100, 0).UTC()
+	first, err := NewEventHint(
+		"organization-1", "target-1", KindContainer, "container-1",
+		EventActionDestroy, occurredAt, occurredAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := NewEventHint(
+		"organization-1", "target-1", KindContainer, "container-1",
+		EventActionDestroy, occurredAt, occurredAt.Add(time.Minute),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != replayed.ID {
+		t.Fatalf("replayed event IDs differ: %s != %s", first.ID, replayed.ID)
+	}
+	first.Action = EventActionStart
+	if err := first.Validate(); !errors.Is(err, ErrInvalidResource) {
+		t.Fatalf("mutated event error = %v", err)
+	}
+}

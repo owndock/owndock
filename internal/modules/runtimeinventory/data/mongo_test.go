@@ -61,3 +61,37 @@ func TestResourceDocumentIDScopesRuntimeObjectsByObservationAndKind(t *testing.T
 		t.Fatalf("resource IDs are not independently scoped")
 	}
 }
+
+func TestCurrentResourceSetSeparatesStableIdentityFromPresence(t *testing.T) {
+	completedAt := time.Unix(200, 0).UTC()
+	document := resourceDocument{
+		ID: "observation-resource", ObservationID: "observation-1",
+		OrganizationID: "organization-1", ManagedHostID: "host-1",
+		RuntimeTargetID: "target-1", Kind: biz.KindContainer,
+		RuntimeID: "container-1", Name: "api",
+		Container:  &biz.ContainerSummary{State: "running"},
+		ObservedAt: time.Unix(199, 0).UTC(), SchemaVersion: biz.CurrentSchemaVersion,
+		Presence: biz.PresenceAbsent, FirstSeenAt: time.Unix(100, 0).UTC(),
+		AbsentAt: time.Unix(150, 0).UTC(),
+	}
+	set, err := currentResourceSet(document, 7, completedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := set["_id"]; exists {
+		t.Fatal("current projection update must not replace stable _id")
+	}
+	if _, exists := set["first_seen_at"]; exists {
+		t.Fatal("current projection update must preserve first_seen_at")
+	}
+	if _, exists := set["absent_at"]; exists {
+		t.Fatal("present projection must clear absent_at through $unset")
+	}
+	if set["presence"] != string(biz.PresencePresent) &&
+		set["presence"] != biz.PresencePresent {
+		t.Fatalf("presence = %#v", set["presence"])
+	}
+	if set["generation"] != int64(7) && set["generation"] != uint64(7) {
+		t.Fatalf("generation = %#v", set["generation"])
+	}
+}

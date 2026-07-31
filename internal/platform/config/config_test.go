@@ -92,6 +92,12 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if cfg.Runtime.DeploymentWorker.Enabled {
 		t.Fatal("deployment worker must be disabled by default")
 	}
+	if cfg.Runtime.InventoryWorker.Enabled ||
+		cfg.Runtime.InventoryWorker.ConcurrencyValue() != defaultInventoryConcurrency ||
+		cfg.Runtime.InventoryWorker.CandidateLimitValue() != defaultInventoryCandidates ||
+		cfg.Runtime.InventoryWorker.MaxChunkBytesValue() != defaultInventoryChunkBytes {
+		t.Fatalf("inventory worker defaults = %+v", cfg.Runtime.InventoryWorker)
+	}
 	if cfg.Server.Agent.Enabled ||
 		cfg.Server.Agent.Address != defaultAgentAddress ||
 		cfg.Server.Agent.MaxFrameBytes != defaultAgentMaxFrameBytes ||
@@ -222,6 +228,30 @@ func TestDeploymentWorkerRequiresProductAndMongoDB(t *testing.T) {
 	worker.PollInterval = "invalid"
 	if err := worker.Validate(true, true); err == nil {
 		t.Fatal("worker accepted invalid poll interval")
+	}
+}
+
+func TestInventoryWorkerValidation(t *testing.T) {
+	worker := InventoryWorker{
+		Enabled: true, PollInterval: "1s", SyncInterval: "5m",
+		RetryInterval: "30s", LeaseDuration: "2m",
+		OperationTimeout: "1m", CommandTimeout: "20s",
+		Concurrency: 2, CandidateLimit: 256, MaxChunkBytes: 48 * 1024,
+	}
+	if err := worker.Validate(false, true); err == nil {
+		t.Fatal("inventory worker accepted disabled product")
+	}
+	if err := worker.Validate(true, true); err != nil {
+		t.Fatalf("valid inventory worker error = %v", err)
+	}
+	worker.LeaseDuration = "30s"
+	if err := worker.Validate(true, true); err == nil {
+		t.Fatal("inventory worker accepted a lease shorter than its operation timeout")
+	}
+	worker.LeaseDuration = "2m"
+	worker.MaxChunkBytes = 512 * 1024
+	if err := worker.Validate(true, true); err == nil {
+		t.Fatal("inventory worker accepted chunks larger than the Agent contract")
 	}
 }
 

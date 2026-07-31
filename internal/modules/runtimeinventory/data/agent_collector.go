@@ -9,10 +9,13 @@ import (
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
 	inventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	transport "github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
 const maximumInventoryClockSkew = 24 * time.Hour
+
+const defaultAgentInventoryRetryDelay = 100 * time.Millisecond
 
 var ErrAgentInventoryUnavailable = errors.New(
 	"Agent runtime inventory is unavailable",
@@ -28,6 +31,31 @@ type AgentCollector struct {
 	now            func() time.Time
 	commandTimeout time.Duration
 	maxChunkBytes  int
+	retryDelay     time.Duration
+	eventHints     inventorybiz.EventHintRepository
+}
+
+func (c *AgentCollector) WithEventHints(
+	repository inventorybiz.EventHintRepository,
+) *AgentCollector {
+	c.eventHints = repository
+	return c
+}
+
+func (c *AgentCollector) Collect(
+	ctx context.Context,
+	target inventorybiz.Target,
+) error {
+	if err := target.Validate(); err != nil ||
+		target.Connection.Mode != runtimeaccess.ModeAgent {
+		return inventorybiz.ErrInvalidTarget
+	}
+	return c.Synchronize(
+		ctx,
+		target.OrganizationID,
+		target.ManagedHostID,
+		target.RuntimeTargetID,
+	)
 }
 
 func NewAgentCollector(
@@ -51,8 +79,11 @@ func NewAgentCollector(
 		now:            now,
 		commandTimeout: commandTimeout,
 		maxChunkBytes:  maxChunkBytes,
+		retryDelay:     defaultAgentInventoryRetryDelay,
 	}, nil
 }
+
+var _ inventorybiz.Collector = (*AgentCollector)(nil)
 
 func (c *AgentCollector) Synchronize(
 	ctx context.Context,
@@ -133,13 +164,49 @@ func (c *AgentCollector) Synchronize(
 			return err
 		}
 	}
+	completedAt := c.now().UTC()
 	if err := c.repository.Complete(
 		ctx,
 		observation.ID,
 		observation.RuntimeTargetID,
-		c.now().UTC(),
+		completedAt,
 	); err != nil {
 		return err
+	}
+	return c.recordSnapshotWindowEvents(
+		ctx,
+		organizationID,
+		runtimeTargetID,
+		manifest.Events,
+		completedAt,
+	)
+}
+
+func (c *AgentCollector) recordSnapshotWindowEvents(
+	ctx context.Context,
+	organizationID, runtimeTargetID string,
+	events []transport.Event,
+	receivedAt time.Time,
+) error {
+	if c.eventHints == nil {
+		return nil
+	}
+	for _, event := range events {
+		hint, err := inventorybiz.NewEventHint(
+			organizationID,
+			runtimeTargetID,
+			inventorybiz.Kind(event.Kind),
+			event.RuntimeID,
+			inventorybiz.EventAction(event.Action),
+			event.OccurredAt,
+			receivedAt,
+		)
+		if err != nil {
+			return fmt.Errorf("%w: invalid event hint", ErrAgentInventoryUnavailable)
+		}
+		if err := c.eventHints.RecordEventHint(ctx, hint); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -150,39 +217,69 @@ func (c *AgentCollector) dispatch(
 	kind agentprotocol.AgentCommandKind,
 	inventory agentprotocol.RuntimeInventoryCommand,
 ) (agentprotocol.AgentCommandResult, error) {
-	commandID, err := c.newID()
-	if err != nil {
-		return agentprotocol.AgentCommandResult{},
-			fmt.Errorf("%w: generate command ID", ErrAgentInventoryUnavailable)
-	}
 	deadline := c.now().UTC().Add(c.commandTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok &&
 		contextDeadline.Before(deadline) {
 		deadline = contextDeadline.UTC()
 	}
-	command := biz.AgentCommand{
-		ID:        commandID,
-		Kind:      kind,
-		Deadline:  deadline,
-		Inventory: &inventory,
+	dispatchContext, cancel := context.WithTimeout(ctx, c.commandTimeout)
+	defer cancel()
+	for {
+		commandID, err := c.newID()
+		if err != nil {
+			return agentprotocol.AgentCommandResult{},
+				fmt.Errorf("%w: generate command ID", ErrAgentInventoryUnavailable)
+		}
+		command := biz.AgentCommand{
+			ID:        commandID,
+			Kind:      kind,
+			Deadline:  deadline,
+			Inventory: &inventory,
+		}
+		result, err := c.dispatcher.Dispatch(
+			dispatchContext,
+			managedHostID,
+			command,
+		)
+		if err != nil {
+			if transientInventoryDispatchError(err) &&
+				waitForInventoryRetry(dispatchContext, c.retryDelay) {
+				continue
+			}
+			return agentprotocol.AgentCommandResult{},
+				c.dispatchError(dispatchContext, err)
+		}
+		if err := result.Validate(command); err != nil {
+			return agentprotocol.AgentCommandResult{},
+				fmt.Errorf("%w: invalid result", ErrAgentInventoryUnavailable)
+		}
+		if result.Status != agentprotocol.AgentCommandSucceeded {
+			return agentprotocol.AgentCommandResult{},
+				fmt.Errorf(
+					"%w: %s",
+					ErrAgentInventoryUnavailable,
+					result.ErrorCode,
+				)
+		}
+		return result, nil
 	}
-	result, err := c.dispatcher.Dispatch(ctx, managedHostID, command)
-	if err != nil {
-		return agentprotocol.AgentCommandResult{}, c.dispatchError(ctx, err)
+}
+
+func transientInventoryDispatchError(err error) bool {
+	return errors.Is(err, biz.ErrAgentNotConnected) ||
+		errors.Is(err, biz.ErrAgentDisconnected) ||
+		errors.Is(err, biz.ErrAgentBackpressure)
+}
+
+func waitForInventoryRetry(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
-	if err := result.Validate(command); err != nil {
-		return agentprotocol.AgentCommandResult{},
-			fmt.Errorf("%w: invalid result", ErrAgentInventoryUnavailable)
-	}
-	if result.Status != agentprotocol.AgentCommandSucceeded {
-		return agentprotocol.AgentCommandResult{},
-			fmt.Errorf(
-				"%w: %s",
-				ErrAgentInventoryUnavailable,
-				result.ErrorCode,
-			)
-	}
-	return result, nil
 }
 
 func (c *AgentCollector) dispatchError(ctx context.Context, err error) error {

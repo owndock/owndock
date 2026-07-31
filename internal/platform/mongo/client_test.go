@@ -25,6 +25,7 @@ import (
 	managedhostdata "github.com/owndock/owndock/internal/modules/managedhost/data"
 	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
+	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	"github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/id"
@@ -168,6 +169,40 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed legacy failed deployment: %v", err)
 	}
+	legacyInventoryCompletedAt := time.Now().UTC().Add(-time.Minute)
+	if _, err := client.Database().Collection("runtime_inventory_heads").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-inventory-target"},
+		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "managed_host_id", Value: "legacy-inventory-host"},
+		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
+		{Key: "observation_id", Value: "legacy-inventory-observation"},
+		{Key: "generation", Value: uint64(9)},
+		{Key: "started_at", Value: legacyInventoryCompletedAt.Add(-time.Second)},
+		{Key: "completed_at", Value: legacyInventoryCompletedAt},
+	}); err != nil {
+		t.Fatalf("seed legacy runtime inventory head: %v", err)
+	}
+	if _, err := client.Database().Collection("runtime_inventory_resources").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-inventory-resource-document"},
+		{Key: "observation_id", Value: "legacy-inventory-observation"},
+		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "managed_host_id", Value: "legacy-inventory-host"},
+		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
+		{Key: "kind", Value: "container"},
+		{Key: "runtime_id", Value: "legacy-inventory-container"},
+		{Key: "name", Value: "legacy-api"},
+		{Key: "managed", Value: false},
+		{Key: "container", Value: bson.D{{Key: "state", Value: "running"}}},
+		{Key: "labels", Value: bson.D{}},
+		{Key: "attributes", Value: bson.D{}},
+		{Key: "ports", Value: bson.A{}},
+		{Key: "mounts", Value: bson.A{}},
+		{Key: "networks", Value: bson.A{}},
+		{Key: "observed_at", Value: legacyInventoryCompletedAt},
+		{Key: "schema_version", Value: 1},
+	}); err != nil {
+		t.Fatalf("seed legacy runtime inventory resource: %v", err)
+	}
 	runner := migration.NewRunner(client.Database(), "integration-test")
 	if err := runner.Run(ctx, migration.Default()); err != nil {
 		t.Fatalf("run migrations: %v", err)
@@ -175,7 +210,29 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err := runner.Run(ctx, migration.Default()); err != nil {
 		t.Fatalf("rerun migrations: %v", err)
 	}
+	var backfilledInventory bson.M
+	if err := client.Database().Collection("runtime_inventory_current").FindOne(ctx, bson.D{
+		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
+		{Key: "runtime_id", Value: "legacy-inventory-container"},
+	}).Decode(&backfilledInventory); err != nil {
+		t.Fatalf("find backfilled runtime inventory current state: %v", err)
+	}
+	if backfilledInventory["presence"] != "present" ||
+		backfilledInventory["generation"] != int64(9) ||
+		backfilledInventory["first_seen_at"] == nil {
+		t.Fatalf("backfilled runtime inventory current state = %#v", backfilledInventory)
+	}
+	for _, collection := range []string{
+		"runtime_inventory_heads", "runtime_inventory_resources", "runtime_inventory_current",
+	} {
+		if _, err := client.Database().Collection(collection).DeleteMany(ctx, bson.D{
+			{Key: "runtime_target_id", Value: "legacy-inventory-target"},
+		}); err != nil {
+			t.Fatalf("clean legacy runtime inventory %s: %v", collection, err)
+		}
+	}
 	verifyRuntimeInventoryIntegration(t, ctx, client.Database())
+	verifyRuntimeInventoryScheduleIntegration(t, ctx, client.Database())
 	var migratedDeployment struct {
 		OrganizationID  string `bson:"organization_id"`
 		Status          string `bson:"status"`
@@ -1191,6 +1248,56 @@ func verifyRuntimeInventoryIntegration(
 		current[0].DeploymentID != resource.DeploymentID {
 		t.Fatalf("current runtime inventory = %+v", current)
 	}
+	stateQuery := runtimeinventorybiz.StateQuery{
+		OrganizationID: first.OrganizationID, RuntimeTargetID: first.RuntimeTargetID,
+		IncludeAbsent: true,
+	}
+	states, err := repository.CurrentState(ctx, stateQuery)
+	if err != nil || len(states) != 1 ||
+		states[0].Presence != runtimeinventorybiz.PresencePresent ||
+		states[0].Generation == 0 || states[0].FirstSeenAt.IsZero() ||
+		!states[0].AbsentAt.IsZero() {
+		t.Fatalf("present runtime inventory state = %+v, %v", states, err)
+	}
+	firstSeenAt := states[0].FirstSeenAt
+	partial, err := runtimeinventorybiz.NewObservation(
+		"inventory-observation-partial",
+		first.OrganizationID,
+		first.ManagedHostID,
+		first.RuntimeTargetID,
+		2,
+		2,
+		startedAt.Add(3*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create partial runtime inventory observation: %v", err)
+	}
+	partialResource := resource
+	partialResource.ObservationID = partial.ID
+	partialResource.ObservedAt = startedAt.Add(3 * time.Second)
+	partialChunk, err := runtimeinventorybiz.NewChunk(
+		partial, 0, []runtimeinventorybiz.Resource{partialResource},
+	)
+	if err != nil {
+		t.Fatalf("create partial runtime inventory chunk: %v", err)
+	}
+	if err := repository.Begin(ctx, partial); err != nil {
+		t.Fatalf("begin partial runtime inventory observation: %v", err)
+	}
+	if err := repository.Append(ctx, partialChunk); err != nil {
+		t.Fatalf("append partial runtime inventory chunk: %v", err)
+	}
+	if err := repository.Complete(
+		ctx, partial.ID, partial.RuntimeTargetID, startedAt.Add(4*time.Second),
+	); !errors.Is(err, runtimeinventorybiz.ErrConflict) {
+		t.Fatalf("partial runtime inventory completion error = %v", err)
+	}
+	states, err = repository.CurrentState(ctx, stateQuery)
+	if err != nil || len(states) != 1 ||
+		states[0].Presence != runtimeinventorybiz.PresencePresent ||
+		!states[0].FirstSeenAt.Equal(firstSeenAt) {
+		t.Fatalf("state changed by partial observation = %+v, %v", states, err)
+	}
 
 	if err := repository.Complete(
 		ctx,
@@ -1228,17 +1335,361 @@ func verifyRuntimeInventoryIntegration(
 	if err != nil || len(current) != 0 {
 		t.Fatalf("empty current runtime inventory = %+v, %v", current, err)
 	}
+	states, err = repository.CurrentState(ctx, stateQuery)
+	if err != nil || len(states) != 1 ||
+		states[0].Presence != runtimeinventorybiz.PresenceAbsent ||
+		!states[0].FirstSeenAt.Equal(firstSeenAt) || states[0].AbsentAt.IsZero() {
+		t.Fatalf("absent runtime inventory state = %+v, %v", states, err)
+	}
+	if err := states[0].Validate(); err != nil {
+		t.Fatalf("validate absent runtime inventory state: %v", err)
+	}
+
+	third, err := runtimeinventorybiz.NewObservation(
+		"inventory-observation-3",
+		first.OrganizationID,
+		first.ManagedHostID,
+		first.RuntimeTargetID,
+		1,
+		1,
+		startedAt.Add(6*time.Second),
+	)
+	if err != nil {
+		t.Fatalf("create restoring runtime inventory observation: %v", err)
+	}
+	restored := resource
+	restored.ObservationID = third.ID
+	restored.ObservedAt = startedAt.Add(6 * time.Second)
+	restored.Container = &runtimeinventorybiz.ContainerSummary{
+		ImageReference: resource.Container.ImageReference,
+		ImageDigest:    resource.Container.ImageDigest,
+		State:          "running", Health: "healthy",
+	}
+	restoredChunk, err := runtimeinventorybiz.NewChunk(
+		third, 0, []runtimeinventorybiz.Resource{restored},
+	)
+	if err != nil {
+		t.Fatalf("create restoring runtime inventory chunk: %v", err)
+	}
+	if err := repository.Begin(ctx, third); err != nil {
+		t.Fatalf("begin restoring runtime inventory observation: %v", err)
+	}
+	if err := repository.Append(ctx, restoredChunk); err != nil {
+		t.Fatalf("append restoring runtime inventory chunk: %v", err)
+	}
+	if err := repository.Complete(
+		ctx, third.ID, third.RuntimeTargetID, startedAt.Add(7*time.Second),
+	); err != nil {
+		t.Fatalf("complete restoring runtime inventory observation: %v", err)
+	}
+	states, err = repository.CurrentState(ctx, stateQuery)
+	if err != nil || len(states) != 1 ||
+		states[0].Presence != runtimeinventorybiz.PresencePresent ||
+		!states[0].FirstSeenAt.Equal(firstSeenAt) || !states[0].AbsentAt.IsZero() {
+		t.Fatalf("restored runtime inventory state = %+v, %v", states, err)
+	}
+	if err := states[0].Validate(); err != nil {
+		t.Fatalf("validate restored runtime inventory state: %v", err)
+	}
 	for _, collection := range []string{
 		"runtime_inventory_observations",
 		"runtime_inventory_chunks",
 		"runtime_inventory_resources",
 		"runtime_inventory_heads",
 		"runtime_inventory_counters",
+		"runtime_inventory_current",
 	} {
 		if _, err := database.Collection(collection).DeleteMany(ctx, bson.D{}); err != nil {
 			t.Fatalf("clean runtime inventory collection %s: %v", collection, err)
 		}
 	}
+}
+
+func verifyRuntimeInventoryScheduleIntegration(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	if _, err := database.Collection("managed_hosts").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "inventory-schedule-host"},
+		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "status", Value: managedhostbiz.StatusOnline},
+	}); err != nil {
+		t.Fatalf("seed runtime inventory schedule host: %v", err)
+	}
+	if _, err := database.Collection("runtime_targets").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "inventory-schedule-target"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "managed_host_id", Value: "inventory-schedule-host"},
+		{Key: "connection_mode", Value: runtimeaccess.ModeDirectDocker},
+		{Key: "endpoint", Value: "tcp://runtime.example:2376"},
+		{Key: "tls_server_name", Value: "runtime.example"},
+		{Key: "credential_ref", Value: "secret://inventory-schedule"},
+		{Key: "status", Value: controlplanebiz.RuntimeTargetStatusReady},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed runtime inventory schedule target: %v", err)
+	}
+	repository := runtimeinventorydata.NewMongoScheduleRepository(database)
+	targets, err := repository.ListReadyTargets(ctx, 10, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("list runtime inventory schedule targets: %v", err)
+	}
+	var target runtimeinventorybiz.Target
+	for _, candidate := range targets {
+		if candidate.RuntimeTargetID == "inventory-schedule-target" {
+			target = candidate
+			break
+		}
+	}
+	if target.RuntimeTargetID == "" ||
+		target.OrganizationID != "legacy-organization" {
+		t.Fatalf("runtime inventory schedule target = %+v", target)
+	}
+	verifyConcurrentInventoryRunners(t, ctx, database, repository)
+
+	now := time.Now().UTC()
+	type claimResult struct {
+		lease    runtimeinventorybiz.ScheduleLease
+		acquired bool
+		err      error
+	}
+	results := make(chan claimResult, 2)
+	for _, owner := range []string{"inventory-server-a", "inventory-server-b"} {
+		go func(ownerID string) {
+			lease, acquired, claimErr := repository.TryAcquire(
+				ctx, target, ownerID, now, now.Add(time.Minute),
+			)
+			results <- claimResult{lease: lease, acquired: acquired, err: claimErr}
+		}(owner)
+	}
+	var winner runtimeinventorybiz.ScheduleLease
+	acquiredCount := 0
+	for range 2 {
+		result := <-results
+		if result.err != nil {
+			t.Fatalf("claim runtime inventory schedule: %v", result.err)
+		}
+		if result.acquired {
+			acquiredCount++
+			winner = result.lease
+		}
+	}
+	if acquiredCount != 1 {
+		t.Fatalf("concurrent runtime inventory claims = %d, want 1", acquiredCount)
+	}
+	if dueTargets, listErr := repository.ListReadyTargets(ctx, 10, now); listErr != nil {
+		t.Fatalf("list leased runtime inventory targets: %v", listErr)
+	} else if containsInventoryTarget(dueTargets, target.RuntimeTargetID) {
+		t.Fatal("actively leased runtime inventory target remained due")
+	}
+	nextDueAt := now.Add(5 * time.Minute)
+	if err := repository.Finish(
+		ctx, winner, now.Add(time.Second), nextDueAt, true,
+	); err != nil {
+		t.Fatalf("finish runtime inventory schedule: %v", err)
+	}
+	if _, acquired, err := repository.TryAcquire(
+		ctx,
+		target,
+		"inventory-server-c",
+		now.Add(2*time.Second),
+		now.Add(2*time.Minute),
+	); err != nil || acquired {
+		t.Fatalf("early runtime inventory claim = %v, %v", acquired, err)
+	}
+	if dueTargets, listErr := repository.ListReadyTargets(
+		ctx,
+		10,
+		now.Add(2*time.Second),
+	); listErr != nil {
+		t.Fatalf("list early runtime inventory targets: %v", listErr)
+	} else if containsInventoryTarget(dueTargets, target.RuntimeTargetID) {
+		t.Fatal("runtime inventory target was listed before next_due_at")
+	}
+	if dueTargets, listErr := repository.ListReadyTargets(
+		ctx,
+		10,
+		nextDueAt,
+	); listErr != nil {
+		t.Fatalf("list due runtime inventory targets: %v", listErr)
+	} else if !containsInventoryTarget(dueTargets, target.RuntimeTargetID) {
+		t.Fatal("runtime inventory target was not listed at next_due_at")
+	}
+	second, acquired, err := repository.TryAcquire(
+		ctx,
+		target,
+		"inventory-server-c",
+		nextDueAt,
+		nextDueAt.Add(time.Minute),
+	)
+	if err != nil || !acquired || second.Token <= winner.Token {
+		t.Fatalf("due runtime inventory claim = %+v, %v, %v", second, acquired, err)
+	}
+	if err := repository.Finish(
+		ctx, winner, nextDueAt, nextDueAt.Add(time.Minute), false,
+	); !errors.Is(err, runtimeinventorybiz.ErrLeaseLost) {
+		t.Fatalf("stale runtime inventory lease finish error = %v", err)
+	}
+	eventReceivedAt := nextDueAt.Add(500 * time.Millisecond)
+	hint, err := runtimeinventorybiz.NewEventHint(
+		target.OrganizationID,
+		target.RuntimeTargetID,
+		runtimeinventorybiz.KindContainer,
+		"inventory-event-container",
+		runtimeinventorybiz.EventActionDestroy,
+		nextDueAt.Add(250*time.Millisecond),
+		eventReceivedAt,
+	)
+	if err != nil {
+		t.Fatalf("create runtime inventory event hint: %v", err)
+	}
+	if err := repository.RecordEventHint(ctx, hint); err != nil {
+		t.Fatalf("record runtime inventory event hint: %v", err)
+	}
+	// A replay may arrive later but must retain one summary and can only make
+	// reconciliation earlier, never mutate current presence directly.
+	replayedHint, err := runtimeinventorybiz.NewEventHint(
+		target.OrganizationID,
+		target.RuntimeTargetID,
+		runtimeinventorybiz.KindContainer,
+		"inventory-event-container",
+		runtimeinventorybiz.EventActionDestroy,
+		nextDueAt.Add(250*time.Millisecond),
+		eventReceivedAt.Add(100*time.Millisecond),
+	)
+	if err != nil {
+		t.Fatalf("create replayed runtime inventory event hint: %v", err)
+	}
+	if err := repository.RecordEventHint(ctx, replayedHint); err != nil {
+		t.Fatalf("record replayed runtime inventory event hint: %v", err)
+	}
+	finishAfterEvent := nextDueAt.Add(time.Second)
+	if err := repository.Finish(
+		ctx, second, finishAfterEvent, finishAfterEvent.Add(5*time.Minute), true,
+	); err != nil {
+		t.Fatalf("finish event-interrupted runtime inventory schedule: %v", err)
+	}
+	if dueTargets, listErr := repository.ListReadyTargets(
+		ctx, 10, finishAfterEvent,
+	); listErr != nil {
+		t.Fatalf("list event-due runtime inventory targets: %v", listErr)
+	} else if !containsInventoryTarget(dueTargets, target.RuntimeTargetID) {
+		t.Fatal("event received during collection was overwritten by Finish")
+	}
+	if count, countErr := database.Collection("runtime_inventory_event_hints").
+		CountDocuments(ctx, bson.D{{Key: "_id", Value: hint.ID}}); countErr != nil || count != 1 {
+		t.Fatalf("runtime inventory event hint count = %d, %v", count, countErr)
+	}
+	if _, err := database.Collection("runtime_inventory_schedule").DeleteOne(
+		ctx,
+		bson.D{{Key: "_id", Value: target.RuntimeTargetID}},
+	); err != nil {
+		t.Fatalf("clean runtime inventory schedule: %v", err)
+	}
+	if _, err := database.Collection("runtime_targets").DeleteOne(
+		ctx,
+		bson.D{{Key: "_id", Value: target.RuntimeTargetID}},
+	); err != nil {
+		t.Fatalf("clean runtime inventory schedule target: %v", err)
+	}
+	if _, err := database.Collection("managed_hosts").DeleteOne(
+		ctx,
+		bson.D{{Key: "_id", Value: target.ManagedHostID}},
+	); err != nil {
+		t.Fatalf("clean runtime inventory schedule host: %v", err)
+	}
+	if _, err := database.Collection("runtime_inventory_event_hints").DeleteMany(
+		ctx,
+		bson.D{{Key: "runtime_target_id", Value: target.RuntimeTargetID}},
+	); err != nil {
+		t.Fatalf("clean runtime inventory event hints: %v", err)
+	}
+}
+
+type integrationInventoryCollector struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *integrationInventoryCollector) Collect(
+	context.Context,
+	runtimeinventorybiz.Target,
+) error {
+	c.mu.Lock()
+	c.calls++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *integrationInventoryCollector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
+func verifyConcurrentInventoryRunners(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+	repository *runtimeinventorydata.MongoScheduleRepository,
+) {
+	t.Helper()
+	now := time.Now().UTC()
+	collector := &integrationInventoryCollector{}
+	runners := make([]*runtimeinventoryworker.Runner, 2)
+	for index, workerID := range []string{"inventory-runner-a", "inventory-runner-b"} {
+		runner, err := runtimeinventoryworker.NewRunner(
+			repository,
+			collector,
+			workerID,
+			time.Minute,
+			5*time.Minute,
+			30*time.Second,
+			10,
+			func() time.Time { return now },
+		)
+		if err != nil {
+			t.Fatalf("create concurrent inventory runner: %v", err)
+		}
+		runners[index] = runner
+	}
+	start := make(chan struct{})
+	results := make(chan error, len(runners))
+	for _, runner := range runners {
+		go func(runner *runtimeinventoryworker.Runner) {
+			<-start
+			results <- runner.RunOnce(ctx)
+		}(runner)
+	}
+	close(start)
+	for range runners {
+		if err := <-results; err != nil {
+			t.Fatalf("run concurrent inventory worker: %v", err)
+		}
+	}
+	if collector.count() != 1 {
+		t.Fatalf("concurrent inventory runner collections = %d, want 1", collector.count())
+	}
+	if _, err := database.Collection("runtime_inventory_schedule").DeleteOne(
+		ctx,
+		bson.D{{Key: "_id", Value: "inventory-schedule-target"}},
+	); err != nil {
+		t.Fatalf("reset runtime inventory runner schedule: %v", err)
+	}
+}
+
+func containsInventoryTarget(
+	targets []runtimeinventorybiz.Target,
+	targetID string,
+) bool {
+	for _, target := range targets {
+		if target.RuntimeTargetID == targetID {
+			return true
+		}
+	}
+	return false
 }
 
 func assertRuntimeInventoryExpiry(

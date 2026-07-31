@@ -3,11 +3,8 @@ package data
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
-	"net/http"
 	"strconv"
 	"time"
 
@@ -16,6 +13,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 
+	"github.com/owndock/owndock/internal/adapters/dockerengine"
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 )
@@ -505,31 +503,13 @@ func newTLSDockerEngine(
 	if credential.DirectDocker == nil {
 		return nil, errors.New("direct Docker credential is required")
 	}
-	connection := plan.TargetConnection.DirectDocker
 	directCredential := credential.DirectDocker
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(directCredential.CACertificate) {
-		return nil, errors.New("runtime CA certificate is invalid")
-	}
-	certificate, err := tls.X509KeyPair(
-		directCredential.ClientCertificate,
-		directCredential.ClientKey,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("runtime client certificate is invalid: %w", err)
-	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{
-		MinVersion:   tls.VersionTLS12,
-		ServerName:   connection.TLSServerName,
-		RootCAs:      roots,
-		Certificates: []tls.Certificate{certificate},
-	}}
-	httpClient := &http.Client{
-		Transport: transport, CheckRedirect: mobyclient.CheckRedirect,
-	}
-	return mobyclient.New(
-		mobyclient.WithHTTPClient(httpClient),
-		mobyclient.WithHost(connection.Endpoint),
-		mobyclient.WithScheme("https"),
+	return dockerengine.NewTLS(
+		plan.TargetConnection,
+		dockerengine.TLSCredential{
+			CACertificate:     directCredential.CACertificate,
+			ClientCertificate: directCredential.ClientCertificate,
+			ClientKey:         directCredential.ClientKey,
+		},
 	)
 }
