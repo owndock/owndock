@@ -3,7 +3,9 @@ package config
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -24,13 +26,33 @@ const (
 	defaultMongoMaxPoolSize      = 100
 	defaultBootstrapTokenEnv     = "OWNDOCK_BOOTSTRAP_TOKEN"
 	defaultSessionTTL            = 24 * time.Hour
+	defaultUserInvitationTTL     = 24 * time.Hour
 	defaultMaximumActiveSessions = 10
 	defaultLoginAttemptLimit     = 5
 	defaultLoginAttemptWindow    = 15 * time.Minute
+	defaultIngressSourceLimit    = 600
+	defaultIngressGlobalLimit    = 6000
+	defaultIngressRateWindow     = time.Minute
 	defaultSourceProbeTimeout    = 10 * time.Second
+	defaultBuildTriggerLimit     = 60
+	defaultBuildTriggerWindow    = time.Minute
+	defaultBuildWebhookLimit     = 120
+	defaultBuildWebhookWindow    = time.Minute
+	defaultBuildWebhookMaxBody   = int64(1024 * 1024)
 	defaultWorkerPoll            = 2 * time.Second
 	defaultWorkerLease           = 30 * time.Second
 	defaultWorkerOperation       = 10 * time.Minute
+	defaultBuildWorkerPoll       = 2 * time.Second
+	defaultBuildWorkerLease      = 30 * time.Second
+	defaultBuildWorkerOperation  = 2*time.Hour + 15*time.Minute
+	defaultBuildCheckoutTimeout  = 10 * time.Minute
+	defaultBuildWorkspaceRoot    = "/var/lib/owndock/builds"
+	defaultBuildWorkspaceBytes   = int64(5 * 1024 * 1024 * 1024)
+	defaultBuildWorkspaceFiles   = int64(250000)
+	defaultBuildLogRetention     = 7 * 24 * time.Hour
+	defaultBuildLogMaxBytes      = int64(10 * 1024 * 1024)
+	defaultBuildLogChunkBytes    = 16 * 1024
+	defaultBuildMetricsAddress   = "127.0.0.1:9091"
 	defaultInventoryPoll         = 2 * time.Second
 	defaultInventorySync         = 5 * time.Minute
 	defaultInventoryRetry        = 30 * time.Second
@@ -76,9 +98,10 @@ type Server struct {
 }
 
 type HTTP struct {
-	Address         string `json:"address"`
-	Timeout         string `json:"timeout"`
-	ShutdownTimeout string `json:"shutdown_timeout"`
+	Address            string   `json:"address"`
+	Timeout            string   `json:"timeout"`
+	ShutdownTimeout    string   `json:"shutdown_timeout"`
+	CORSAllowedOrigins []string `json:"cors_allowed_origins"`
 }
 
 type Agent struct {
@@ -113,13 +136,41 @@ type Development struct {
 }
 
 type Product struct {
-	Enabled            bool   `json:"enabled"`
-	SourceProbeTimeout string `json:"source_probe_timeout"`
+	Enabled                  bool   `json:"enabled"`
+	SourceProbeTimeout       string `json:"source_probe_timeout"`
+	BuildTriggerRateLimit    int    `json:"build_trigger_rate_limit"`
+	BuildTriggerRateWindow   string `json:"build_trigger_rate_window"`
+	BuildWebhookRateLimit    int    `json:"build_webhook_rate_limit"`
+	BuildWebhookRateWindow   string `json:"build_webhook_rate_window"`
+	BuildWebhookMaxBodyBytes int64  `json:"build_webhook_max_body_bytes"`
 }
 
 type Runtime struct {
 	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
 	InventoryWorker  InventoryWorker  `json:"inventory_worker"`
+	BuildWorker      BuildWorker      `json:"build_worker"`
+}
+
+type BuildWorker struct {
+	Enabled                bool   `json:"enabled"`
+	PollInterval           string `json:"poll_interval"`
+	LeaseDuration          string `json:"lease_duration"`
+	OperationTimeout       string `json:"operation_timeout"`
+	CheckoutTimeout        string `json:"checkout_timeout"`
+	WorkspaceRoot          string `json:"workspace_root"`
+	MaxWorkspaceBytes      int64  `json:"max_workspace_bytes"`
+	MaxWorkspaceFiles      int64  `json:"max_workspace_files"`
+	GitExecutable          string `json:"git_executable"`
+	GitVersion             string `json:"git_version"`
+	BuildKitEndpoint       string `json:"buildkit_endpoint"`
+	BuildKitServerName     string `json:"buildkit_server_name"`
+	BuildKitCACertFile     string `json:"buildkit_ca_cert_file"`
+	BuildKitClientCertFile string `json:"buildkit_client_cert_file"`
+	BuildKitClientKeyFile  string `json:"buildkit_client_key_file"`
+	LogRetention           string `json:"log_retention"`
+	LogMaxBytes            int64  `json:"log_max_bytes"`
+	LogChunkBytes          int    `json:"log_chunk_bytes"`
+	MetricsAddress         string `json:"metrics_address"`
 }
 
 type DeploymentWorker struct {
@@ -149,8 +200,13 @@ type Security struct {
 	BootstrapTokenEnv  string   `json:"bootstrap_token_env"`
 	SessionTTL         string   `json:"session_ttl"`
 	MaxActiveSessions  int      `json:"max_active_sessions"`
+	UserInvitationTTL  string   `json:"user_invitation_ttl"`
 	LoginAttemptLimit  int      `json:"login_attempt_limit"`
 	LoginAttemptWindow string   `json:"login_attempt_window"`
+	IngressSourceLimit int      `json:"ingress_source_limit"`
+	IngressGlobalLimit int      `json:"ingress_global_limit"`
+	IngressRateWindow  string   `json:"ingress_rate_window"`
+	TrustedProxyCIDRs  []string `json:"trusted_proxy_cidrs"`
 	AgentPKI           AgentPKI `json:"agent_pki"`
 }
 
@@ -201,7 +257,14 @@ func Load(path string) (Config, error) {
 		Observability: Observability{
 			Tracing: Tracing{SampleRatio: defaultTraceSampleRatio},
 		},
-		Product: Product{SourceProbeTimeout: defaultSourceProbeTimeout.String()},
+		Product: Product{
+			SourceProbeTimeout:       defaultSourceProbeTimeout.String(),
+			BuildTriggerRateLimit:    defaultBuildTriggerLimit,
+			BuildTriggerRateWindow:   defaultBuildTriggerWindow.String(),
+			BuildWebhookRateLimit:    defaultBuildWebhookLimit,
+			BuildWebhookRateWindow:   defaultBuildWebhookWindow.String(),
+			BuildWebhookMaxBodyBytes: defaultBuildWebhookMaxBody,
+		},
 		Database: Database{
 			Mongo: Mongo{
 				URIEnv:           defaultMongoURIEnv,
@@ -216,8 +279,12 @@ func Load(path string) (Config, error) {
 			BootstrapTokenEnv:  defaultBootstrapTokenEnv,
 			SessionTTL:         defaultSessionTTL.String(),
 			MaxActiveSessions:  defaultMaximumActiveSessions,
+			UserInvitationTTL:  defaultUserInvitationTTL.String(),
 			LoginAttemptLimit:  defaultLoginAttemptLimit,
 			LoginAttemptWindow: defaultLoginAttemptWindow.String(),
+			IngressSourceLimit: defaultIngressSourceLimit,
+			IngressGlobalLimit: defaultIngressGlobalLimit,
+			IngressRateWindow:  defaultIngressRateWindow.String(),
 			AgentPKI: AgentPKI{
 				CACertificateEnv: defaultAgentCACertEnv,
 				CAPrivateKeyEnv:  defaultAgentCAKeyEnv,
@@ -226,6 +293,15 @@ func Load(path string) (Config, error) {
 			},
 		},
 		Runtime: Runtime{
+			BuildWorker: BuildWorker{
+				PollInterval: defaultBuildWorkerPoll.String(), LeaseDuration: defaultBuildWorkerLease.String(),
+				OperationTimeout: defaultBuildWorkerOperation.String(), CheckoutTimeout: defaultBuildCheckoutTimeout.String(),
+				WorkspaceRoot: defaultBuildWorkspaceRoot, MaxWorkspaceBytes: defaultBuildWorkspaceBytes,
+				MaxWorkspaceFiles: defaultBuildWorkspaceFiles, GitExecutable: "git", GitVersion: "2.55.0",
+				BuildKitEndpoint: "unix:///run/owndock-buildkit/buildkitd.sock",
+				LogRetention:     defaultBuildLogRetention.String(), LogMaxBytes: defaultBuildLogMaxBytes,
+				LogChunkBytes: defaultBuildLogChunkBytes, MetricsAddress: defaultBuildMetricsAddress,
+			},
 			DeploymentWorker: DeploymentWorker{
 				PollInterval:     defaultWorkerPoll.String(),
 				LeaseDuration:    defaultWorkerLease.String(),
@@ -266,6 +342,9 @@ func (c Config) Validate() error {
 	if _, err := c.Server.HTTP.ShutdownTimeoutDuration(); err != nil {
 		return fmt.Errorf("server.http.shutdown_timeout: %w", err)
 	}
+	if err := c.Server.HTTP.ValidateCORSAllowedOrigins(); err != nil {
+		return fmt.Errorf("server.http.cors_allowed_origins: %w", err)
+	}
 	if err := c.Server.Agent.Validate(
 		c.Product.Enabled,
 		c.Database.Mongo.Enabled,
@@ -288,6 +367,9 @@ func (c Config) Validate() error {
 	if err := c.Product.Validate(); err != nil {
 		return fmt.Errorf("product: %w", err)
 	}
+	if err := c.Runtime.BuildWorker.Validate(c.Database.Mongo.Enabled); err != nil {
+		return fmt.Errorf("runtime.build_worker: %w", err)
+	}
 	if err := c.Runtime.DeploymentWorker.Validate(c.Product.Enabled, c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.deployment_worker: %w", err)
 	}
@@ -295,6 +377,58 @@ func (c Config) Validate() error {
 		return fmt.Errorf("runtime.inventory_worker: %w", err)
 	}
 	return nil
+}
+
+// ValidateCORSAllowedOrigins accepts only exact browser origins. Wildcards and
+// cross-origin credentials are deliberately unsupported by the API transport.
+func (h HTTP) ValidateCORSAllowedOrigins() error {
+	if len(h.CORSAllowedOrigins) > 32 {
+		return fmt.Errorf("must contain at most 32 entries")
+	}
+	seen := make(map[string]struct{}, len(h.CORSAllowedOrigins))
+	for _, rawOrigin := range h.CORSAllowedOrigins {
+		origin := strings.TrimSpace(rawOrigin)
+		if origin == "" || origin != rawOrigin || strings.Contains(origin, "*") {
+			return fmt.Errorf("must contain exact origins without whitespace or wildcards")
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil || parsed.Host == "" || parsed.User != nil ||
+			parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != "" {
+			return fmt.Errorf("%q must be an origin without path, query, fragment, or user info", origin)
+		}
+		if parsed.Scheme != "https" && parsed.Scheme != "http" {
+			return fmt.Errorf("%q must use https or loopback http", origin)
+		}
+		hostname := parsed.Hostname()
+		if hostname == "" || strings.HasSuffix(hostname, ".") || parsed.Host != strings.ToLower(parsed.Host) {
+			return fmt.Errorf("%q must use a canonical lowercase host", origin)
+		}
+		if port := parsed.Port(); port != "" {
+			value, parseErr := strconv.Atoi(port)
+			if parseErr != nil || value < 1 || value > 65535 {
+				return fmt.Errorf("%q has an invalid port", origin)
+			}
+		}
+		if parsed.Scheme == "http" && !isLoopbackOriginHost(hostname) {
+			return fmt.Errorf("%q must use https outside loopback development", origin)
+		}
+		if origin != parsed.Scheme+"://"+parsed.Host {
+			return fmt.Errorf("%q must be a canonical origin without a trailing slash", origin)
+		}
+		if _, exists := seen[origin]; exists {
+			return fmt.Errorf("must not contain duplicate origins")
+		}
+		seen[origin] = struct{}{}
+	}
+	return nil
+}
+
+func isLoopbackOriginHost(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	address := net.ParseIP(host)
+	return address != nil && address.IsLoopback()
 }
 
 func (p Product) Validate() error {
@@ -305,11 +439,63 @@ func (p Product) Validate() error {
 	if timeout < time.Second || timeout > 30*time.Second {
 		return fmt.Errorf("source_probe_timeout must be between 1s and 30s")
 	}
+	if p.BuildTriggerRateLimitValue() < 1 || p.BuildTriggerRateLimitValue() > 10_000 {
+		return fmt.Errorf("build_trigger_rate_limit must be between 1 and 10000")
+	}
+	window, err := p.BuildTriggerRateWindowDuration()
+	if err != nil {
+		return fmt.Errorf("build_trigger_rate_window: %w", err)
+	}
+	if window < time.Second || window > 24*time.Hour {
+		return fmt.Errorf("build_trigger_rate_window must be between 1s and 24h")
+	}
+	if p.BuildWebhookRateLimitValue() < 1 || p.BuildWebhookRateLimitValue() > 10_000 {
+		return fmt.Errorf("build_webhook_rate_limit must be between 1 and 10000")
+	}
+	webhookWindow, err := p.BuildWebhookRateWindowDuration()
+	if err != nil {
+		return fmt.Errorf("build_webhook_rate_window: %w", err)
+	}
+	if webhookWindow < time.Second || webhookWindow > 24*time.Hour {
+		return fmt.Errorf("build_webhook_rate_window must be between 1s and 24h")
+	}
+	if value := p.BuildWebhookMaxBodyBytesValue(); value < 1024 || value > 5*1024*1024 {
+		return fmt.Errorf("build_webhook_max_body_bytes must be between 1024 and 5242880")
+	}
 	return nil
 }
 
 func (p Product) SourceProbeTimeoutDuration() (time.Duration, error) {
 	return parseDuration(p.SourceProbeTimeout, defaultSourceProbeTimeout)
+}
+
+func (p Product) BuildTriggerRateWindowDuration() (time.Duration, error) {
+	return parseDuration(p.BuildTriggerRateWindow, defaultBuildTriggerWindow)
+}
+
+func (p Product) BuildTriggerRateLimitValue() int {
+	if p.BuildTriggerRateLimit == 0 {
+		return defaultBuildTriggerLimit
+	}
+	return p.BuildTriggerRateLimit
+}
+
+func (p Product) BuildWebhookMaxBodyBytesValue() int64 {
+	if p.BuildWebhookMaxBodyBytes == 0 {
+		return defaultBuildWebhookMaxBody
+	}
+	return p.BuildWebhookMaxBodyBytes
+}
+
+func (p Product) BuildWebhookRateWindowDuration() (time.Duration, error) {
+	return parseDuration(p.BuildWebhookRateWindow, defaultBuildWebhookWindow)
+}
+
+func (p Product) BuildWebhookRateLimitValue() int {
+	if p.BuildWebhookRateLimit == 0 {
+		return defaultBuildWebhookLimit
+	}
+	return p.BuildWebhookRateLimit
 }
 
 func (a Agent) Validate(productEnabled, mongoEnabled, agentPKIEnabled bool) error {
@@ -390,6 +576,124 @@ func (a Agent) Materials() ([]byte, []byte, error) {
 		return nil, nil, err
 	}
 	return []byte(certificate), []byte(privateKey), nil
+}
+
+func (w BuildWorker) Validate(mongoEnabled bool) error {
+	host, port, metricsErr := net.SplitHostPort(w.MetricsAddressValue())
+	portNumber, portErr := strconv.Atoi(port)
+	if metricsErr != nil || portErr != nil || portNumber < 1 || portNumber > 65535 ||
+		(host != "" && net.ParseIP(host) == nil && host != "localhost") {
+		return fmt.Errorf("metrics_address must be a valid host:port")
+	}
+	logRetention, err := w.BuildLogRetentionDuration()
+	if err != nil || logRetention < time.Hour || logRetention > 30*24*time.Hour {
+		return fmt.Errorf("log_retention must be between 1h and 720h")
+	}
+	if w.BuildLogMaxBytesValue() < 1024*1024 || w.BuildLogMaxBytesValue() > 100*1024*1024 {
+		return fmt.Errorf("log_max_bytes must be between 1 MiB and 100 MiB")
+	}
+	if w.BuildLogChunkBytesValue() < 4*1024 || w.BuildLogChunkBytesValue() > 64*1024 ||
+		int64(w.BuildLogChunkBytesValue()) > w.BuildLogMaxBytesValue() {
+		return fmt.Errorf("log_chunk_bytes must be between 4 KiB and 64 KiB and not exceed log_max_bytes")
+	}
+	if !w.Enabled {
+		return nil
+	}
+	if !mongoEnabled {
+		return fmt.Errorf("enabled requires database.mongo.enabled")
+	}
+	poll, err := w.PollIntervalDuration()
+	if err != nil || poll < 100*time.Millisecond || poll > time.Minute {
+		return fmt.Errorf("poll_interval must be between 100ms and 1m")
+	}
+	lease, err := w.LeaseDurationValue()
+	if err != nil || lease < 3*time.Second || lease > 10*time.Minute {
+		return fmt.Errorf("lease_duration must be between 3s and 10m")
+	}
+	operation, err := w.OperationTimeoutDuration()
+	if err != nil || operation < time.Minute || operation > 3*time.Hour {
+		return fmt.Errorf("operation_timeout must be between 1m and 3h")
+	}
+	checkout, err := w.CheckoutTimeoutDuration()
+	if err != nil || checkout < time.Minute || checkout > operation {
+		return fmt.Errorf("checkout_timeout must be between 1m and operation_timeout")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.WorkspaceRoot)) || strings.TrimSpace(w.GitExecutable) == "" ||
+		strings.TrimSpace(w.GitVersion) != "2.55.0" {
+		return fmt.Errorf("workspace_root must be absolute and Git must be pinned to 2.55.0")
+	}
+	if w.MaxWorkspaceBytes < 1024*1024 || w.MaxWorkspaceBytes > 200*1024*1024*1024 ||
+		w.MaxWorkspaceFiles < 100 || w.MaxWorkspaceFiles > 1000000 {
+		return fmt.Errorf("workspace resource limits are invalid")
+	}
+	if err := w.validateBuildKit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (w BuildWorker) validateBuildKit() error {
+	parsed, err := url.Parse(strings.TrimSpace(w.BuildKitEndpoint))
+	if err != nil || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("BuildKit endpoint is invalid")
+	}
+	switch parsed.Scheme {
+	case "unix":
+		if parsed.Host != "" || !filepath.IsAbs(parsed.Path) ||
+			strings.Contains(strings.ToLower(parsed.Path), "docker.sock") ||
+			w.BuildKitServerName != "" || w.BuildKitCACertFile != "" ||
+			w.BuildKitClientCertFile != "" || w.BuildKitClientKeyFile != "" {
+			return fmt.Errorf("BuildKit Unix endpoint must be a dedicated absolute socket")
+		}
+	case "tcp":
+		if parsed.Path != "" || parsed.Hostname() == "" {
+			return fmt.Errorf("BuildKit TCP endpoint is invalid")
+		}
+		if _, _, err := net.SplitHostPort(parsed.Host); err != nil ||
+			strings.TrimSpace(w.BuildKitServerName) == "" ||
+			!filepath.IsAbs(w.BuildKitCACertFile) ||
+			!filepath.IsAbs(w.BuildKitClientCertFile) ||
+			!filepath.IsAbs(w.BuildKitClientKeyFile) {
+			return fmt.Errorf("BuildKit TCP endpoint requires mTLS file paths and server name")
+		}
+	default:
+		return fmt.Errorf("BuildKit endpoint must use unix or mTLS tcp")
+	}
+	return nil
+}
+
+func (w BuildWorker) PollIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.PollInterval, defaultBuildWorkerPoll)
+}
+func (w BuildWorker) LeaseDurationValue() (time.Duration, error) {
+	return parseDuration(w.LeaseDuration, defaultBuildWorkerLease)
+}
+func (w BuildWorker) OperationTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.OperationTimeout, defaultBuildWorkerOperation)
+}
+func (w BuildWorker) CheckoutTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.CheckoutTimeout, defaultBuildCheckoutTimeout)
+}
+func (w BuildWorker) BuildLogRetentionDuration() (time.Duration, error) {
+	return parseDuration(w.LogRetention, defaultBuildLogRetention)
+}
+func (w BuildWorker) BuildLogMaxBytesValue() int64 {
+	if w.LogMaxBytes == 0 {
+		return defaultBuildLogMaxBytes
+	}
+	return w.LogMaxBytes
+}
+func (w BuildWorker) BuildLogChunkBytesValue() int {
+	if w.LogChunkBytes == 0 {
+		return defaultBuildLogChunkBytes
+	}
+	return w.LogChunkBytes
+}
+func (w BuildWorker) MetricsAddressValue() string {
+	if strings.TrimSpace(w.MetricsAddress) == "" {
+		return defaultBuildMetricsAddress
+	}
+	return strings.TrimSpace(w.MetricsAddress)
 }
 
 func (w DeploymentWorker) Validate(productEnabled, mongoEnabled bool) error {
@@ -612,6 +916,10 @@ func (s Security) Validate(productEnabled bool) error {
 			"max_active_sessions must be between 1 and 100",
 		)
 	}
+	invitationTTL, err := s.UserInvitationTTLDuration()
+	if err != nil || invitationTTL < 15*time.Minute || invitationTTL > 7*24*time.Hour {
+		return fmt.Errorf("user_invitation_ttl must be between 15m and 168h")
+	}
 	if limit := s.LoginAttemptLimitValue(); limit < 1 || limit > 100 {
 		return fmt.Errorf("login_attempt_limit must be between 1 and 100")
 	}
@@ -620,6 +928,36 @@ func (s Security) Validate(productEnabled bool) error {
 		return fmt.Errorf(
 			"login_attempt_window must be between 1m and 24h",
 		)
+	}
+	sourceLimit, globalLimit := s.IngressSourceLimitValue(), s.IngressGlobalLimitValue()
+	if sourceLimit < 1 || sourceLimit > 100000 {
+		return fmt.Errorf("ingress_source_limit must be between 1 and 100000")
+	}
+	if globalLimit < sourceLimit || globalLimit > 1000000 {
+		return fmt.Errorf("ingress_global_limit must be between ingress_source_limit and 1000000")
+	}
+	ingressWindow, err := s.IngressRateWindowDuration()
+	if err != nil || ingressWindow < time.Second || ingressWindow > time.Hour {
+		return fmt.Errorf("ingress_rate_window must be between 1s and 1h")
+	}
+	if len(s.TrustedProxyCIDRs) > 64 {
+		return fmt.Errorf("trusted_proxy_cidrs must contain at most 64 entries")
+	}
+	seenProxyCIDRs := make(map[string]struct{}, len(s.TrustedProxyCIDRs))
+	for _, rawCIDR := range s.TrustedProxyCIDRs {
+		rawCIDR = strings.TrimSpace(rawCIDR)
+		_, network, parseErr := net.ParseCIDR(rawCIDR)
+		if parseErr != nil || network.String() != rawCIDR {
+			return fmt.Errorf("trusted_proxy_cidrs must contain canonical CIDR values")
+		}
+		prefixBits, _ := network.Mask.Size()
+		if prefixBits == 0 {
+			return fmt.Errorf("trusted_proxy_cidrs must contain canonical CIDR values")
+		}
+		if _, exists := seenProxyCIDRs[rawCIDR]; exists {
+			return fmt.Errorf("trusted_proxy_cidrs must not contain duplicates")
+		}
+		seenProxyCIDRs[rawCIDR] = struct{}{}
 	}
 	if err := s.AgentPKI.Validate(); err != nil {
 		return fmt.Errorf("agent_pki: %w", err)
@@ -675,6 +1013,10 @@ func (s Security) SessionTTLDuration() (time.Duration, error) {
 	return parseDuration(s.SessionTTL, defaultSessionTTL)
 }
 
+func (s Security) UserInvitationTTLDuration() (time.Duration, error) {
+	return parseDuration(s.UserInvitationTTL, defaultUserInvitationTTL)
+}
+
 func (s Security) MaxActiveSessionsValue() int {
 	if s.MaxActiveSessions == 0 {
 		return defaultMaximumActiveSessions
@@ -687,6 +1029,24 @@ func (s Security) LoginAttemptLimitValue() int {
 		return defaultLoginAttemptLimit
 	}
 	return s.LoginAttemptLimit
+}
+
+func (s Security) IngressSourceLimitValue() int {
+	if s.IngressSourceLimit == 0 {
+		return defaultIngressSourceLimit
+	}
+	return s.IngressSourceLimit
+}
+
+func (s Security) IngressGlobalLimitValue() int {
+	if s.IngressGlobalLimit == 0 {
+		return defaultIngressGlobalLimit
+	}
+	return s.IngressGlobalLimit
+}
+
+func (s Security) IngressRateWindowDuration() (time.Duration, error) {
+	return parseDuration(s.IngressRateWindow, defaultIngressRateWindow)
 }
 
 func (s Security) LoginAttemptWindowDuration() (time.Duration, error) {

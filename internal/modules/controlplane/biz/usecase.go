@@ -2,6 +2,9 @@ package biz
 
 import (
 	"context"
+	"errors"
+	"reflect"
+	"strings"
 	"time"
 
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
@@ -11,6 +14,18 @@ import (
 	"github.com/owndock/owndock/internal/shared/transaction"
 )
 
+type ArtifactReleaseInput struct {
+	ArtifactID           string
+	OrganizationID       string
+	ProjectID            string
+	ApplicationID        string
+	RegistryCredentialID string
+	ImageDigest          string
+	RuntimeSpec          runtimespec.Spec
+	ActorID              string
+	RequestID            string
+}
+
 type IDGenerator func() (string, error)
 type Clock func() time.Time
 
@@ -19,20 +34,32 @@ type ManagedHostLookup interface {
 }
 
 type UseCase struct {
-	projects     ProjectRepository
-	applications ApplicationRepository
-	releases     ReleaseRepository
-	targets      RuntimeTargetRepository
-	targetProbes RuntimeTargetProbeRepository
-	targetProber RuntimeTargetProber
-	managedHosts ManagedHostLookup
-	registries   RegistryCredentialRepository
-	environments EnvironmentRepository
-	transaction  transaction.Manager
-	audit        sharedaudit.Recorder
-	auditReader  sharedaudit.Reader
-	newID        IDGenerator
-	now          Clock
+	projects         ProjectRepository
+	members          ProjectMemberRepository
+	applications     ApplicationRepository
+	releases         ReleaseRepository
+	artifactReleases ArtifactReleaseRepository
+	targets          RuntimeTargetRepository
+	targetProbes     RuntimeTargetProbeRepository
+	targetProber     RuntimeTargetProber
+	managedHosts     ManagedHostLookup
+	registries       RegistryCredentialRepository
+	environments     EnvironmentRepository
+	transaction      transaction.Manager
+	audit            sharedaudit.Recorder
+	auditReader      sharedaudit.Reader
+	newID            IDGenerator
+	now              Clock
+}
+
+func (u *UseCase) WithProjectMembers(repository ProjectMemberRepository) *UseCase {
+	u.members = repository
+	return u
+}
+
+func (u *UseCase) WithArtifactReleases(repository ArtifactReleaseRepository) *UseCase {
+	u.artifactReleases = repository
+	return u
 }
 
 func (u *UseCase) WithManagedHosts(lookup ManagedHostLookup) *UseCase {
@@ -109,7 +136,165 @@ func (u *UseCase) ListProjects(ctx context.Context, principal security.Principal
 	if err := principal.Require(security.PermissionProjectRead); err != nil {
 		return nil, err
 	}
-	return u.projects.ListProjects(ctx, principal.OrganizationID)
+	items, err := u.projects.ListProjects(ctx, principal.OrganizationID)
+	if err != nil || principal.Role == security.RoleOwner {
+		return items, err
+	}
+	if u.members == nil {
+		return nil, ErrNotFound
+	}
+	projectIDs, err := u.members.ListProjectIDsForUser(ctx, principal.OrganizationID, principal.UserID)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(projectIDs))
+	for _, projectID := range projectIDs {
+		allowed[projectID] = struct{}{}
+	}
+	result := make([]Project, 0, len(projectIDs))
+	for _, item := range items {
+		if _, ok := allowed[item.ID]; ok {
+			result = append(result, item)
+		}
+	}
+	return result, nil
+}
+
+func (u *UseCase) ListProjectMembers(
+	ctx context.Context, principal security.Principal, projectID string,
+) ([]ProjectMember, error) {
+	if err := principal.Require(security.PermissionProjectMemberRead); err != nil {
+		return nil, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return nil, err
+	}
+	if u.members == nil {
+		return nil, ErrNotFound
+	}
+	return u.members.ListProjectMembers(ctx, projectID)
+}
+
+func (u *UseCase) CreateProjectMember(
+	ctx context.Context, principal security.Principal, projectID, email string,
+	role security.Role, requestID string,
+) (ProjectMember, error) {
+	if err := principal.Require(security.PermissionProjectMemberManage); err != nil {
+		return ProjectMember{}, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return ProjectMember{}, err
+	}
+	if u.members == nil {
+		return ProjectMember{}, ErrNotFound
+	}
+	if !validProjectMemberRole(role) {
+		return ProjectMember{}, ErrInvalidProjectMember
+	}
+	email, err := normalizeProjectMemberEmail(email)
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	user, err := u.members.FindOrganizationUserByEmail(ctx, principal.OrganizationID, email)
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	if user.ID == principal.UserID {
+		return ProjectMember{}, ErrCannotModifySelf
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	now := u.now().UTC()
+	item, err := NewProjectMember(projectID, user, role, principal.UserID, now)
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		created, createErr := u.members.CreateProjectMember(transactionContext, item)
+		if createErr != nil {
+			return createErr
+		}
+		item = created
+		return u.record(transactionContext, principal, auditID, "project_member.create", "project_member", item.UserID, projectID, requestID, now)
+	})
+	return item, err
+}
+
+func (u *UseCase) UpdateProjectMember(
+	ctx context.Context, principal security.Principal, projectID, userID string,
+	role security.Role, expectedVersion uint64, requestID string,
+) (ProjectMember, error) {
+	if err := principal.Require(security.PermissionProjectMemberManage); err != nil {
+		return ProjectMember{}, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return ProjectMember{}, err
+	}
+	if u.members == nil {
+		return ProjectMember{}, ErrNotFound
+	}
+	if expectedVersion == 0 {
+		return ProjectMember{}, ErrInvalidProjectMember
+	}
+	if strings.TrimSpace(userID) == principal.UserID {
+		return ProjectMember{}, ErrCannotModifySelf
+	}
+	current, err := u.members.GetProjectMember(ctx, projectID, userID)
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	item, err := current.ChangeRole(role, principal.UserID, u.now().UTC())
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return ProjectMember{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		updated, updateErr := u.members.UpdateProjectMember(transactionContext, item, expectedVersion)
+		if updateErr != nil {
+			return updateErr
+		}
+		item = updated
+		return u.record(transactionContext, principal, auditID, "project_member.update", "project_member", item.UserID, projectID, requestID, item.UpdatedAt)
+	})
+	return item, err
+}
+
+func (u *UseCase) DeleteProjectMember(
+	ctx context.Context, principal security.Principal, projectID, userID string,
+	expectedVersion uint64, requestID string,
+) error {
+	if err := principal.Require(security.PermissionProjectMemberManage); err != nil {
+		return err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return err
+	}
+	if u.members == nil {
+		return ErrNotFound
+	}
+	userID = strings.TrimSpace(userID)
+	if expectedVersion == 0 {
+		return ErrInvalidProjectMember
+	}
+	if userID == principal.UserID {
+		return ErrCannotModifySelf
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return err
+	}
+	now := u.now().UTC()
+	return u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if deleteErr := u.members.DeleteProjectMember(transactionContext, projectID, userID, expectedVersion); deleteErr != nil {
+			return deleteErr
+		}
+		return u.record(transactionContext, principal, auditID, "project_member.delete", "project_member", userID, projectID, requestID, now)
+	})
 }
 
 func (u *UseCase) CreateProject(ctx context.Context, principal security.Principal, name, requestID string) (Project, error) {
@@ -259,6 +444,114 @@ func (u *UseCase) CreateReleaseWithRuntimeSpec(
 		return u.record(transactionContext, principal, auditID, "release.create", "release", item.ID, projectID, requestID, now)
 	})
 	return item, err
+}
+
+// CreateReleaseFromArtifact is the narrow system boundary used by the Build
+// module. It is idempotent by SourceArtifactID and deliberately does not
+// expose a way to mutate an existing Release.
+func (u *UseCase) CreateReleaseFromArtifact(ctx context.Context, input ArtifactReleaseInput) (Release, error) {
+	input.ArtifactID = strings.TrimSpace(input.ArtifactID)
+	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	input.ProjectID = strings.TrimSpace(input.ProjectID)
+	input.ApplicationID = strings.TrimSpace(input.ApplicationID)
+	input.RegistryCredentialID = strings.TrimSpace(input.RegistryCredentialID)
+	input.ActorID = strings.TrimSpace(input.ActorID)
+	if input.ArtifactID == "" || input.OrganizationID == "" || input.ProjectID == "" ||
+		input.ApplicationID == "" || input.RegistryCredentialID == "" || input.ActorID == "" {
+		return Release{}, ErrNotFound
+	}
+	if u.artifactReleases == nil {
+		return Release{}, ErrNotFound
+	}
+	if existing, err := u.artifactReleases.GetReleaseByArtifact(ctx, input.ProjectID, input.ArtifactID); err == nil {
+		if releaseMatchesArtifact(existing, input) {
+			return existing, nil
+		}
+		return Release{}, ErrDuplicateRelease
+	} else if !errors.Is(err, ErrNotFound) {
+		return Release{}, err
+	}
+	projectExists, err := u.projects.ProjectExists(ctx, input.OrganizationID, input.ProjectID)
+	if err != nil {
+		return Release{}, err
+	}
+	applicationExists, err := u.applications.ApplicationExists(ctx, input.ProjectID, input.ApplicationID)
+	if err != nil {
+		return Release{}, err
+	}
+	if !projectExists || !applicationExists || u.registries == nil {
+		return Release{}, ErrNotFound
+	}
+	credential, err := u.registries.GetRegistryCredential(ctx, input.ProjectID, input.RegistryCredentialID)
+	if err != nil {
+		return Release{}, err
+	}
+	imageRegistry, err := ImageRegistry(input.ImageDigest)
+	if err != nil || imageRegistry != credential.Server {
+		return Release{}, ErrInvalidRegistry
+	}
+	id, auditID, now, err := u.identifiers()
+	if err != nil {
+		return Release{}, err
+	}
+	item, err := NewReleaseFromArtifact(
+		id, input.ProjectID, input.ApplicationID, input.ImageDigest,
+		input.RegistryCredentialID, input.ArtifactID, input.RuntimeSpec,
+		input.ActorID, now,
+	)
+	if err != nil {
+		return Release{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		created, createErr := u.releases.CreateRelease(transactionContext, item)
+		if createErr != nil {
+			return createErr
+		}
+		item = created
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: input.OrganizationID, ProjectID: input.ProjectID,
+			ActorID: input.ActorID, Action: "release.create_from_artifact",
+			ResourceType: "release", ResourceID: item.ID,
+			RequestID: input.RequestID, CreatedAt: now,
+		})
+	})
+	if errors.Is(err, ErrDuplicateRelease) {
+		existing, getErr := u.artifactReleases.GetReleaseByArtifact(ctx, input.ProjectID, input.ArtifactID)
+		if getErr == nil && releaseMatchesArtifact(existing, input) {
+			return existing, nil
+		}
+	}
+	return item, err
+}
+
+func releaseMatchesArtifact(item Release, input ArtifactReleaseInput) bool {
+	normalizedSpec, err := canonicalRuntimeSpec(input.RuntimeSpec)
+	if err != nil {
+		return false
+	}
+	storedSpec, err := canonicalRuntimeSpec(item.RuntimeSpec)
+	return err == nil && item.ProjectID == input.ProjectID &&
+		item.ApplicationID == input.ApplicationID && item.SourceArtifactID == input.ArtifactID &&
+		item.ImageDigest == strings.TrimSpace(input.ImageDigest) &&
+		item.RegistryCredentialID == input.RegistryCredentialID &&
+		reflect.DeepEqual(storedSpec, normalizedSpec)
+}
+
+func canonicalRuntimeSpec(value runtimespec.Spec) (runtimespec.Spec, error) {
+	normalized, err := runtimespec.Normalize(value)
+	if err != nil {
+		return runtimespec.Spec{}, err
+	}
+	if len(normalized.Ports) == 0 {
+		normalized.Ports = nil
+	}
+	if len(normalized.EnvironmentKeys) == 0 {
+		normalized.EnvironmentKeys = nil
+	}
+	if normalized.HealthCheck != nil && len(normalized.HealthCheck.Command) == 0 {
+		normalized.HealthCheck.Command = nil
+	}
+	return normalized, nil
 }
 
 func (u *UseCase) ListRegistryCredentials(
@@ -512,6 +805,11 @@ func (u *UseCase) requireProject(ctx context.Context, principal security.Princip
 	}
 	if !exists {
 		return ErrNotFound
+	}
+	if principal.Role != security.RoleOwner && u.members != nil {
+		if _, err := u.members.ResolveProjectRole(ctx, principal.OrganizationID, projectID, principal.UserID); err != nil {
+			return err
+		}
 	}
 	return nil
 }

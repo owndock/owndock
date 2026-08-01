@@ -21,6 +21,12 @@ type Loop struct {
 	operationTimeout time.Duration
 	concurrency      int
 	onError          ErrorHandler
+	observePoll      func(string, time.Duration)
+}
+
+func (l *Loop) WithObservability(observe func(string, time.Duration)) *Loop {
+	l.observePoll = observe
+	return l
 }
 
 func NewLoop(
@@ -61,17 +67,34 @@ func (l *Loop) runWorker(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+			startedAt := time.Now()
 			operationContext, cancel := context.WithTimeout(
 				ctx,
 				l.operationTimeout,
 			)
 			err := l.runner.RunOnce(operationContext)
 			cancel()
+			if l.observePoll != nil {
+				l.observePoll(loopResult(err), time.Since(startedAt))
+			}
 			if err != nil && !errors.Is(err, context.Canceled) &&
 				l.onError != nil {
 				l.onError(err)
 			}
 			timer.Reset(l.pollInterval)
 		}
+	}
+}
+
+func loopResult(err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	default:
+		return "error"
 	}
 }

@@ -123,6 +123,41 @@ func TestRegistryCredentialMustMatchReleaseImage(t *testing.T) {
 	}
 }
 
+func TestCreateReleaseFromArtifactIsIdempotent(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	store := &fakeStore{
+		projects:     []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{ID: "application-1", ProjectID: "project-1"}},
+		registries: []RegistryCredential{{
+			ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
+		}},
+	}
+	audits := &fakeAudits{}
+	sequence := 0
+	useCase := NewUseCaseWithResources(
+		store, store, store, store, store, store,
+		transaction.Passthrough{}, audits, audits,
+		func() (string, error) { sequence++; return fmt.Sprintf("id-%d", sequence), nil },
+		func() time.Time { return now },
+	).WithArtifactReleases(store)
+	input := ArtifactReleaseInput{
+		ArtifactID: "artifact-1", OrganizationID: "organization-1",
+		ProjectID: "project-1", ApplicationID: "application-1",
+		RegistryCredentialID: "registry-1",
+		ImageDigest:          "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
+		ActorID:              "system:build-worker", RequestID: "request-1",
+	}
+	first, err := useCase.CreateReleaseFromArtifact(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := useCase.CreateReleaseFromArtifact(t.Context(), input)
+	if err != nil || second.ID != first.ID || len(store.releases) != 1 ||
+		first.SourceArtifactID != input.ArtifactID || len(audits.events) != 1 {
+		t.Fatalf("first=%+v second=%+v releases=%d audits=%d err=%v", first, second, len(store.releases), len(audits.events), err)
+	}
+}
+
 type runtimeTargetProberStub struct {
 	status RuntimeTargetStatus
 }
@@ -316,6 +351,15 @@ func (s *fakeStore) ListReleases(_ context.Context, projectID, applicationID str
 func (s *fakeStore) CreateRelease(_ context.Context, item Release) (Release, error) {
 	s.releases = append(s.releases, item)
 	return item, nil
+}
+
+func (s *fakeStore) GetReleaseByArtifact(_ context.Context, projectID, artifactID string) (Release, error) {
+	for _, item := range s.releases {
+		if item.ProjectID == projectID && item.SourceArtifactID == artifactID {
+			return item, nil
+		}
+	}
+	return Release{}, ErrNotFound
 }
 
 func (s *fakeStore) ListRuntimeTargets(_ context.Context, projectID string) ([]RuntimeTarget, error) {

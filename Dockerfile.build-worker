@@ -1,0 +1,46 @@
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS git-build
+
+ARG GIT_VERSION=2.55.0
+ARG GIT_SHA256=457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential ca-certificates curl libcurl4-gnutls-dev libexpat1-dev \
+      libssl-dev xz-utils zlib1g-dev && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+RUN curl --fail --location --proto '=https' --tlsv1.2 \
+      "https://www.kernel.org/pub/software/scm/git/git-${GIT_VERSION}.tar.xz" \
+      --output git.tar.xz && \
+    echo "${GIT_SHA256}  git.tar.xz" | sha256sum --check --strict && \
+    tar --extract --file git.tar.xz && \
+    make -C "git-${GIT_VERSION}" -j2 prefix=/opt/git \
+      NO_TCLTK=YesPlease NO_GETTEXT=YesPlease NO_RUST=YesPlease all && \
+    make -C "git-${GIT_VERSION}" prefix=/opt/git \
+      NO_TCLTK=YesPlease NO_GETTEXT=YesPlease NO_RUST=YesPlease install
+
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=${BUILD_TIME}" \
+    -o /out/owndock-build-worker ./cmd/build-worker
+
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates libcurl3-gnutls libexpat1 libpcre2-8-0 openssh-client zlib1g && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd --gid 1000 owndock && \
+    useradd --uid 1000 --gid 1000 --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin owndock && \
+    install -d -o 1000 -g 1000 -m 0700 /var/lib/owndock/builds
+COPY --from=git-build /opt/git /opt/git
+COPY --from=go-build /out/owndock-build-worker /usr/local/bin/owndock-build-worker
+ENV PATH=/opt/git/bin:/usr/local/bin:/usr/bin:/bin
+USER 1000:1000
+WORKDIR /var/lib/owndock
+ENTRYPOINT ["/usr/local/bin/owndock-build-worker"]
+CMD ["-conf", "/etc/owndock/config.yaml"]

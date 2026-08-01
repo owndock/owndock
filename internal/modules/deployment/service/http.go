@@ -16,19 +16,23 @@ type HTTP struct {
 }
 
 type response struct {
-	ID                 string              `json:"id"`
-	ProjectID          string              `json:"project_id,omitempty"`
-	ApplicationID      string              `json:"application_id"`
-	EnvironmentID      string              `json:"environment_id"`
-	Revision           string              `json:"revision"`
-	Status             biz.Status          `json:"status"`
-	FailureCategory    biz.FailureCategory `json:"failure_category,omitempty"`
-	CreatedAt          time.Time           `json:"created_at"`
-	UpdatedAt          *time.Time          `json:"updated_at,omitempty"`
-	ReleaseID          string              `json:"release_id,omitempty"`
-	RuntimeTargetID    string              `json:"runtime_target_id,omitempty"`
-	Operation          biz.Operation       `json:"operation,omitempty"`
-	SourceDeploymentID string              `json:"source_deployment_id,omitempty"`
+	ID                   string              `json:"id"`
+	ProjectID            string              `json:"project_id,omitempty"`
+	ApplicationID        string              `json:"application_id"`
+	EnvironmentID        string              `json:"environment_id"`
+	Revision             string              `json:"revision"`
+	Status               biz.Status          `json:"status"`
+	FailureCategory      biz.FailureCategory `json:"failure_category,omitempty"`
+	CreatedAt            time.Time           `json:"created_at"`
+	UpdatedAt            *time.Time          `json:"updated_at,omitempty"`
+	ReleaseID            string              `json:"release_id,omitempty"`
+	RuntimeTargetID      string              `json:"runtime_target_id,omitempty"`
+	Operation            biz.Operation       `json:"operation,omitempty"`
+	TriggerSource        biz.TriggerSource   `json:"trigger_source,omitempty"`
+	SourceArtifactID     string              `json:"source_artifact_id,omitempty"`
+	SourceBuildID        string              `json:"source_build_id,omitempty"`
+	BuildConfigurationID string              `json:"build_configuration_id,omitempty"`
+	SourceDeploymentID   string              `json:"source_deployment_id,omitempty"`
 }
 
 func NewHTTP(useCase *biz.UseCase) *HTTP {
@@ -263,7 +267,10 @@ func toResponse(item biz.Deployment) response {
 		EnvironmentID: item.EnvironmentID, Revision: item.Revision, Status: item.Status,
 		FailureCategory: item.FailureCategory,
 		CreatedAt:       item.CreatedAt, ReleaseID: item.ReleaseID, RuntimeTargetID: item.RuntimeTargetID,
-		Operation: item.Operation, SourceDeploymentID: item.SourceDeploymentID,
+		Operation: item.Operation, TriggerSource: item.TriggerSource,
+		SourceArtifactID: item.SourceArtifactID, SourceBuildID: item.SourceBuildID,
+		BuildConfigurationID: item.BuildConfigurationID,
+		SourceDeploymentID:   item.SourceDeploymentID,
 	}
 	if item.ProjectID != "" {
 		updatedAt := item.UpdatedAt

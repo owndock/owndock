@@ -18,6 +18,7 @@ type MongoRepository struct {
 	users         *mongo.Collection
 	sessions      *mongo.Collection
 	loginAttempts *mongo.Collection
+	invitations   *mongo.Collection
 }
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
@@ -26,7 +27,123 @@ func NewMongoRepository(database *mongo.Database) *MongoRepository {
 		users:         database.Collection("users"),
 		sessions:      database.Collection("sessions"),
 		loginAttempts: database.Collection("login_attempts"),
+		invitations:   database.Collection("user_invitations"),
 	}
+}
+
+func (r *MongoRepository) ListUsers(ctx context.Context, organizationID string) ([]biz.User, error) {
+	cursor, err := r.users.Find(ctx, bson.D{{Key: "organization_id", Value: organizationID}},
+		options.Find().SetProjection(bson.D{{Key: "password_hash", Value: 0}}).
+			SetSort(bson.D{{Key: "email_normalized", Value: 1}, {Key: "_id", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("find organization users: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []userDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode organization users: %w", err)
+	}
+	items := make([]biz.User, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain()
+		items[index].PasswordHash = ""
+	}
+	return items, nil
+}
+
+func (r *MongoRepository) CreateInvitation(ctx context.Context, item biz.Invitation) (biz.Invitation, error) {
+	if _, err := r.invitations.InsertOne(ctx, invitationDocumentFromDomain(item)); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return biz.Invitation{}, biz.ErrInvalidInvitation
+		}
+		return biz.Invitation{}, fmt.Errorf("insert user invitation: %w", err)
+	}
+	return item, nil
+}
+
+func (r *MongoRepository) ListInvitations(ctx context.Context, organizationID string) ([]biz.Invitation, error) {
+	cursor, err := r.invitations.Find(ctx, bson.D{{Key: "organization_id", Value: organizationID}},
+		options.Find().SetProjection(bson.D{{Key: "token_hash", Value: 0}}).
+			SetSort(bson.D{{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("find user invitations: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []invitationDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode user invitations: %w", err)
+	}
+	items := make([]biz.Invitation, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain().Safe()
+	}
+	return items, nil
+}
+
+func (r *MongoRepository) GetInvitation(ctx context.Context, organizationID, invitationID string) (biz.Invitation, error) {
+	var document invitationDocument
+	err := r.invitations.FindOne(ctx, bson.D{{Key: "_id", Value: invitationID},
+		{Key: "organization_id", Value: organizationID}}).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.Invitation{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Invitation{}, fmt.Errorf("find user invitation: %w", err)
+	}
+	return document.domain(), nil
+}
+
+func (r *MongoRepository) FindInvitationByTokenHash(ctx context.Context, tokenHash string,
+	now time.Time) (biz.Invitation, error) {
+	var document invitationDocument
+	err := r.invitations.FindOne(ctx, bson.D{
+		{Key: "token_hash", Value: tokenHash}, {Key: "status", Value: biz.InvitationStatusActive},
+		{Key: "expires_at", Value: bson.D{{Key: "$gt", Value: now.UTC()}}},
+	}).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.Invitation{}, biz.ErrInvalidInvitation
+	}
+	if err != nil {
+		return biz.Invitation{}, fmt.Errorf("find invitation token: %w", err)
+	}
+	return document.domain(), nil
+}
+
+func (r *MongoRepository) AcceptInvitation(ctx context.Context, accepted biz.Invitation,
+	expectedVersion uint64, user biz.User, session biz.Session) error {
+	result, err := r.invitations.ReplaceOne(ctx, bson.D{
+		{Key: "_id", Value: accepted.ID}, {Key: "organization_id", Value: accepted.OrganizationID},
+		{Key: "status", Value: biz.InvitationStatusActive}, {Key: "version", Value: expectedVersion},
+		{Key: "expires_at", Value: bson.D{{Key: "$gt", Value: accepted.AcceptedAt}}},
+	}, invitationDocumentFromDomain(accepted))
+	if err != nil {
+		return fmt.Errorf("accept user invitation: %w", err)
+	}
+	if result.MatchedCount != 1 {
+		return biz.ErrInvalidInvitation
+	}
+	if _, err := r.users.InsertOne(ctx, userDocumentFromDomain(user)); err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return biz.ErrUserAlreadyExists
+		}
+		return fmt.Errorf("insert invited user: %w", err)
+	}
+	return r.createSession(ctx, session)
+}
+
+func (r *MongoRepository) RevokeInvitation(ctx context.Context, revoked biz.Invitation,
+	expectedVersion uint64) (biz.Invitation, error) {
+	result, err := r.invitations.ReplaceOne(ctx, bson.D{
+		{Key: "_id", Value: revoked.ID}, {Key: "organization_id", Value: revoked.OrganizationID},
+		{Key: "status", Value: biz.InvitationStatusActive}, {Key: "version", Value: expectedVersion},
+	}, invitationDocumentFromDomain(revoked))
+	if err != nil {
+		return biz.Invitation{}, fmt.Errorf("revoke user invitation: %w", err)
+	}
+	if result.MatchedCount != 1 {
+		return biz.Invitation{}, biz.ErrInvalidInvitation
+	}
+	return revoked, nil
 }
 
 func (r *MongoRepository) HasUsers(ctx context.Context) (bool, error) {
@@ -73,6 +190,24 @@ func (r *MongoRepository) FindUserByEmail(ctx context.Context, normalizedEmail s
 		return biz.User{}, fmt.Errorf("find user by email: %w", err)
 	}
 	return document.domain(), nil
+}
+
+func (r *MongoRepository) GetOrganizationUser(
+	ctx context.Context, organizationID, userID string,
+) (biz.User, error) {
+	var document userDocument
+	err := r.users.FindOne(ctx, bson.D{
+		{Key: "_id", Value: userID}, {Key: "organization_id", Value: organizationID},
+	}, options.FindOne().SetProjection(bson.D{{Key: "password_hash", Value: 0}})).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.User{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.User{}, fmt.Errorf("find organization user: %w", err)
+	}
+	item := document.domain()
+	item.PasswordHash = ""
+	return item, nil
 }
 
 func (r *MongoRepository) CreateSession(
@@ -223,6 +358,16 @@ func (r *MongoRepository) DeleteSession(ctx context.Context, sessionID, userID s
 	return nil
 }
 
+func (r *MongoRepository) DeleteUserSessions(ctx context.Context, userID string) (int64, error) {
+	result, err := r.sessions.DeleteMany(ctx, bson.D{{Key: "user_id", Value: userID}})
+	if err != nil {
+		return 0, fmt.Errorf("delete user sessions: %w", err)
+	}
+	return result.DeletedCount, nil
+}
+
+var _ biz.AdministrativeSessionRepository = (*MongoRepository)(nil)
+
 type organizationDocument struct {
 	ID           string    `bson:"_id"`
 	SingletonKey string    `bson:"singleton_key"`
@@ -262,6 +407,45 @@ type sessionDocument struct {
 	TokenHash string    `bson:"token_hash"`
 	CreatedAt time.Time `bson:"created_at"`
 	ExpiresAt time.Time `bson:"expires_at"`
+}
+
+type invitationDocument struct {
+	ID              string               `bson:"_id"`
+	OrganizationID  string               `bson:"organization_id"`
+	Email           string               `bson:"email"`
+	EmailNormalized string               `bson:"email_normalized"`
+	TokenHash       string               `bson:"token_hash,omitempty"`
+	Status          biz.InvitationStatus `bson:"status"`
+	Version         uint64               `bson:"version"`
+	InvitedBy       string               `bson:"invited_by"`
+	CreatedAt       time.Time            `bson:"created_at"`
+	ExpiresAt       time.Time            `bson:"expires_at"`
+	AcceptedBy      string               `bson:"accepted_by,omitempty"`
+	AcceptedAt      time.Time            `bson:"accepted_at,omitempty"`
+	RevokedBy       string               `bson:"revoked_by,omitempty"`
+	RevokedAt       time.Time            `bson:"revoked_at,omitempty"`
+}
+
+func invitationDocumentFromDomain(item biz.Invitation) invitationDocument {
+	return invitationDocument{
+		ID: item.ID, OrganizationID: item.OrganizationID, Email: item.Email,
+		EmailNormalized: item.EmailNormalized, TokenHash: item.TokenHash,
+		Status: item.Status, Version: item.Version, InvitedBy: item.InvitedBy,
+		CreatedAt: item.CreatedAt, ExpiresAt: item.ExpiresAt,
+		AcceptedBy: item.AcceptedBy, AcceptedAt: item.AcceptedAt,
+		RevokedBy: item.RevokedBy, RevokedAt: item.RevokedAt,
+	}
+}
+
+func (d invitationDocument) domain() biz.Invitation {
+	return biz.Invitation{
+		ID: d.ID, OrganizationID: d.OrganizationID, Email: d.Email,
+		EmailNormalized: d.EmailNormalized, TokenHash: d.TokenHash,
+		Status: d.Status, Version: d.Version, InvitedBy: d.InvitedBy,
+		CreatedAt: d.CreatedAt, ExpiresAt: d.ExpiresAt,
+		AcceptedBy: d.AcceptedBy, AcceptedAt: d.AcceptedAt,
+		RevokedBy: d.RevokedBy, RevokedAt: d.RevokedAt,
+	}
 }
 
 func (d sessionDocument) domain() biz.Session {

@@ -40,11 +40,15 @@ import (
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	runtimeinventoryservice "github.com/owndock/owndock/internal/modules/runtimeinventory/service"
 	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
+	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
+	terminaldata "github.com/owndock/owndock/internal/modules/terminal/data"
+	terminalservice "github.com/owndock/owndock/internal/modules/terminal/service"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
 	"github.com/owndock/owndock/internal/platform/httpx"
 	"github.com/owndock/owndock/internal/platform/id"
+	"github.com/owndock/owndock/internal/platform/ingress"
 	"github.com/owndock/owndock/internal/platform/lifecycle"
 	"github.com/owndock/owndock/internal/platform/migration"
 	platformmongo "github.com/owndock/owndock/internal/platform/mongo"
@@ -169,6 +173,10 @@ func run() error {
 		identityRepository := identitydata.NewMongoRepository(
 			mongoClient.Database(),
 		)
+		invitationTTL, err := cfg.Security.UserInvitationTTLDuration()
+		if err != nil {
+			return fmt.Errorf("parse user invitation TTL: %w", err)
+		}
 		identityUseCase := identitybiz.NewUseCase(
 			identityRepository,
 			mongoClient,
@@ -184,6 +192,10 @@ func run() error {
 			loginAttemptWindow,
 		).WithSessionPolicy(
 			cfg.Security.MaxActiveSessionsValue(),
+		).WithInvitationPolicy(
+			identityRepository, invitationTTL,
+		).WithAdministrativeSessions(
+			identityRepository,
 		)
 		identityHTTP := identityservice.NewHTTP(identityUseCase, cfg.Security.BootstrapToken)
 		controlPlaneStore := controlplanedata.NewMongoStore(mongoClient.Database())
@@ -327,6 +339,8 @@ func run() error {
 			id.New,
 			time.Now,
 		).WithManagedHosts(managedHostStore).
+			WithProjectMembers(controlPlaneStore).
+			WithArtifactReleases(controlPlaneStore).
 			WithRuntimeTargetProbe(
 				controlPlaneStore,
 				controlplanedata.NewRuntimeTargetProbeRouter(
@@ -334,21 +348,65 @@ func run() error {
 				),
 			)
 		controlPlaneHTTP := controlplaneservice.NewHTTP(controlPlaneUseCase)
+		projectAccess := controlplaneservice.NewProjectAccess(controlPlaneStore)
+		authenticateProject := func(next http.Handler) http.Handler {
+			return identityHTTP.Authenticate(projectAccess.Authorize(next))
+		}
 		deploymentStore := deploymentdata.NewMongoRepository(mongoClient.Database())
-		deploymentHTTP := deploymentservice.NewHTTP(
-			deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
-				WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlPlaneStore)).
-				WithFormalSecurity(mongoClient, auditStore),
-		)
+		deploymentReferences := deploymentdata.NewFormalReferenceLookup(controlPlaneStore)
+		deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+			WithFormalReferences(deploymentReferences).
+			WithAutomaticReferences(deploymentReferences).
+			WithFormalSecurity(mongoClient, auditStore)
+		deploymentHTTP := deploymentservice.NewHTTP(deploymentUseCase)
 		productAPI, err = server.NewProductAPIWithDeploymentAndManagedHost(
 			identityHTTP,
 			controlPlaneHTTP,
 			http.HandlerFunc(deploymentHTTP.HandleFormal),
 			managedHostHTTP,
-			identityHTTP.Authenticate,
+			authenticateProject,
 		)
 		if err != nil {
 			return fmt.Errorf("create product API: %w", err)
+		}
+		terminalStore := terminaldata.NewMongoRepository(mongoClient.Database())
+		terminalUseCase, err := terminalbiz.NewUseCase(
+			terminalStore,
+			terminalStore,
+			terminaldata.NewTargetResolver(controlPlaneStore, deploymentStore, managedHostStore),
+			terminaldata.NewProjectRoleResolver(controlPlaneStore),
+			mongoClient,
+			auditStore,
+			terminaldata.TicketTokens{},
+			id.New,
+			time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create terminal use case: %w", err)
+		}
+		if err := productAPI.WithTerminal(
+			terminalservice.NewHTTP(terminalUseCase), authenticateProject,
+		); err != nil {
+			return fmt.Errorf("mount terminal API: %w", err)
+		}
+		ingressWindow, err := cfg.Security.IngressRateWindowDuration()
+		if err != nil {
+			return fmt.Errorf("parse ingress rate window: %w", err)
+		}
+		clientIPs, err := ingress.NewClientIPResolver(cfg.Security.TrustedProxyCIDRs)
+		if err != nil {
+			return fmt.Errorf("create client IP resolver: %w", err)
+		}
+		ingressLimiter, err := ingress.NewLimiter(
+			ingress.NewMongoGuard(mongoClient.Database()), clientIPs,
+			cfg.Security.IngressSourceLimitValue(), cfg.Security.IngressGlobalLimitValue(),
+			ingressWindow, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create ingress limiter: %w", err)
+		}
+		if err := productAPI.WithIngressProtection(ingressLimiter.Protect); err != nil {
+			return fmt.Errorf("mount ingress protection: %w", err)
 		}
 		runtimeInventoryViewUseCase, err := runtimeinventorybiz.NewViewUseCase(
 			runtimeinventorydata.NewMongoViewRepository(mongoClient.Database()),
@@ -361,14 +419,33 @@ func run() error {
 		}
 		if err := productAPI.WithRuntimeInventory(
 			runtimeinventoryservice.NewHTTP(runtimeInventoryViewUseCase),
-			identityHTTP.Authenticate,
+			authenticateProject,
 		); err != nil {
 			return fmt.Errorf("mount runtime inventory API: %w", err)
 		}
-		buildRepository := builddata.NewMongoRepository(mongoClient.Database())
+		buildLogRetention, err := cfg.Runtime.BuildWorker.BuildLogRetentionDuration()
+		if err != nil {
+			return fmt.Errorf("parse Build log retention: %w", err)
+		}
+		buildRepository := builddata.NewMongoRepository(mongoClient.Database()).WithBuildLogLimits(
+			buildLogRetention, cfg.Runtime.BuildWorker.BuildLogMaxBytesValue(),
+			cfg.Runtime.BuildWorker.BuildLogChunkBytesValue(),
+		)
+		buildReferences := builddata.NewConfigurationReferenceLookup(controlPlaneStore)
 		sourceProbeTimeout, err := cfg.Product.SourceProbeTimeoutDuration()
 		if err != nil {
 			return fmt.Errorf("parse source repository probe timeout: %w", err)
+		}
+		gitSourceGateway := builddata.NewGitSourceProber(
+			builddata.NewEnvironmentRepositorySecretResolver(),
+		).WithTimeout(sourceProbeTimeout)
+		buildTriggerWindow, err := cfg.Product.BuildTriggerRateWindowDuration()
+		if err != nil {
+			return fmt.Errorf("parse build trigger rate window: %w", err)
+		}
+		buildWebhookWindow, err := cfg.Product.BuildWebhookRateWindowDuration()
+		if err != nil {
+			return fmt.Errorf("parse build webhook rate window: %w", err)
 		}
 		buildUseCase := buildbiz.NewUseCase(
 			controlPlaneStore,
@@ -377,12 +454,27 @@ func run() error {
 			auditStore,
 			id.New,
 			time.Now,
-		).WithSourceProber(builddata.NewGitSourceProber(
-			builddata.NewEnvironmentRepositorySecretResolver(),
-		).WithTimeout(sourceProbeTimeout))
+		).WithSourceProber(gitSourceGateway).
+			WithSourceRevisionResolver(gitSourceGateway).
+			WithWebhookVerifier(builddata.NewWebhookVerifier(
+				builddata.NewEnvironmentWebhookSecretResolver(),
+			)).WithWebhookAdmission(
+			buildRepository, cfg.Product.BuildWebhookRateLimitValue(), buildWebhookWindow,
+		).
+			WithBuildTriggerAutomation(
+				builddata.BuildTriggerTokens{}, buildRepository,
+				cfg.Product.BuildTriggerRateLimitValue(), buildTriggerWindow,
+			).WithConfigurationReferences(
+			buildReferences,
+			buildReferences,
+		).WithAutomaticDeploymentReferences(buildReferences).
+			WithArtifactReleases(buildRepository, builddata.NewArtifactReleaseAdapter(controlPlaneUseCase).
+				WithAutomaticDeployments(deploymentUseCase)).
+			WithBuildLogs(buildRepository)
 		if err := productAPI.WithBuild(
-			buildservice.NewHTTP(buildUseCase),
-			identityHTTP.Authenticate,
+			buildservice.NewHTTP(buildUseCase).
+				WithWebhookMaxBodyBytes(cfg.Product.BuildWebhookMaxBodyBytesValue()),
+			authenticateProject,
 		); err != nil {
 			return fmt.Errorf("mount build API: %w", err)
 		}
@@ -442,6 +534,7 @@ func run() error {
 				return fmt.Errorf("create deployment runner: %w", err)
 			}
 			runner.WithAudit(mongoClient, auditStore, id.New)
+			runner.WithObservability(tracing.Tracer(serviceName + ".deployment_worker"))
 			loop, err := deploymentworker.NewLoop(
 				runner, pollInterval, operationTimeout,
 				func(workerErr error) {
@@ -458,6 +551,9 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("create deployment worker loop: %w", err)
 			}
+			loop.WithObservability(func(result string, duration time.Duration) {
+				metrics.RecordWorkerPoll("deployment", result, duration)
+			})
 			deploymentWorkerServer = lifecycle.NewServer(loop)
 		}
 		if cfg.Runtime.InventoryWorker.Enabled {
@@ -595,6 +691,9 @@ func run() error {
 			if runnerErr != nil {
 				return fmt.Errorf("create runtime inventory runner: %w", runnerErr)
 			}
+			inventoryRunner.WithObservability(
+				tracing.Tracer(serviceName + ".runtime_inventory_worker"),
+			)
 			inventoryLoop, loopErr := runtimeinventoryworker.NewLoop(
 				inventoryRunner,
 				pollInterval,
@@ -611,6 +710,9 @@ func run() error {
 			if loopErr != nil {
 				return fmt.Errorf("create runtime inventory worker loop: %w", loopErr)
 			}
+			inventoryLoop.WithObservability(func(result string, duration time.Duration) {
+				metrics.RecordWorkerPoll("runtime_inventory", result, duration)
+			})
 			inventoryWorkerServer = lifecycle.NewServer(inventoryLoop)
 			inventoryEventRunner, eventRunnerErr :=
 				runtimeinventoryworker.NewEventRunner(
@@ -629,6 +731,9 @@ func run() error {
 					eventRunnerErr,
 				)
 			}
+			inventoryEventRunner.WithObservability(
+				tracing.Tracer(serviceName + ".runtime_inventory_event_worker"),
+			)
 			inventoryEventLoop, eventLoopErr :=
 				runtimeinventoryworker.NewLoop(
 					inventoryEventRunner,
@@ -649,6 +754,9 @@ func run() error {
 					eventLoopErr,
 				)
 			}
+			inventoryEventLoop.WithObservability(func(result string, duration time.Duration) {
+				metrics.RecordWorkerPoll("runtime_inventory_events", result, duration)
+			})
 			inventoryEventWorkerServer = lifecycle.NewServer(inventoryEventLoop)
 		}
 	}

@@ -36,6 +36,52 @@ func TestConfigRejectsInvalidDuration(t *testing.T) {
 	}
 }
 
+func TestHTTPValidatesExactCORSOrigins(t *testing.T) {
+	valid := HTTP{CORSAllowedOrigins: []string{
+		"https://console.owndock.net",
+		"https://console.owndock.net:8443",
+		"http://localhost:3000",
+		"http://127.0.0.1:3000",
+		"http://[::1]:3000",
+	}}
+	if err := valid.ValidateCORSAllowedOrigins(); err != nil {
+		t.Fatalf("valid origins rejected: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		origins []string
+	}{
+		{name: "wildcard", origins: []string{"*"}},
+		{name: "subdomain wildcard", origins: []string{"https://*.owndock.net"}},
+		{name: "non TLS remote", origins: []string{"http://console.owndock.net"}},
+		{name: "path", origins: []string{"https://console.owndock.net/app"}},
+		{name: "trailing slash", origins: []string{"https://console.owndock.net/"}},
+		{name: "query", origins: []string{"https://console.owndock.net?tenant=one"}},
+		{name: "fragment", origins: []string{"https://console.owndock.net#fragment"}},
+		{name: "user info", origins: []string{"https://user@console.owndock.net"}},
+		{name: "uppercase host", origins: []string{"https://Console.owndock.net"}},
+		{name: "bad port", origins: []string{"https://console.owndock.net:70000"}},
+		{name: "whitespace", origins: []string{" https://console.owndock.net"}},
+		{name: "duplicate", origins: []string{"https://console.owndock.net", "https://console.owndock.net"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := (HTTP{CORSAllowedOrigins: test.origins}).ValidateCORSAllowedOrigins(); err == nil {
+				t.Fatalf("origins %v were accepted", test.origins)
+			}
+		})
+	}
+
+	tooMany := HTTP{CORSAllowedOrigins: make([]string, 33)}
+	for index := range tooMany.CORSAllowedOrigins {
+		tooMany.CORSAllowedOrigins[index] = "https://console" + string(rune('a'+index%26)) + ".owndock.net"
+	}
+	if err := tooMany.ValidateCORSAllowedOrigins(); err == nil {
+		t.Fatal("more than 32 origins were accepted")
+	}
+}
+
 func TestTracingValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -88,6 +134,9 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	}
 	if cfg.Product.Enabled {
 		t.Fatal("product API must be disabled by default")
+	}
+	if len(cfg.Server.HTTP.CORSAllowedOrigins) != 0 {
+		t.Fatalf("CORS allowed origins = %v, want none", cfg.Server.HTTP.CORSAllowedOrigins)
 	}
 	if cfg.Runtime.DeploymentWorker.Enabled {
 		t.Fatal("deployment worker must be disabled by default")
@@ -142,6 +191,19 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 			err,
 			defaultLoginAttemptWindow,
 		)
+	}
+	if cfg.Security.IngressSourceLimitValue() != defaultIngressSourceLimit ||
+		cfg.Security.IngressGlobalLimitValue() != defaultIngressGlobalLimit {
+		t.Fatalf("ingress limits = %d/%d, want %d/%d",
+			cfg.Security.IngressSourceLimitValue(), cfg.Security.IngressGlobalLimitValue(),
+			defaultIngressSourceLimit, defaultIngressGlobalLimit)
+	}
+	ingressWindow, err := cfg.Security.IngressRateWindowDuration()
+	if err != nil || ingressWindow != defaultIngressRateWindow {
+		t.Fatalf("ingress rate window = %v, %v; want %v", ingressWindow, err, defaultIngressRateWindow)
+	}
+	if len(cfg.Security.TrustedProxyCIDRs) != 0 {
+		t.Fatalf("trusted proxy CIDRs = %v, want none", cfg.Security.TrustedProxyCIDRs)
 	}
 	if cfg.Security.AgentPKI.Enabled ||
 		cfg.Security.AgentPKI.CACertificateEnv != defaultAgentCACertEnv ||
@@ -232,6 +294,53 @@ func TestDeploymentWorkerRequiresProductAndMongoDB(t *testing.T) {
 	}
 }
 
+func TestBuildWorkerRequiresDedicatedBuildKitEndpoint(t *testing.T) {
+	worker := BuildWorker{
+		Enabled: true, PollInterval: "2s", LeaseDuration: "30s", OperationTimeout: "2h15m",
+		CheckoutTimeout: "10m", WorkspaceRoot: "/var/lib/owndock/builds",
+		MaxWorkspaceBytes: 5 * 1024 * 1024 * 1024, MaxWorkspaceFiles: 250000,
+		GitExecutable: "git", GitVersion: "2.55.0",
+		BuildKitEndpoint: "unix:///run/owndock-buildkit/buildkitd.sock",
+	}
+	if err := worker.Validate(true); err != nil {
+		t.Fatalf("dedicated Unix BuildKit endpoint rejected: %v", err)
+	}
+	worker.BuildKitEndpoint = "unix:///var/run/docker.sock"
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Docker socket was accepted as BuildKit endpoint")
+	}
+	worker.BuildKitEndpoint = "tcp://buildkit:1234"
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("unauthenticated BuildKit TCP endpoint was accepted")
+	}
+	worker.BuildKitServerName = "buildkit"
+	worker.BuildKitCACertFile = "/etc/owndock/buildkit/ca.pem"
+	worker.BuildKitClientCertFile = "/etc/owndock/buildkit/worker-cert.pem"
+	worker.BuildKitClientKeyFile = "/etc/owndock/buildkit/worker-key.pem"
+	if err := worker.Validate(true); err != nil {
+		t.Fatalf("mTLS BuildKit endpoint rejected: %v", err)
+	}
+	worker.LogRetention = "31d"
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted excessive log retention")
+	}
+	worker.LogRetention = "168h"
+	worker.LogMaxBytes = 512 * 1024
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted an unsafe log byte cap")
+	}
+	worker.LogMaxBytes = 10 * 1024 * 1024
+	worker.LogChunkBytes = 128 * 1024
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted an oversized log chunk")
+	}
+	worker.LogChunkBytes = 16 * 1024
+	worker.MetricsAddress = "http://127.0.0.1:9091"
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted an invalid metrics address")
+	}
+}
+
 func TestInventoryWorkerValidation(t *testing.T) {
 	worker := InventoryWorker{
 		Enabled: true, PollInterval: "1s", SyncInterval: "5m",
@@ -297,6 +406,73 @@ func TestProductSourceProbeTimeoutValidation(t *testing.T) {
 	}
 }
 
+func TestProductBuildTriggerRateValidation(t *testing.T) {
+	for _, product := range []Product{
+		{},
+		{BuildTriggerRateLimit: 1, BuildTriggerRateWindow: "1s"},
+		{BuildTriggerRateLimit: 10_000, BuildTriggerRateWindow: "24h"},
+	} {
+		if err := product.Validate(); err != nil {
+			t.Errorf("Product %+v error = %v", product, err)
+		}
+	}
+	for _, product := range []Product{
+		{BuildTriggerRateLimit: -1},
+		{BuildTriggerRateLimit: 10_001},
+		{BuildTriggerRateWindow: "500ms"},
+		{BuildTriggerRateWindow: "25h"},
+	} {
+		if err := product.Validate(); err == nil {
+			t.Errorf("Product %+v accepted", product)
+		}
+	}
+}
+
+func TestProductBuildWebhookBodyLimitValidation(t *testing.T) {
+	for _, value := range []int64{0, 1024, 1024 * 1024, 5 * 1024 * 1024} {
+		product := Product{BuildWebhookMaxBodyBytes: value}
+		if err := product.Validate(); err != nil {
+			t.Errorf("Product webhook body limit %d error = %v", value, err)
+		}
+	}
+	for _, value := range []int64{-1, 1023, 5*1024*1024 + 1} {
+		if err := (Product{BuildWebhookMaxBodyBytes: value}).Validate(); err == nil {
+			t.Errorf("Product webhook body limit %d accepted", value)
+		}
+	}
+	if got := (Product{}).BuildWebhookMaxBodyBytesValue(); got != 1024*1024 {
+		t.Fatalf("default webhook body limit = %d", got)
+	}
+}
+
+func TestProductBuildWebhookRateValidation(t *testing.T) {
+	for _, product := range []Product{
+		{},
+		{BuildWebhookRateLimit: 1, BuildWebhookRateWindow: "1s"},
+		{BuildWebhookRateLimit: 10_000, BuildWebhookRateWindow: "24h"},
+	} {
+		if err := product.Validate(); err != nil {
+			t.Errorf("Product %+v error = %v", product, err)
+		}
+	}
+	for _, product := range []Product{
+		{BuildWebhookRateLimit: -1},
+		{BuildWebhookRateLimit: 10_001},
+		{BuildWebhookRateWindow: "500ms"},
+		{BuildWebhookRateWindow: "25h"},
+	} {
+		if err := product.Validate(); err == nil {
+			t.Errorf("Product %+v accepted", product)
+		}
+	}
+	if got := (Product{}).BuildWebhookRateLimitValue(); got != 120 {
+		t.Fatalf("default webhook rate limit = %d", got)
+	}
+	if got, err := (Product{}).BuildWebhookRateWindowDuration(); err != nil || got != time.Minute {
+		t.Fatalf("default webhook rate window = %s/%v", got, err)
+	}
+}
+
 func TestLoginProtectionConfigurationValidation(t *testing.T) {
 	securityConfig := Security{
 		BootstrapTokenEnv:  "TEST_BOOTSTRAP_TOKEN",
@@ -315,6 +491,76 @@ func TestLoginProtectionConfigurationValidation(t *testing.T) {
 	securityConfig.LoginAttemptWindow = "30s"
 	if err := securityConfig.Validate(true); err == nil {
 		t.Fatal("accepted login attempt window below one minute")
+	}
+}
+
+func TestIngressProtectionConfigurationValidation(t *testing.T) {
+	valid := Security{
+		BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN", SessionTTL: "1h",
+		IngressSourceLimit: 600, IngressGlobalLimit: 6000, IngressRateWindow: "1m",
+		TrustedProxyCIDRs: []string{"10.0.0.0/8", "2001:db8::/32"},
+	}
+	if err := valid.Validate(true); err != nil {
+		t.Fatalf("valid ingress policy: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*Security)
+	}{
+		{name: "negative source limit", mutate: func(value *Security) { value.IngressSourceLimit = -1 }},
+		{name: "source limit too high", mutate: func(value *Security) { value.IngressSourceLimit = 100001 }},
+		{name: "negative global limit", mutate: func(value *Security) { value.IngressGlobalLimit = -1 }},
+		{name: "global below source", mutate: func(value *Security) { value.IngressGlobalLimit = 599 }},
+		{name: "global too high", mutate: func(value *Security) { value.IngressGlobalLimit = 1000001 }},
+		{name: "window too short", mutate: func(value *Security) { value.IngressRateWindow = "500ms" }},
+		{name: "window too long", mutate: func(value *Security) { value.IngressRateWindow = "61m" }},
+		{name: "invalid CIDR", mutate: func(value *Security) { value.TrustedProxyCIDRs = []string{"not-a-cidr"} }},
+		{name: "non-canonical CIDR", mutate: func(value *Security) { value.TrustedProxyCIDRs = []string{"10.1.2.3/8"} }},
+		{name: "trust every IPv4 peer", mutate: func(value *Security) { value.TrustedProxyCIDRs = []string{"0.0.0.0/0"} }},
+		{name: "trust every IPv6 peer", mutate: func(value *Security) { value.TrustedProxyCIDRs = []string{"::/0"} }},
+		{name: "duplicate CIDR", mutate: func(value *Security) { value.TrustedProxyCIDRs = []string{"10.0.0.0/8", "10.0.0.0/8"} }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := valid
+			candidate.TrustedProxyCIDRs = append([]string(nil), valid.TrustedProxyCIDRs...)
+			test.mutate(&candidate)
+			if err := candidate.Validate(true); err == nil {
+				t.Fatal("invalid ingress policy was accepted")
+			}
+		})
+	}
+
+	tooMany := valid
+	tooMany.TrustedProxyCIDRs = make([]string, 65)
+	for index := range tooMany.TrustedProxyCIDRs {
+		tooMany.TrustedProxyCIDRs[index] = "10.0.0.0/8"
+	}
+	if err := tooMany.Validate(true); err == nil {
+		t.Fatal("more than 64 trusted proxy CIDRs were accepted")
+	}
+}
+
+func TestUserInvitationTTLValidation(t *testing.T) {
+	for _, value := range []string{"", "15m", "24h", "168h"} {
+		securityConfig := Security{BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN", SessionTTL: "1h",
+			MaxActiveSessions: 10, LoginAttemptLimit: 5, LoginAttemptWindow: "15m",
+			UserInvitationTTL: value}
+		if err := securityConfig.Validate(true); err != nil {
+			t.Errorf("invitation TTL %q error = %v", value, err)
+		}
+	}
+	for _, value := range []string{"14m59s", "169h", "invalid"} {
+		securityConfig := Security{BootstrapTokenEnv: "TEST_BOOTSTRAP_TOKEN", SessionTTL: "1h",
+			MaxActiveSessions: 10, LoginAttemptLimit: 5, LoginAttemptWindow: "15m",
+			UserInvitationTTL: value}
+		if err := securityConfig.Validate(true); err == nil {
+			t.Errorf("invitation TTL %q accepted", value)
+		}
+	}
+	if got, err := (Security{}).UserInvitationTTLDuration(); err != nil || got != 24*time.Hour {
+		t.Fatalf("default invitation TTL = %s/%v", got, err)
 	}
 }
 

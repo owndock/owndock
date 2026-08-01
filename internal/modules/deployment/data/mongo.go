@@ -78,6 +78,33 @@ func (r *MongoRepository) Get(ctx context.Context, projectID, deploymentID strin
 	return doc.domain(), nil
 }
 
+// CurrentSucceededForSlot returns the deployment that currently owns the
+// successful cutover for one application/environment/runtime-target slot.
+// Terminal callers use this to reject stale deployment IDs before resolving a
+// running container.
+func (r *MongoRepository) CurrentSucceededForSlot(
+	ctx context.Context,
+	projectID, applicationID, environmentID, runtimeTargetID string,
+) (biz.Deployment, error) {
+	var document deploymentDocument
+	err := r.deployments.FindOne(ctx, bson.D{
+		{Key: "project_id", Value: projectID},
+		{Key: "application_id", Value: applicationID},
+		{Key: "environment_id", Value: environmentID},
+		{Key: "runtime_target_id", Value: runtimeTargetID},
+		{Key: "status", Value: string(biz.StatusSucceeded)},
+	}, options.FindOne().SetSort(bson.D{
+		{Key: "cutover_sequence", Value: -1}, {Key: "updated_at", Value: -1}, {Key: "_id", Value: -1},
+	})).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.Deployment{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Deployment{}, fmt.Errorf("find current successful deployment: %w", err)
+	}
+	return document.domain(), nil
+}
+
 func (r *MongoRepository) HasSucceeded(
 	ctx context.Context,
 	projectID, releaseID, applicationID, environmentID, runtimeTargetID string,
@@ -356,24 +383,28 @@ func (r *MongoRepository) ValidateFence(
 }
 
 type deploymentDocument struct {
-	ID                 string                  `bson:"_id"`
-	OrganizationID     string                  `bson:"organization_id,omitempty"`
-	ProjectID          string                  `bson:"project_id"`
-	ReleaseID          string                  `bson:"release_id"`
-	ApplicationID      string                  `bson:"application_id"`
-	EnvironmentID      string                  `bson:"environment_id"`
-	RuntimeTargetID    string                  `bson:"runtime_target_id"`
-	IdempotencyKey     string                  `bson:"idempotency_key"`
-	Operation          string                  `bson:"operation"`
-	SourceDeploymentID string                  `bson:"source_deployment_id,omitempty"`
-	Revision           string                  `bson:"revision"`
-	Status             string                  `bson:"status"`
-	FailureCategory    string                  `bson:"failure_category,omitempty"`
-	CutoverSequence    uint64                  `bson:"cutover_sequence,omitempty"`
-	CreatedAt          time.Time               `bson:"created_at"`
-	UpdatedAt          time.Time               `bson:"updated_at"`
-	Version            uint64                  `bson:"version"`
-	Lease              deploymentLeaseDocument `bson:"lease"`
+	ID                   string                  `bson:"_id"`
+	OrganizationID       string                  `bson:"organization_id,omitempty"`
+	ProjectID            string                  `bson:"project_id"`
+	ReleaseID            string                  `bson:"release_id"`
+	ApplicationID        string                  `bson:"application_id"`
+	EnvironmentID        string                  `bson:"environment_id"`
+	RuntimeTargetID      string                  `bson:"runtime_target_id"`
+	IdempotencyKey       string                  `bson:"idempotency_key"`
+	Operation            string                  `bson:"operation"`
+	TriggerSource        string                  `bson:"trigger_source"`
+	SourceArtifactID     string                  `bson:"source_artifact_id,omitempty"`
+	SourceBuildID        string                  `bson:"source_build_id,omitempty"`
+	BuildConfigurationID string                  `bson:"build_configuration_id,omitempty"`
+	SourceDeploymentID   string                  `bson:"source_deployment_id,omitempty"`
+	Revision             string                  `bson:"revision"`
+	Status               string                  `bson:"status"`
+	FailureCategory      string                  `bson:"failure_category,omitempty"`
+	CutoverSequence      uint64                  `bson:"cutover_sequence,omitempty"`
+	CreatedAt            time.Time               `bson:"created_at"`
+	UpdatedAt            time.Time               `bson:"updated_at"`
+	Version              uint64                  `bson:"version"`
+	Lease                deploymentLeaseDocument `bson:"lease"`
 }
 type deploymentLeaseDocument struct {
 	Owner      string    `bson:"owner,omitempty"`
@@ -386,8 +417,11 @@ func deploymentDocumentFromDomain(d biz.Deployment) deploymentDocument {
 		ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID, ReleaseID: d.ReleaseID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
 		RuntimeTargetID: d.RuntimeTargetID, IdempotencyKey: d.IdempotencyKey,
-		Operation: string(d.Operation), SourceDeploymentID: d.SourceDeploymentID,
-		Revision: d.Revision, Status: string(d.Status), FailureCategory: string(d.FailureCategory),
+		Operation: string(d.Operation), TriggerSource: string(d.TriggerSource),
+		SourceArtifactID: d.SourceArtifactID, SourceBuildID: d.SourceBuildID,
+		BuildConfigurationID: d.BuildConfigurationID,
+		SourceDeploymentID:   d.SourceDeploymentID,
+		Revision:             d.Revision, Status: string(d.Status), FailureCategory: string(d.FailureCategory),
 		CutoverSequence: d.CutoverSequence, CreatedAt: d.CreatedAt,
 		UpdatedAt: d.UpdatedAt, Version: d.Version,
 		Lease: deploymentLeaseDocument{
@@ -401,12 +435,19 @@ func (d deploymentDocument) domain() biz.Deployment {
 	if operation == "" {
 		operation = biz.OperationDeploy
 	}
+	triggerSource := biz.TriggerSource(d.TriggerSource)
+	if triggerSource == "" {
+		triggerSource = biz.TriggerSourceManual
+	}
 	return biz.Deployment{
 		ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID, ReleaseID: d.ReleaseID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
 		RuntimeTargetID: d.RuntimeTargetID, IdempotencyKey: d.IdempotencyKey,
-		Operation: operation, SourceDeploymentID: d.SourceDeploymentID,
-		Revision: d.Revision, Status: biz.Status(d.Status), FailureCategory: biz.FailureCategory(d.FailureCategory),
+		Operation: operation, TriggerSource: triggerSource,
+		SourceArtifactID: d.SourceArtifactID, SourceBuildID: d.SourceBuildID,
+		BuildConfigurationID: d.BuildConfigurationID,
+		SourceDeploymentID:   d.SourceDeploymentID,
+		Revision:             d.Revision, Status: biz.Status(d.Status), FailureCategory: biz.FailureCategory(d.FailureCategory),
 		CutoverSequence: d.CutoverSequence, CreatedAt: d.CreatedAt,
 		UpdatedAt: d.UpdatedAt, Version: d.Version,
 		Lease: biz.Lease{

@@ -11,6 +11,9 @@ import (
 	"github.com/owndock/owndock/internal/modules/deployment/data"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/transaction"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 var errBuildFailed = errors.New("prepare failed")
@@ -66,11 +69,44 @@ func TestRunOnceCompletesQueuedDeployment(t *testing.T) {
 	}
 }
 
+func TestRunOnceTracesClaimedDeploymentWithoutTracingIdlePoll(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	item, err := biz.New("app", "env", "main@abc", "deployment", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.ProjectID = "project"
+	if _, err := repository.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	runner := newTestRunner(t, repository, NoopExecutor{}, time.Unix(10, 0)).
+		WithObservability(provider.Tracer("deployment-worker"))
+	if err := runner.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Name() != "deployment.execute" ||
+		spans[0].Status().Code != codes.Unset {
+		t.Fatalf("ended spans = %+v", spans)
+	}
+}
+
 func TestRunOnceMarksAndReportsBuildFailure(t *testing.T) {
 	repo := data.NewMemoryRepository()
 	item, _ := biz.New("app-1", "env-1", "main@abc", "dep-1", time.Unix(0, 0))
 	_, _ = repo.Create(t.Context(), item)
-	err := newTestRunner(t, repo, failingExecutor{}, time.Unix(10, 0)).RunOnce(t.Context())
+	recorder := tracetest.NewSpanRecorder()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+	t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+	err := newTestRunner(t, repo, failingExecutor{}, time.Unix(10, 0)).
+		WithObservability(provider.Tracer("deployment-worker")).
+		RunOnce(t.Context())
 	if !errors.Is(err, errBuildFailed) {
 		t.Fatalf("RunOnce() error = %v", err)
 	}
@@ -78,6 +114,11 @@ func TestRunOnceMarksAndReportsBuildFailure(t *testing.T) {
 	if len(items) != 1 || items[0].Status != biz.StatusFailed ||
 		items[0].FailureCategory != biz.FailureConfiguration {
 		t.Fatalf("items = %+v", items)
+	}
+	spans := recorder.Ended()
+	if len(spans) != 1 || spans[0].Status().Code != codes.Error ||
+		spans[0].Status().Description != "Deployment operation failed" {
+		t.Fatalf("ended spans = %+v", spans)
 	}
 }
 

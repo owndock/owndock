@@ -69,6 +69,39 @@ func TestEngineeringSampleRoutesAreDisabledByDefault(t *testing.T) {
 	}
 }
 
+func TestHTTPServerRejectsBrowserOriginsByDefault(t *testing.T) {
+	srv := newTestHTTPHandler(t, false)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.Header.Set("Origin", "https://console.owndock.net")
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusForbidden ||
+		!strings.Contains(recorder.Body.String(), `"code":"origin_not_allowed"`) {
+		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Header().Get("X-Request-ID") == "" {
+		t.Fatal("rejected origin response has no request ID")
+	}
+}
+
+func TestHTTPServerAllowsConfiguredBrowserOrigin(t *testing.T) {
+	srv := newTestHTTPHandlerWithConfig(t, false, platformconfig.HTTP{
+		Address: "127.0.0.1:0", Timeout: "1s",
+		CORSAllowedOrigins: []string{"https://console.owndock.net"},
+	})
+	request := httptest.NewRequest(http.MethodOptions, "/api/v1/auth/login", nil)
+	request.Header.Set("Origin", "https://console.owndock.net")
+	request.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	request.Header.Set("Access-Control-Request-Headers", "content-type")
+	recorder := httptest.NewRecorder()
+	srv.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusNoContent ||
+		recorder.Header().Get("Access-Control-Allow-Origin") != "https://console.owndock.net" ||
+		recorder.Header().Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatalf("response = %d, headers = %v", recorder.Code, recorder.Header())
+	}
+}
+
 func TestProductAPIRoutesAuthenticationBoundary(t *testing.T) {
 	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -108,6 +141,40 @@ func TestProductAPIRoutesAuthenticationBoundary(t *testing.T) {
 	api.ServeHTTP(allowed, allowedRequest)
 	if allowed.Code != http.StatusOK {
 		t.Fatalf("authenticated project status = %d", allowed.Code)
+	}
+}
+
+func TestProductAPIIngressProtectionWrapsPublicAndProtectedRoutes(t *testing.T) {
+	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	api, err := NewProductAPI(identity, controlPlane, func(next http.Handler) http.Handler { return next })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := api.WithIngressProtection(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			w.Header().Set("X-Ingress-Protected", "true")
+			next.ServeHTTP(w, request)
+		})
+	}); err != nil {
+		t.Fatalf("WithIngressProtection() error = %v", err)
+	}
+	for _, request := range []*http.Request{
+		httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil),
+		httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil),
+	} {
+		response := httptest.NewRecorder()
+		api.ServeHTTP(response, request)
+		if response.Header().Get("X-Ingress-Protected") != "true" {
+			t.Fatalf("%s %s bypassed ingress protection", request.Method, request.URL.Path)
+		}
+	}
+	if err := api.WithIngressProtection(nil); err == nil {
+		t.Fatal("nil ingress protection was accepted")
 	}
 }
 
@@ -161,6 +228,19 @@ func TestProductAPIRoutesBuildBeforeControlPlane(t *testing.T) {
 		"/api/v1/projects/project-1/repository-credentials",
 		"/api/v1/projects/project-1/source-repositories",
 		"/api/v1/projects/project-1/source-repositories/source-1",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations/configuration-1",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations/configuration-1/triggers",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations/configuration-1/triggers/trigger-1:revoke",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations/configuration-1/hooks",
+		"/api/v1/projects/project-1/applications/application-1/build-configurations/configuration-1/hooks/hook-1:revoke",
+		"/api/v1/projects/project-1/builds",
+		"/api/v1/projects/project-1/builds/build-1",
+		"/api/v1/projects/project-1/builds/build-1/logs",
+		"/api/v1/projects/project-1/builds/build-1:cancel",
+		"/api/v1/projects/project-1/builds/build-1:retry",
+		"/api/v1/build-triggers/trigger-1",
+		"/api/v1/build-hooks/github/hook-1",
 	} {
 		recorder := httptest.NewRecorder()
 		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
@@ -171,6 +251,14 @@ func TestProductAPIRoutesBuildBeforeControlPlane(t *testing.T) {
 }
 
 func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handler {
+	return newTestHTTPHandlerWithConfig(t, enableEngineeringSamples, platformconfig.HTTP{
+		Address: "127.0.0.1:0", Timeout: "1s",
+	})
+}
+
+func newTestHTTPHandlerWithConfig(
+	t *testing.T, enableEngineeringSamples bool, httpConfig platformconfig.HTTP,
+) http.Handler {
 	t.Helper()
 	checker := health.NewChecker()
 	checker.SetReady(true)
@@ -197,7 +285,7 @@ func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handle
 		}
 	}
 	srv, err := NewHTTPServer(
-		platformconfig.HTTP{Address: "127.0.0.1:0", Timeout: "1s"},
+		httpConfig,
 		checker,
 		meta.NewService(meta.BuildInfo{Service: "owndock", Version: "test"}),
 		samples,

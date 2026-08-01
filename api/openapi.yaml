@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser and management HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, and Audit operations form the implemented product slice when product mode is enabled. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Build execution, Webhook, Terminal, and Template operations are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser, management, and automation HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact and Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Template operations are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -16,8 +16,14 @@ tags:
   - name: Managed Hosts
   - name: Runtime Targets
   - name: Runtime Inventory
+  - name: Terminal Sessions
   - name: Registry Credentials
   - name: Source Repositories
+  - name: Build Configurations
+  - name: Build Triggers
+  - name: Build Hooks
+  - name: Builds
+  - name: Artifacts
   - name: Audit
   - name: Applications
   - name: Environments
@@ -202,6 +208,218 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/terminal-policy:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Terminal Sessions]
+      operationId: getOrganizationTerminalPolicy
+      summary: Get the Organization host-terminal policy
+      description: Owner only. When no policy has been saved, returns the restrictive default that allows host terminals only for Owners.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalPolicyResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    put:
+      tags: [Terminal Sessions]
+      operationId: updateOrganizationTerminalPolicy
+      summary: Create or replace the Organization host-terminal policy
+      description: Owner only. expected_version is 0 when saving the returned default for the first time, then must match the persisted version.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalPolicyRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalPolicyResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/terminal-policy:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Terminal Sessions]
+      operationId: getProjectTerminalPolicy
+      summary: Get the Project container-terminal policy
+      description: The default allows Owner and Maintainer access in development and staging; production and Developer access require an explicit policy.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalPolicyResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    put:
+      tags: [Terminal Sessions]
+      operationId: updateProjectTerminalPolicy
+      summary: Create or replace the Project container-terminal policy
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TerminalPolicyRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalPolicyResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/terminal-sessions/container:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    post:
+      tags: [Terminal Sessions]
+      operationId: createContainerTerminalSession
+      summary: Request a terminal for the current managed container of a Deployment
+      description: Accepts only a Deployment ID. OwnDock resolves the current successful cutover, Runtime Target, Managed Host, and running instance. Callers cannot supply a container ID, Docker endpoint, shell, command, or username. The one-time connection ticket is set only as a path-scoped Secure HttpOnly cookie.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateContainerTerminalSessionRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/TerminalCredentialResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/managed-hosts/{managed_host_id}/terminal-sessions:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ManagedHostID"
+    post:
+      tags: [Terminal Sessions]
+      operationId: createHostTerminalSession
+      summary: Request a terminal for a registered Managed Host
+      description: The Managed Host ID fixes the target. Callers cannot supply an SSH address, Docker endpoint, shell, command, or username. Host-terminal access defaults to Owner only.
+      security:
+        - bearerAuth: []
+      responses:
+        "201":
+          $ref: "#/components/responses/TerminalCredentialResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/terminal-sessions/{terminal_session_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/TerminalSessionID"
+    get:
+      tags: [Terminal Sessions]
+      operationId: getTerminalSession
+      summary: Get safe Terminal Session metadata
+      description: Returns lifecycle and fixed target references, never the one-time ticket, its hash, terminal input, or terminal output.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalSessionResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/terminal-sessions/{terminal_session_id}:terminate:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/TerminalSessionID"
+    post:
+      tags: [Terminal Sessions]
+      operationId: terminateTerminalSession
+      summary: Request idempotent Terminal Session termination
+      description: A user may terminate their own session. An Owner may terminate any Organization session and a Project Maintainer may terminate another user's Project container session.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TerminalSessionResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/agent/enrollments:exchange:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -380,6 +598,230 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/auth/users:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Identity]
+      operationId: listOrganizationUsers
+      summary: List safe user metadata in the current Organization
+      description: Owner only. Password hashes and session or invitation tokens are never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/OrganizationUserList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/users/{user_id}/sessions:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    get:
+      tags: [Identity]
+      operationId: listUserSessionsAsOwner
+      summary: List one Organization user's active sessions
+      description: Owner only. The response is no-store and never contains bearer tokens or token hashes.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SessionList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/IngressRateLimited"
+        "500":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/IngressProtectionUnavailable"
+    delete:
+      tags: [Identity]
+      operationId: revokeAllUserSessionsAsOwner
+      summary: Revoke all sessions for one Organization user
+      description: Owner only. This is an idempotent emergency action and cannot target the current Owner. The user must log in again on every device.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/AdminSessionRevocation"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/IngressRateLimited"
+        "500":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/IngressProtectionUnavailable"
+  /api/v1/auth/users/{user_id}/sessions/{session_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+      - name: session_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    delete:
+      tags: [Identity]
+      operationId: revokeUserSessionAsOwner
+      summary: Revoke one Organization user's active session
+      description: Owner only. The current Owner session cannot be revoked through this administrative route.
+      security:
+        - bearerAuth: []
+      responses:
+        "204":
+          description: Session revoked.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/IngressRateLimited"
+        "500":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/IngressProtectionUnavailable"
+  /api/v1/auth/invitations:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Identity]
+      operationId: listUserInvitations
+      summary: List safe Organization user invitations
+      description: Owner only. Token hashes and plaintext tokens are never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/UserInvitationList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Identity]
+      operationId: createUserInvitation
+      summary: Create a one-time local user invitation
+      description: Owner only. The raw invitation token is returned once with no-store and only its SHA-256 hash is persisted. Public sign-up is not supported.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateUserInvitationRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/UserInvitationCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/invitations:accept:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    post:
+      tags: [Identity]
+      operationId: acceptUserInvitation
+      summary: Set a password and consume a one-time user invitation
+      description: Does not accept a user session. Invalid, expired, revoked, accepted, and email-conflicting invitations use the same safe error. Success creates a Viewer Organization identity and bearer session; Project access is granted separately.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AcceptUserInvitationRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/Credentials"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/auth/invitations/{invitation_id}:revoke:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - name: invitation_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    post:
+      tags: [Identity]
+      operationId: revokeUserInvitation
+      summary: Revoke an active local user invitation
+      description: Owner only. Revocation is idempotent after the invitation reaches revoked state.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/UserInvitationResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -474,6 +916,132 @@ paths:
         "409":
           $ref: "#/components/responses/APIError"
         "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/members:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Project Members]
+      operationId: listProjectMembers
+      summary: List users explicitly bound to a project
+      description: Owner access is implicit and is not represented by a member row. Non-owners need an active Project membership.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectMemberList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Project Members]
+      operationId: createProjectMember
+      summary: Bind an existing Organization user to a project
+      description: Owner or Project Maintainer only. The user must already have accepted a local invitation in the same Organization. Owner cannot be persisted as a Project member.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateProjectMemberRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ProjectMemberResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/members/{user_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: user_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    patch:
+      tags: [Project Members]
+      operationId: updateProjectMember
+      summary: Change a Project member role
+      description: Owner or Project Maintainer only. expected_version provides optimistic concurrency. A Maintainer cannot change their own membership.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateProjectMemberRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/ProjectMemberResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    delete:
+      tags: [Project Members]
+      operationId: deleteProjectMember
+      summary: Remove a user from a Project
+      description: Owner or Project Maintainer only. Removal takes effect on the user's next request, including for an already active Session.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: expected_version
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 1
+      responses:
+        "204":
+          description: Project membership removed.
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
           $ref: "#/components/responses/APIError"
         "422":
           $ref: "#/components/responses/APIError"
@@ -811,6 +1379,628 @@ paths:
         "403":
           $ref: "#/components/responses/APIError"
         "404":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+    get:
+      tags: [Build Configurations]
+      operationId: listBuildConfigurations
+      summary: List versioned build configurations for an application
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildConfigurationList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Build Configurations]
+      operationId: createBuildConfiguration
+      summary: Create a constrained Dockerfile build configuration
+      description: Developer, Maintainer, or Owner. The source repository and registry credential must belong to the same project. Paths are canonical repository-relative paths, allowed refs are exact full branch or tag refs, and the image repository cannot contain a tag or digest. This operation stores configuration only and does not start a Build. Only Maintainer or Owner may submit automatic_deployments; every target must use a development Environment, staging and production remain manual, and auto_create_release must be true.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBuildConfigurationRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/BuildConfigurationCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations/{build_configuration_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+      - $ref: "#/components/parameters/BuildConfigurationID"
+    get:
+      tags: [Build Configurations]
+      operationId: getBuildConfiguration
+      summary: Get a build configuration
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildConfigurationResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    patch:
+      tags: [Build Configurations]
+      operationId: updateBuildConfiguration
+      summary: Update a build configuration using optimistic version control
+      description: Developer, Maintainer, or Owner. expected_version must equal the current version. Existing Builds retain their immutable configuration snapshot. Only Maintainer or Owner may replace automatic_deployments; an empty list disables it, and staging or production targets are rejected.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PatchBuildConfigurationRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildConfigurationResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations/{build_configuration_id}/triggers:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+      - $ref: "#/components/parameters/BuildConfigurationID"
+    get:
+      tags: [Build Triggers]
+      operationId: listBuildTriggers
+      summary: List safe Build Trigger metadata
+      description: Maintainer or Owner. Token hashes and plaintext tokens are never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildTriggerList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Build Triggers]
+      operationId: createBuildTrigger
+      summary: Create a purpose-limited automation credential
+      description: Maintainer or Owner. The plaintext token is shown exactly once in this response; store it in the Git provider secret store. allowed_refs must be a subset of the Build Configuration allowed_refs.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBuildTriggerRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/BuildTriggerCredentialCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations/{build_configuration_id}/triggers/{build_trigger_id}:revoke:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+      - $ref: "#/components/parameters/BuildConfigurationID"
+      - $ref: "#/components/parameters/BuildTriggerID"
+    post:
+      tags: [Build Triggers]
+      operationId: revokeBuildTrigger
+      summary: Permanently revoke a Build Trigger token
+      description: Maintainer or Owner. Revocation is idempotent and the plaintext token cannot be recovered.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildTriggerResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/build-triggers/{build_trigger_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/BuildTriggerID"
+      - $ref: "#/components/parameters/IdempotencyKey"
+    post:
+      tags: [Build Triggers]
+      operationId: triggerExternalBuild
+      summary: Enqueue a Build from any Git hosting automation
+      description: Send the one-time Build Trigger token as Authorization Bearer. The caller can supply only the exact ref and full commit SHA; repository, Build Configuration, registry, and allowed refs come from the stored trigger. The Server verifies that the ref currently resolves to the supplied commit before accepting the Build. The shared default limit is 60 authenticated requests per trigger per minute.
+      security:
+        - buildTriggerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriggerExternalBuildRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/BuildAccepted"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/BuildTriggerRateLimited"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations/{build_configuration_id}/hooks:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+      - $ref: "#/components/parameters/BuildConfigurationID"
+    get:
+      tags: [Build Hooks]
+      operationId: listBuildHooks
+      summary: List safe platform Webhook configuration metadata
+      description: Maintainer or Owner. Webhook secrets and secret references are never returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildHookList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Build Hooks]
+      operationId: createBuildHook
+      summary: Create a signed platform Webhook endpoint
+      description: Maintainer or Owner. The endpoint is bound to one Build Configuration and a narrower allowed-ref set. secret_ref points to a separately managed signing secret; it is not a Git read credential.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBuildHookRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/BuildHookCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}/build-configurations/{build_configuration_id}/hooks/{build_hook_id}:revoke:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+      - $ref: "#/components/parameters/BuildConfigurationID"
+      - $ref: "#/components/parameters/BuildHookID"
+    post:
+      tags: [Build Hooks]
+      operationId: revokeBuildHook
+      summary: Permanently disable a platform Webhook endpoint
+      description: Maintainer or Owner. Revocation is idempotent. A revoked endpoint no longer accepts deliveries.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildHookResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/build-hooks/{provider}/{build_hook_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/WebhookProvider"
+      - $ref: "#/components/parameters/BuildHookID"
+    post:
+      tags: [Build Hooks]
+      operationId: receiveBuildWebhook
+      summary: Verify a Git provider delivery and enqueue a Build
+      description: Public callback authenticated by the provider-specific HMAC signature over the raw request body. GitHub, GitLab Standard Webhooks, Gitea, and Forgejo are supported. GitLab timestamps must be canonical Unix seconds within five minutes of Server time. A unique delivery identifier provides replay safety, but even a known delivery is authenticated before replay lookup. Duplicate, unsupported, deleted-ref, and disallowed-ref deliveries return the recorded 202 result without enqueueing another Build. Unique signed deliveries share a per-Hook fixed-window limit (120 per minute by default); authenticated replays do not consume another slot.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Provider-native payload, limited to the configured maximum body size (1 MiB by default).
+              additionalProperties: true
+      responses:
+        "202":
+          $ref: "#/components/responses/WebhookAccepted"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "413":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "429":
+          $ref: "#/components/responses/WebhookRateLimited"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/builds:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Builds]
+      operationId: listBuilds
+      summary: List immutable Builds in a project
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Builds]
+      operationId: triggerManualBuild
+      summary: Resolve an allowed Git ref and enqueue an immutable Build
+      description: Developer, Maintainer, or Owner. Resolves the exact allowed branch or tag to a full commit SHA using the configured repository connection, snapshots the current Build Configuration, and creates one queued Build. Reusing the same project-scoped idempotency key with identical intent returns the original Build; different intent returns 409. No checkout or customer code execution occurs in the API Server.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TriggerManualBuildRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/BuildAccepted"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/builds/{build_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/BuildID"
+    get:
+      tags: [Builds]
+      operationId: getBuild
+      summary: Get an immutable Build and its configuration snapshot
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/builds/{build_id}/logs:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/BuildID"
+    get:
+      tags: [Builds]
+      operationId: readBuildLogs
+      summary: Incrementally read bounded, redacted Build logs
+      description: Viewer or higher. The opaque cursor is bound to this Build and can be reused to poll for later chunks. Logs are retained for seven days by default, capped at 10 MiB per Build, and explicitly report truncation. Responses are never cached.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            maxLength: 1024
+          description: Opaque cursor returned by the previous response. Omit for the beginning.
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        "200":
+          $ref: "#/components/responses/BuildLogPageResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/builds/{build_id}:cancel:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/BuildID"
+    post:
+      tags: [Builds]
+      operationId: cancelBuild
+      summary: Request cooperative cancellation of a running or queued Build
+      description: Developer, Maintainer, or Owner. The immutable Build enters canceling; a Build Worker must fence and clean its generation before recording canceled. Repeating the request is idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          $ref: "#/components/responses/BuildAccepted"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/builds/{build_id}:retry:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/BuildID"
+    post:
+      tags: [Builds]
+      operationId: retryBuild
+      summary: Create a new queued Build from a failed Build snapshot
+      description: Developer, Maintainer, or Owner. Retry never changes the source Build. It copies the fixed revision and non-secret configuration snapshot into a new Build linked by source_build_id. Only failed Builds can be retried.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetryBuildRequest"
+      responses:
+        "202":
+          $ref: "#/components/responses/BuildAccepted"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      summary: List immutable OCI artifacts in a project
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ArtifactList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      summary: Get a digest-pinned OCI artifact
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ArtifactResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}:create-release:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    post:
+      tags: [Artifacts, Releases]
+      operationId: createReleaseFromArtifact
+      summary: Idempotently create an immutable Release from an Artifact
+      description: The Artifact already fixes the Registry repository, OCI SHA-256 digest, target platform, source Build, and credential reference. A retry returns the same Release link and never rebuilds or pushes the image again.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateArtifactReleaseRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ArtifactResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
           $ref: "#/components/responses/APIError"
         "503":
           $ref: "#/components/responses/APIError"
@@ -1243,6 +2433,11 @@ components:
       type: http
       scheme: bearer
       bearerFormat: opaque
+      description: Opaque user session token sent explicitly in Authorization. The REST API does not authenticate user cookies.
+    buildTriggerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: OwnDock-Build-Trigger
   parameters:
     RequestID:
       name: X-Request-ID
@@ -1268,6 +2463,41 @@ components:
       schema:
         type: string
         minLength: 1
+    BuildConfigurationID:
+      name: build_configuration_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    BuildID:
+      name: build_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    BuildTriggerID:
+      name: build_trigger_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    BuildHookID:
+      name: build_hook_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    WebhookProvider:
+      name: provider
+      in: path
+      required: true
+      schema:
+        type: string
+        enum: [github, gitlab, gitea, forgejo]
     ApplicationID:
       name: application_id
       in: path
@@ -1291,6 +2521,13 @@ components:
         minLength: 1
     ManagedHostID:
       name: managed_host_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    TerminalSessionID:
+      name: terminal_session_id
       in: path
       required: true
       schema:
@@ -1402,7 +2639,7 @@ components:
           schema:
             $ref: "#/components/schemas/IdentityUser"
     SessionList:
-      description: Active sessions owned by the current user.
+      description: Active session metadata. No bearer token or token hash is returned and the response is no-store.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
@@ -1417,6 +2654,100 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/SessionSummary"
+    AdminSessionRevocation:
+      description: Number of sessions removed by an Owner emergency action. The response is no-store.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [revoked_sessions]
+            properties:
+              revoked_sessions:
+                type: integer
+                format: int64
+                minimum: 0
+    IngressRateLimited:
+      description: The trusted client source or installation-wide Product API limit was exceeded.
+      headers:
+        Retry-After:
+          description: Seconds until this fixed admission window can accept another request.
+          schema:
+            type: integer
+            minimum: 1
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    IngressProtectionUnavailable:
+      description: Shared ingress admission could not be safely evaluated; the request failed closed.
+      headers:
+        Retry-After:
+          description: Minimum seconds before retrying.
+          schema:
+            type: integer
+            minimum: 1
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    OrganizationUserList:
+      description: Safe Organization user metadata. Password and token material is excluded.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/OrganizationUser"
+    UserInvitationList:
+      description: Safe Organization invitation metadata without token or token hash.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/UserInvitation"
+    UserInvitationCreated:
+      description: Invitation metadata and its one-time plaintext token. The response must not be cached.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UserInvitationCredential"
+    UserInvitationResponse:
+      description: Safe invitation metadata without token or token hash.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/UserInvitation"
     ProjectList:
       description: Project collection.
       headers:
@@ -1442,6 +2773,31 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Project"
+    ProjectMemberList:
+      description: Explicit Project membership collection. Organization Owner is implicit and omitted.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProjectMember"
+    ProjectMemberResponse:
+      description: Versioned explicit Project membership.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProjectMember"
     ProductApplicationList:
       description: Project application collection.
       headers:
@@ -1492,6 +2848,31 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Release"
+    ArtifactList:
+      description: Project OCI Artifact collection ordered newest first.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Artifact"
+    ArtifactResponse:
+      description: Immutable OCI Artifact and its Release coordination state.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Artifact"
     RegistryCredentialList:
       description: Registry credential metadata collection.
       headers:
@@ -1576,6 +2957,188 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/SourceRepository"
+    BuildConfigurationList:
+      description: Application build configuration collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BuildConfiguration"
+    BuildConfigurationCreated:
+      description: Build configuration created. No Build has started.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildConfiguration"
+    BuildConfigurationResponse:
+      description: Versioned build configuration.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildConfiguration"
+    BuildList:
+      description: Project Build collection ordered newest first.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Build"
+    BuildAccepted:
+      description: A queued Build created or replayed by project-scoped idempotency key. Worker execution has not necessarily started.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Build"
+    BuildResponse:
+      description: Immutable Build identity, resolved source revision, and configuration snapshot.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Build"
+    BuildLogPageResponse:
+      description: Incremental redacted Build log page. Cache-Control is no-store.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildLogPage"
+    BuildTriggerList:
+      description: Safe Build Trigger metadata. No token material is included.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BuildTrigger"
+    BuildTriggerResponse:
+      description: Safe Build Trigger metadata.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildTrigger"
+    BuildTriggerCredentialCreated:
+      description: Newly created Build Trigger and its one-time plaintext token. The response must not be cached.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildTriggerCredential"
+    BuildTriggerRateLimited:
+      description: The authenticated Build Trigger exhausted its shared admission window.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Retry-After:
+          description: Whole seconds until this Trigger can retry.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    WebhookRateLimited:
+      description: This Build Hook exhausted its shared admission window for unique signed deliveries.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Retry-After:
+          description: Whole seconds until this Hook can accept another unique delivery.
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    BuildHookList:
+      description: Safe Build Hook metadata. No secret or secret reference is included.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BuildHook"
+    BuildHookCreated:
+      description: Newly created Build Hook safe metadata.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildHook"
+    BuildHookResponse:
+      description: Safe Build Hook metadata.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/BuildHook"
+    WebhookAccepted:
+      description: Delivery accepted, ignored, or replayed after signature verification.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/WebhookReceipt"
     ManagedHostList:
       description: Organization managed host collection.
       headers:
@@ -1838,15 +3401,227 @@ components:
           schema:
             $ref: "#/components/schemas/Deployment"
     APIError:
-      description: Request failed.
+      description: Request failed. The safe message is localized from Accept-Language; clients branch on the stable error.code, never on message text.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Content-Language:
+          description: Language of the safe error message selected from Accept-Language. Unsupported or missing languages fall back to en-US.
+          schema:
+            type: string
+            enum: [en-US, zh-CN]
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    TerminalPolicyResponse:
+      description: Effective Terminal access policy. A version of 0 means the restrictive default has not been persisted.
       headers:
         X-Request-ID:
           $ref: "#/components/headers/RequestID"
       content:
         application/json:
           schema:
-            $ref: "#/components/schemas/ErrorResponse"
+            $ref: "#/components/schemas/TerminalPolicy"
+    TerminalSessionResponse:
+      description: Safe Terminal Session metadata with no connection ticket or terminal payload.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TerminalSession"
+    TerminalCredentialResponse:
+      description: Terminal Session created. The one-time ticket is carried only by Set-Cookie and the response is no-store.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Set-Cookie:
+          description: Path-scoped __Secure-owndock_terminal_ticket with Secure, HttpOnly, and SameSite=Strict.
+          schema:
+            type: string
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TerminalCredential"
   schemas:
+    TerminalPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled, allowed_roles, environment_stages, runtime_target_ids, managed_host_ids, idle_timeout, maximum_duration, maximum_per_user, maximum_per_target, revocation_grace_period, expected_version]
+      properties:
+        enabled:
+          type: boolean
+        allowed_roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+            enum: [owner, maintainer, developer]
+        environment_stages:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [development, staging, production]
+        runtime_target_ids:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+        managed_host_ids:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 1
+            maxLength: 160
+        idle_timeout:
+          type: string
+          example: 10m
+        maximum_duration:
+          type: string
+          example: 1h
+        maximum_per_user:
+          type: integer
+          minimum: 1
+          maximum: 10
+        maximum_per_target:
+          type: integer
+          minimum: 1
+          maximum: 50
+        revocation_grace_period:
+          type: string
+          example: 30s
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 0
+    TerminalPolicy:
+      type: object
+      additionalProperties: false
+      required: [id, scope, organization_id, enabled, allowed_roles, environment_stages, runtime_target_ids, managed_host_ids, idle_timeout, maximum_duration, maximum_per_user, maximum_per_target, revocation_grace_period, version]
+      properties:
+        id:
+          type: string
+        scope:
+          type: string
+          enum: [project, organization]
+        organization_id:
+          type: string
+        project_id:
+          type: string
+        enabled:
+          type: boolean
+        allowed_roles:
+          type: array
+          items:
+            type: string
+            enum: [owner, maintainer, developer]
+        environment_stages:
+          type: array
+          items:
+            type: string
+            enum: [development, staging, production]
+        runtime_target_ids:
+          type: array
+          items:
+            type: string
+        managed_host_ids:
+          type: array
+          items:
+            type: string
+        idle_timeout:
+          type: string
+        maximum_duration:
+          type: string
+        maximum_per_user:
+          type: integer
+        maximum_per_target:
+          type: integer
+        revocation_grace_period:
+          type: string
+        version:
+          type: integer
+          format: int64
+          minimum: 0
+    CreateContainerTerminalSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [deployment_id]
+      properties:
+        deployment_id:
+          type: string
+          minLength: 1
+          maxLength: 160
+    TerminalCredential:
+      type: object
+      additionalProperties: false
+      required: [session, ticket_expires_at]
+      properties:
+        session:
+          $ref: "#/components/schemas/TerminalSession"
+        ticket_expires_at:
+          type: string
+          format: date-time
+    TerminalSession:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, kind, actor_id, managed_host_id, status, created_at, last_activity_at, idle_deadline, maximum_deadline, version]
+      properties:
+        id:
+          type: string
+        organization_id:
+          type: string
+        project_id:
+          type: string
+        kind:
+          type: string
+          enum: [container, host]
+        actor_id:
+          type: string
+        managed_host_id:
+          type: string
+        runtime_target_id:
+          type: string
+        deployment_id:
+          type: string
+        status:
+          type: string
+          enum: [pending, open, closing, closed, failed, expired]
+        created_at:
+          type: string
+          format: date-time
+        connected_at:
+          type: string
+          format: date-time
+        last_activity_at:
+          type: string
+          format: date-time
+        ended_at:
+          type: string
+          format: date-time
+        idle_deadline:
+          type: string
+          format: date-time
+        maximum_deadline:
+          type: string
+          format: date-time
+        close_reason:
+          type: string
+          enum: [user_requested, administrator_terminated, permission_revoked, idle_timeout, maximum_duration, target_unavailable, connection_failed, server_shutdown]
+        safe_error_code:
+          type: string
+        version:
+          type: integer
+          format: int64
+          minimum: 1
     HealthResponse:
       type: object
       additionalProperties: false
@@ -1900,6 +3675,28 @@ components:
           type: string
           minLength: 1
           maxLength: 128
+    CreateUserInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+    AcceptUserInvitationRequest:
+      type: object
+      additionalProperties: false
+      required: [token, password]
+      properties:
+        token:
+          type: string
+          minLength: 32
+          maxLength: 256
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
     Credentials:
       type: object
       additionalProperties: false
@@ -1935,6 +3732,103 @@ components:
         role:
           type: string
           enum: [owner, maintainer, developer, viewer]
+    OrganizationUser:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, email, role, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        role:
+          type: string
+          enum: [owner, viewer]
+          description: Organization-level role. Project roles are assigned separately; invited local users start as Viewer.
+        created_at:
+          type: string
+          format: date-time
+    UserInvitation:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, email, status, version, invited_by, created_at, expires_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+          enum: [active, accepted, revoked]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        invited_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        accepted_by:
+          type: string
+          minLength: 1
+        accepted_at:
+          type: string
+          format: date-time
+        revoked_by:
+          type: string
+          minLength: 1
+        revoked_at:
+          type: string
+          format: date-time
+    UserInvitationCredential:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, email, status, version, invited_by, created_at, expires_at, token]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        status:
+          type: string
+          enum: [active]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        invited_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        expires_at:
+          type: string
+          format: date-time
+        token:
+          type: string
+          minLength: 32
+          maxLength: 256
     SessionSummary:
       type: object
       additionalProperties: false
@@ -1984,6 +3878,63 @@ components:
         created_at:
           type: string
           format: date-time
+    CreateProjectMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [email, role]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        role:
+          $ref: "#/components/schemas/ProjectMemberRole"
+    UpdateProjectMemberRequest:
+      type: object
+      additionalProperties: false
+      required: [role, expected_version]
+      properties:
+        role:
+          $ref: "#/components/schemas/ProjectMemberRole"
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+    ProjectMemberRole:
+      type: string
+      enum: [maintainer, developer, viewer]
+    ProjectMember:
+      type: object
+      additionalProperties: false
+      required: [project_id, user_id, email, role, version, created_by, created_at, updated_by, updated_at]
+      properties:
+        project_id:
+          type: string
+          minLength: 1
+        user_id:
+          type: string
+          minLength: 1
+        email:
+          type: string
+          format: email
+        role:
+          $ref: "#/components/schemas/ProjectMemberRole"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_by:
+          type: string
+          minLength: 1
+        updated_at:
+          type: string
+          format: date-time
     ProductApplication:
       type: object
       additionalProperties: false
@@ -2025,6 +3976,10 @@ components:
         registry_credential_id:
           type: string
           minLength: 1
+        source_artifact_id:
+          type: string
+          minLength: 1
+          description: Present only for Releases created from an OwnDock Build Artifact.
         runtime_spec:
           $ref: "#/components/schemas/ReleaseRuntimeSpec"
         created_by:
@@ -2152,6 +4107,501 @@ components:
         updated_at:
           type: string
           format: date-time
+    BuildResources:
+      type: object
+      additionalProperties: false
+      required: [cpu_milli, memory_bytes, disk_bytes]
+      properties:
+        cpu_milli:
+          type: integer
+          format: int64
+          minimum: 100
+          maximum: 16000
+        memory_bytes:
+          type: integer
+          format: int64
+          minimum: 134217728
+          maximum: 34359738368
+        disk_bytes:
+          type: integer
+          format: int64
+          minimum: 1073741824
+          maximum: 214748364800
+    AutomaticDeploymentRule:
+      type: object
+      additionalProperties: false
+      required: [environment_id, runtime_target_id]
+      properties:
+        environment_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Must identify a development Environment in the same Project.
+        runtime_target_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Must identify a Runtime Target in the same Project; it must be ready when the Deployment is created.
+    BuildConfiguration:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, name, source_repository_id, dockerfile_path, context_path, allowed_refs, registry_credential_id, image_repository, target_platform, resources, timeout_seconds, max_concurrency, auto_create_release, release_runtime_spec, automatic_deployments, version, created_by, updated_by, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        source_repository_id:
+          type: string
+          minLength: 1
+        dockerfile_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical repository-relative Dockerfile path within context_path.
+        context_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical repository-relative directory, or a single dot for repository root.
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 12
+            maxLength: 266
+            pattern: '^refs/(heads|tags)/\S+$'
+        registry_credential_id:
+          type: string
+          minLength: 1
+        image_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: Canonical OCI repository without a tag or digest.
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+        resources:
+          $ref: "#/components/schemas/BuildResources"
+        timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 7200
+        max_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 4
+        auto_create_release:
+          type: boolean
+        release_runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+        automatic_deployments:
+          type: array
+          maxItems: 8
+          description: Explicit development-only targets. An empty array keeps every Environment manual. Maintainer permission is required to change this list.
+          items:
+            $ref: "#/components/schemas/AutomaticDeploymentRule"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+          readOnly: true
+        created_by:
+          type: string
+          minLength: 1
+        updated_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SourceRevision:
+      type: object
+      additionalProperties: false
+      required: [source_repository_id, ref, commit_sha]
+      properties:
+        source_repository_id:
+          type: string
+          minLength: 1
+        ref:
+          type: string
+          minLength: 12
+          maxLength: 266
+          pattern: '^refs/(heads|tags)/\S+$'
+        commit_sha:
+          type: string
+          pattern: "^[0-9a-f]{40}$"
+          description: Full resolved Git commit SHA. Short SHAs are never persisted as Build identity.
+    BuildConfigurationSnapshot:
+      type: object
+      additionalProperties: false
+      required: [configuration_id, configuration_version, source_repository_id, dockerfile_path, context_path, allowed_refs, registry_credential_id, image_repository, target_platform, resources, timeout_seconds, max_concurrency, auto_create_release, release_runtime_spec, automatic_deployments]
+      properties:
+        configuration_id:
+          type: string
+          minLength: 1
+        configuration_version:
+          type: integer
+          format: int64
+          minimum: 1
+        source_repository_id:
+          type: string
+          minLength: 1
+        dockerfile_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        context_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 12
+            maxLength: 266
+            pattern: '^refs/(heads|tags)/\S+$'
+        registry_credential_id:
+          type: string
+          minLength: 1
+        image_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+        resources:
+          $ref: "#/components/schemas/BuildResources"
+        timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 7200
+        max_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 4
+        auto_create_release:
+          type: boolean
+        release_runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+        automatic_deployments:
+          type: array
+          maxItems: 8
+          items:
+            $ref: "#/components/schemas/AutomaticDeploymentRule"
+    Build:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, build_configuration_id, revision, configuration_snapshot, trigger_source, idempotency_key, status, version, triggered_by, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        build_configuration_id:
+          type: string
+          minLength: 1
+        revision:
+          $ref: "#/components/schemas/SourceRevision"
+        configuration_snapshot:
+          $ref: "#/components/schemas/BuildConfigurationSnapshot"
+        trigger_source:
+          type: string
+          enum: [manual, trigger_api, webhook, retry]
+        trigger_id:
+          type: string
+          minLength: 1
+          description: Present only for automation-triggered Builds.
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+        status:
+          type: string
+          enum: [queued, checking_out, building, pushing, succeeded, failed, canceling, canceled]
+        failure_category:
+          type: string
+          enum: [repository_authentication, repository_unreachable, revision_not_found, checkout_failed, build_configuration, build_resource_limit, build_failed, registry_authentication, registry_push, canceled, unknown]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        triggered_by:
+          type: string
+          minLength: 1
+        source_build_id:
+          type: string
+          minLength: 1
+          description: Present on retry Builds and points to the immutable failed Build.
+        artifact_id:
+          type: string
+          minLength: 1
+          description: Present after the fenced Build result has been published as an Artifact.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+    BuildLogPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor, truncated, complete]
+      properties:
+        items:
+          type: array
+          maxItems: 200
+          items:
+            $ref: "#/components/schemas/BuildLogEntry"
+        next_cursor:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Opaque Build-bound cursor for the next poll, including when no new entries are currently available.
+        truncated:
+          type: boolean
+          description: True when the per-Build byte cap discarded later log output.
+        complete:
+          type: boolean
+          description: True when the Build is terminal; no new worker log entries are expected.
+        expires_at:
+          type: string
+          format: date-time
+          description: Approximate TTL deadline. MongoDB TTL cleanup is asynchronous.
+    BuildLogEntry:
+      type: object
+      additionalProperties: false
+      required: [sequence, stage, message, created_at]
+      properties:
+        sequence:
+          type: integer
+          format: int64
+          minimum: 1
+        stage:
+          type: string
+          enum: [system, checkout, build, push, release]
+        message:
+          type: string
+          minLength: 1
+          maxLength: 16384
+        created_at:
+          type: string
+          format: date-time
+    Artifact:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, build_id, build_configuration_id, registry_credential_id, image_repository, image_digest, target_platform, release_runtime_spec, automatic_deployments, release_status, version, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        build_id:
+          type: string
+          minLength: 1
+        build_configuration_id:
+          type: string
+          minLength: 1
+        registry_credential_id:
+          type: string
+          minLength: 1
+        image_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+        image_digest:
+          type: string
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+        release_runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+        automatic_deployments:
+          type: array
+          maxItems: 8
+          description: Immutable development delivery targets copied from the Build Configuration snapshot.
+          items:
+            $ref: "#/components/schemas/AutomaticDeploymentRule"
+        release_status:
+          type: string
+          enum: [available, release_pending, release_created]
+        release_id:
+          type: string
+          minLength: 1
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        released_at:
+          type: string
+          format: date-time
+    BuildTrigger:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, build_configuration_id, name, allowed_refs, status, version, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        build_configuration_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^refs/(heads|tags)/\S+$'
+        status:
+          type: string
+          enum: [active, revoked]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        revoked_by:
+          type: string
+          minLength: 1
+        revoked_at:
+          type: string
+          format: date-time
+    BuildTriggerCredential:
+      type: object
+      additionalProperties: false
+      required: [build_trigger, token]
+      properties:
+        build_trigger:
+          $ref: "#/components/schemas/BuildTrigger"
+        token:
+          type: string
+          minLength: 40
+          description: One-time plaintext credential returned only by the create operation.
+    BuildHook:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, application_id, build_configuration_id, name, provider, allowed_refs, secret_configured, status, version, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        application_id:
+          type: string
+          minLength: 1
+        build_configuration_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        provider:
+          type: string
+          enum: [github, gitlab, gitea, forgejo]
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^refs/(heads|tags)/\S+$'
+        secret_configured:
+          type: boolean
+        status:
+          type: string
+          enum: [active, revoked]
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        revoked_by:
+          type: string
+          minLength: 1
+        revoked_at:
+          type: string
+          format: date-time
+    WebhookReceipt:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [accepted, ignored]
+        build_id:
+          type: string
+          minLength: 1
     ReleaseRuntimeSpec:
       type: object
       additionalProperties: false
@@ -2463,6 +4913,12 @@ components:
           minLength: 1
         runtime_spec:
           $ref: "#/components/schemas/ReleaseRuntimeSpec"
+    CreateArtifactReleaseRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
     CreateRegistryCredentialRequest:
       type: object
       additionalProperties: false
@@ -2527,6 +4983,231 @@ components:
         ssh_host_key_fingerprint:
           type: string
           pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
+    CreateBuildConfigurationRequest:
+      type: object
+      additionalProperties: false
+      required: [name, source_repository_id, registry_credential_id, image_repository]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        source_repository_id:
+          type: string
+          minLength: 1
+        dockerfile_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+          default: Dockerfile
+        context_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+          default: "."
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          description: Defaults to the Source Repository default branch when omitted.
+          items:
+            type: string
+            minLength: 12
+            maxLength: 266
+            pattern: '^refs/(heads|tags)/\S+$'
+        registry_credential_id:
+          type: string
+          minLength: 1
+        image_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+          default: linux/amd64
+        resources:
+          $ref: "#/components/schemas/BuildResources"
+        timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 7200
+          default: 1800
+        max_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 4
+          default: 1
+        auto_create_release:
+          type: boolean
+          default: true
+        release_runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+        automatic_deployments:
+          type: array
+          maxItems: 8
+          description: Explicit automatic deployment targets. Only development Environments are accepted, auto_create_release must remain true, and changing the list requires Maintainer permission.
+          items:
+            $ref: "#/components/schemas/AutomaticDeploymentRule"
+    PatchBuildConfigurationRequest:
+      type: object
+      additionalProperties: false
+      minProperties: 2
+      required: [expected_version]
+      properties:
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        source_repository_id:
+          type: string
+          minLength: 1
+        dockerfile_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        context_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            minLength: 12
+            maxLength: 266
+            pattern: '^refs/(heads|tags)/\S+$'
+        registry_credential_id:
+          type: string
+          minLength: 1
+        image_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+        resources:
+          $ref: "#/components/schemas/BuildResources"
+        timeout_seconds:
+          type: integer
+          format: int64
+          minimum: 60
+          maximum: 7200
+        max_concurrency:
+          type: integer
+          minimum: 1
+          maximum: 4
+        auto_create_release:
+          type: boolean
+        release_runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+        automatic_deployments:
+          type: array
+          maxItems: 8
+          description: Replaces the complete automatic deployment target list. An empty array disables automatic deployment.
+          items:
+            $ref: "#/components/schemas/AutomaticDeploymentRule"
+    TriggerManualBuildRequest:
+      type: object
+      additionalProperties: false
+      required: [application_id, build_configuration_id, ref, idempotency_key]
+      properties:
+        application_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        build_configuration_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        ref:
+          type: string
+          minLength: 12
+          maxLength: 266
+          pattern: '^refs/(heads|tags)/\S+$'
+          description: Exact ref that must appear in the Build Configuration allowed_refs list.
+        expected_commit_sha:
+          type: string
+          pattern: "^[0-9a-fA-F]{40}$"
+          description: Optional full commit expected at ref. A mismatch returns 409 instead of silently building another revision.
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    RetryBuildRequest:
+      type: object
+      additionalProperties: false
+      required: [idempotency_key]
+      properties:
+        idempotency_key:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    CreateBuildTriggerRequest:
+      type: object
+      additionalProperties: false
+      required: [name, allowed_refs]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^refs/(heads|tags)/\S+$'
+    CreateBuildHookRequest:
+      type: object
+      additionalProperties: false
+      required: [name, provider, allowed_refs, secret_ref]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        provider:
+          type: string
+          enum: [github, gitlab, gitea, forgejo]
+        allowed_refs:
+          type: array
+          minItems: 1
+          maxItems: 32
+          uniqueItems: true
+          items:
+            type: string
+            pattern: '^refs/(heads|tags)/\S+$'
+        secret_ref:
+          type: string
+          pattern: '^secret://[a-z0-9][a-z0-9-]{0,62}$'
+    TriggerExternalBuildRequest:
+      type: object
+      additionalProperties: false
+      required: [commit_sha, ref]
+      properties:
+        commit_sha:
+          type: string
+          pattern: "^[0-9a-fA-F]{40}$"
+        ref:
+          type: string
+          minLength: 12
+          maxLength: 266
+          pattern: '^refs/(heads|tags)/\S+$'
     CreateManagedHostRequest:
       oneOf:
         - $ref: "#/components/schemas/CreateAgentManagedHostRequest"
@@ -2670,7 +5351,7 @@ components:
     ProjectDeployment:
       type: object
       additionalProperties: false
-      required: [id, project_id, release_id, application_id, environment_id, runtime_target_id, operation, status, created_at]
+      required: [id, project_id, release_id, application_id, environment_id, runtime_target_id, operation, trigger_source, status, created_at]
       properties:
         id:
           type: string
@@ -2693,6 +5374,21 @@ components:
         operation:
           type: string
           enum: [deploy, retry, rollback]
+        trigger_source:
+          type: string
+          enum: [manual, automatic]
+        source_artifact_id:
+          type: string
+          minLength: 1
+          description: Present for an automatic Deployment created from an Artifact.
+        source_build_id:
+          type: string
+          minLength: 1
+          description: Present for an automatic Deployment created from a Build.
+        build_configuration_id:
+          type: string
+          minLength: 1
+          description: Build Configuration snapshot source for an automatic Deployment.
         source_deployment_id:
           type: string
           minLength: 1

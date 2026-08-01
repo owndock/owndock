@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/owndock/owndock/internal/platform/localization"
 )
 
 const RequestIDHeader = "X-Request-ID"
@@ -30,8 +32,11 @@ func JSON(w http.ResponseWriter, status int, value any) {
 // ErrorRequest writes an API error using request-scoped metadata.
 func ErrorRequest(w http.ResponseWriter, r *http.Request, status int, code string) {
 	requestID := RequestIDFromContext(r.Context())
+	locale, message := localization.APIError(r.Context(), code)
+	w.Header().Set("Content-Language", string(locale))
+	w.Header().Add("Vary", "Accept-Language")
 	JSON(w, status, ErrorResponse{Error: ErrorDetail{
-		Code: code, Message: errorMessage(code), RequestID: requestID,
+		Code: code, Message: message, RequestID: requestID,
 	}})
 }
 
@@ -43,8 +48,11 @@ func RequestID(newID func() (string, error)) func(http.Handler) http.Handler {
 				var err error
 				requestID, err = newID()
 				if err != nil {
+					locale, message := localization.APIError(r.Context(), "internal_error")
+					w.Header().Set("Content-Language", string(locale))
+					w.Header().Add("Vary", "Accept-Language")
 					JSON(w, http.StatusInternalServerError, ErrorResponse{Error: ErrorDetail{
-						Code: "internal_error", Message: errorMessage("internal_error"),
+						Code: "internal_error", Message: message,
 					}})
 					return
 				}
@@ -73,40 +81,4 @@ func validRequestID(value string) bool {
 		return false
 	}
 	return true
-}
-
-func errorMessage(code string) string {
-	messages := map[string]string{
-		"already_bootstrapped":                    "identity has already been initialized",
-		"application_not_found":                   "application was not found",
-		"bootstrap_token_invalid":                 "bootstrap token is invalid",
-		"environment_not_found":                   "environment was not found",
-		"forbidden":                               "permission is denied",
-		"internal_error":                          "an internal error occurred",
-		"invalid_deployment":                      "deployment input is invalid",
-		"invalid_environment":                     "environment input is invalid",
-		"invalid_json":                            "request body must be valid JSON",
-		"invalid_identity":                        "identity input is invalid",
-		"invalid_image":                           "image must be pinned by a sha256 digest",
-		"invalid_limit":                           "limit must be between 1 and 100",
-		"invalid_name":                            "application name is required",
-		"invalid_registry_credential":             "registry credential input is invalid",
-		"invalid_repository_credential":           "repository credential input is invalid",
-		"invalid_source_repository":               "source repository input is invalid",
-		"invalid_runtime_spec":                    "release runtime specification is invalid",
-		"invalid_runtime_target":                  "runtime target input is invalid",
-		"invalid_runtime_inventory_query":         "runtime inventory query is invalid",
-		"method_not_allowed":                      "method is not allowed",
-		"name_conflict":                           "resource name already exists",
-		"not_found":                               "resource was not found",
-		"release_conflict":                        "an equivalent release already exists",
-		"repository_credential_protocol_mismatch": "repository credential does not match repository protocol",
-		"runtime_inventory_scope_not_found":       "runtime inventory scope was not found",
-		"unauthenticated":                         "authentication is required",
-		"unsupported_media_type":                  "content type must be application/json",
-	}
-	if message, ok := messages[code]; ok {
-		return message
-	}
-	return "request failed"
 }

@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -28,6 +32,12 @@ type EventRunner struct {
 	retryInterval  time.Duration
 	candidateLimit int
 	now            func() time.Time
+	tracer         trace.Tracer
+}
+
+func (r *EventRunner) WithObservability(tracer trace.Tracer) *EventRunner {
+	r.tracer = tracer
+	return r
 }
 
 func NewEventRunner(
@@ -61,7 +71,7 @@ func NewEventRunner(
 
 // RunOnce holds one fenced event-subscription lease and advances its cursor
 // only after every event hint in the bounded batch has been safely recorded.
-func (r *EventRunner) RunOnce(ctx context.Context) error {
+func (r *EventRunner) RunOnce(ctx context.Context) (runErr error) {
 	targets, err := r.repository.ListEventTargets(
 		ctx,
 		r.candidateLimit,
@@ -84,6 +94,22 @@ func (r *EventRunner) RunOnce(ctx context.Context) error {
 		}
 		if !acquired {
 			continue
+		}
+		var span trace.Span
+		if r.tracer != nil {
+			ctx, span = r.tracer.Start(ctx, "runtime_inventory.events.collect", trace.WithAttributes(
+				attribute.String("runtime_inventory.project_id", target.ProjectID),
+				attribute.String("runtime_inventory.managed_host_id", target.ManagedHostID),
+				attribute.String("runtime_inventory.runtime_target_id", target.RuntimeTargetID),
+				attribute.String("runtime_inventory.connection_mode", string(target.Connection.Mode)),
+				attribute.String("runtime_inventory.lease_token", strconv.FormatUint(lease.Token, 10)),
+			))
+			defer func() {
+				if runErr != nil {
+					span.SetStatus(codes.Error, "Runtime Inventory event collection failed")
+				}
+				span.End()
+			}()
 		}
 		cursorAt, collectErr := r.collector.CollectEvents(
 			ctx,

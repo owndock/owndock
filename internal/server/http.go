@@ -16,6 +16,7 @@ import (
 	"github.com/owndock/owndock/internal/platform/health"
 	"github.com/owndock/owndock/internal/platform/httpx"
 	"github.com/owndock/owndock/internal/platform/id"
+	"github.com/owndock/owndock/internal/platform/localization"
 	"github.com/owndock/owndock/internal/platform/observability"
 )
 
@@ -37,6 +38,31 @@ type ProductAPI struct {
 	protectedManagedHost http.Handler
 	protectedInventory   http.Handler
 	protectedBuild       http.Handler
+	protectedTerminal    http.Handler
+	build                http.Handler
+	ingress              http.Handler
+}
+
+func (p *ProductAPI) WithTerminal(
+	terminalAPI http.Handler,
+	authenticate func(http.Handler) http.Handler,
+) error {
+	if terminalAPI == nil || authenticate == nil {
+		return fmt.Errorf("product terminal API is required")
+	}
+	p.protectedTerminal = authenticate(terminalAPI)
+	return nil
+}
+
+func (p *ProductAPI) WithIngressProtection(protect func(http.Handler) http.Handler) error {
+	if protect == nil {
+		return fmt.Errorf("product ingress protection is required")
+	}
+	p.ingress = protect(http.HandlerFunc(p.route))
+	if p.ingress == nil {
+		return fmt.Errorf("product ingress protection returned no handler")
+	}
+	return nil
 }
 
 func (p *ProductAPI) WithBuild(
@@ -47,6 +73,7 @@ func (p *ProductAPI) WithBuild(
 		return fmt.Errorf("product build API is required")
 	}
 	p.protectedBuild = authenticate(buildAPI)
+	p.build = buildAPI
 	return nil
 }
 
@@ -107,7 +134,19 @@ func NewProductAPIWithDeployment(
 }
 
 func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if p.ingress != nil {
+		p.ingress.ServeHTTP(w, r)
+		return
+	}
+	p.route(w, r)
+}
+
+func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case p.build != nil && isExternalBuildHookPath(r.URL.Path):
+		p.build.ServeHTTP(w, r)
+	case p.build != nil && isExternalBuildTriggerPath(r.URL.Path):
+		p.build.ServeHTTP(w, r)
 	case strings.HasPrefix(r.URL.Path, apiV1+"/auth/"):
 		p.identity.ServeHTTP(w, r)
 	case p.agentEnrollment != nil &&
@@ -115,6 +154,8 @@ func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		p.agentEnrollment.ServeHTTP(w, r)
 	case p.protectedInventory != nil && isRuntimeInventoryPath(r.URL.Path):
 		p.protectedInventory.ServeHTTP(w, r)
+	case p.protectedTerminal != nil && isTerminalPath(r.URL.Path):
+		p.protectedTerminal.ServeHTTP(w, r)
 	case p.protectedBuild != nil && isProjectBuildPath(r.URL.Path):
 		p.protectedBuild.ServeHTTP(w, r)
 	case p.protectedDeployment != nil && isProjectDeploymentPath(r.URL.Path):
@@ -132,6 +173,41 @@ func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func isTerminalPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if len(segments) == 3 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "terminal-policy" {
+		return true
+	}
+	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "terminal-sessions" && segments[3] != "" {
+		return true
+	}
+	if len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "projects" && segments[3] != "" && segments[4] == "terminal-policy" {
+		return true
+	}
+	if len(segments) == 6 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "terminal-sessions" && segments[5] == "container" {
+		return true
+	}
+	return len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "managed-hosts" && segments[3] != "" && segments[4] == "terminal-sessions"
+}
+
+func isExternalBuildHookPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "build-hooks" && segments[3] != "" && segments[4] != ""
+}
+
+func isExternalBuildTriggerPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "build-triggers" && segments[3] != ""
+}
+
 func isRuntimeInventoryPath(path string) bool {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	return len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
@@ -147,9 +223,16 @@ func isProjectDeploymentPath(path string) bool {
 
 func isProjectBuildPath(path string) bool {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
-	return len(segments) >= 5 && segments[0] == "api" && segments[1] == "v1" &&
-		segments[2] == "projects" && segments[3] != "" &&
-		(segments[4] == "repository-credentials" || segments[4] == "source-repositories")
+	if len(segments) < 5 || segments[0] != "api" || segments[1] != "v1" ||
+		segments[2] != "projects" || segments[3] == "" {
+		return false
+	}
+	if segments[4] == "repository-credentials" || segments[4] == "source-repositories" ||
+		segments[4] == "builds" || segments[4] == "artifacts" {
+		return true
+	}
+	return len(segments) >= 7 && segments[4] == "applications" && segments[5] != "" &&
+		segments[6] == "build-configurations"
 }
 
 func NewHTTPServer(
@@ -171,7 +254,10 @@ func NewHTTPServer(
 		kratoshttp.Address(cfg.Address),
 		kratoshttp.Timeout(timeout),
 		kratoshttp.Filter(
+			httpx.BrowserHeaders(),
+			localization.HTTP(),
 			httpx.RequestID(id.New),
+			httpx.BrowserCORS(cfg.CORSAllowedOrigins),
 			tracing.Instrument,
 			httpx.AccessLog(logger),
 			httpx.Recovery(logger),
@@ -191,8 +277,12 @@ func NewHTTPServer(
 		srv.Handle(apiV1+"/projects", productAPI)
 		srv.HandlePrefix(apiV1+"/projects/", productAPI)
 		srv.Handle(apiV1+"/audit-events", productAPI)
+		srv.HandlePrefix(apiV1+"/build-triggers/", productAPI)
+		srv.HandlePrefix(apiV1+"/build-hooks/", productAPI)
 		srv.Handle(apiV1+"/managed-hosts", productAPI)
 		srv.HandlePrefix(apiV1+"/managed-hosts/", productAPI)
+		srv.Handle(apiV1+"/terminal-policy", productAPI)
+		srv.HandlePrefix(apiV1+"/terminal-sessions/", productAPI)
 	}
 	if samples != nil {
 		if samples.Application == nil || samples.Environment == nil || samples.Deployment == nil {

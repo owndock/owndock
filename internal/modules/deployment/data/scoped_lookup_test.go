@@ -12,6 +12,15 @@ type lookupProbe struct {
 	projectIDs []string
 	missing    string
 	notReady   string
+	stage      string
+}
+
+func (p *lookupProbe) EnvironmentStage(_ context.Context, projectID, _ string) (string, error) {
+	p.projectIDs = append(p.projectIDs, projectID)
+	if p.stage == "" {
+		return "development", nil
+	}
+	return p.stage, nil
 }
 
 func (p *lookupProbe) result(projectID, resource string) (bool, error) {
@@ -66,6 +75,23 @@ func TestFormalReferenceLookupPropagatesProjectScope(t *testing.T) {
 	for _, projectID := range probe.projectIDs {
 		if projectID != "project-1" {
 			t.Fatalf("project scope = %q", projectID)
+		}
+	}
+}
+
+func TestFormalReferenceLookupAllowsAutomaticDeploymentOnlyInDevelopment(t *testing.T) {
+	development := NewFormalReferenceLookup(&lookupProbe{stage: "development"})
+	if err := development.ValidateAutomatic(
+		t.Context(), "project-1", "release-1", "app-1", "env-1", "target-1",
+	); err != nil {
+		t.Fatalf("development automatic deployment error = %v", err)
+	}
+	for _, stage := range []string{"staging", "production"} {
+		lookup := NewFormalReferenceLookup(&lookupProbe{stage: stage})
+		if err := lookup.ValidateAutomatic(
+			t.Context(), "project-1", "release-1", "app-1", "env-1", "target-1",
+		); !errors.Is(err, biz.ErrAutomaticDeploymentNotAllowed) {
+			t.Fatalf("%s automatic deployment error = %v", stage, err)
 		}
 	}
 }

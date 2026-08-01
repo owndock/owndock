@@ -2,6 +2,7 @@ package biz_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -13,12 +14,19 @@ import (
 	"github.com/owndock/owndock/internal/shared/transaction"
 )
 
-type referenceProbe struct{ calls int }
+type referenceProbe struct {
+	calls        int
+	automaticErr error
+}
 
 func (p *referenceProbe) ValidateProject(context.Context, string, string) error { return nil }
 func (p *referenceProbe) Validate(context.Context, string, string, string, string, string) error {
 	p.calls++
 	return nil
+}
+func (p *referenceProbe) ValidateAutomatic(context.Context, string, string, string, string, string) error {
+	p.calls++
+	return p.automaticErr
 }
 
 type auditProbe struct{ events []sharedaudit.Event }
@@ -87,6 +95,48 @@ func TestCreateFormalRequiresDeploymentPermission(t *testing.T) {
 		t.Context(), viewer, "project", "release", "app", "env", "target", "request", "trace",
 	); err != security.ErrForbidden {
 		t.Fatalf("CreateFormal() error = %v", err)
+	}
+}
+
+func TestCreateAutomaticIsDevelopmentOnlyAuditedAndIdempotent(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	references := &referenceProbe{}
+	audits := &auditProbe{}
+	sequence := 0
+	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+		sequence++
+		return fmt.Sprintf("automatic-%d", sequence), nil
+	}, func() time.Time { return time.Unix(100, 0) }).
+		WithAutomaticReferences(references).
+		WithFormalSecurity(transaction.Passthrough{}, audits)
+	input := biz.AutomaticDeploymentInput{
+		OrganizationID: "organization-1", ProjectID: "project-1",
+		ReleaseID: "release-1", ApplicationID: "application-1",
+		EnvironmentID: "development-1", RuntimeTargetID: "target-1",
+		ArtifactID: "artifact-1", BuildID: "build-1", BuildConfigurationID: "configuration-1",
+	}
+	first, err := useCase.CreateAutomatic(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := useCase.CreateAutomatic(t.Context(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replayed.ID != first.ID || first.TriggerSource != biz.TriggerSourceAutomatic ||
+		first.SourceArtifactID != input.ArtifactID || first.SourceBuildID != input.BuildID ||
+		first.BuildConfigurationID != input.BuildConfigurationID {
+		t.Fatalf("automatic/replayed Deployment = %+v/%+v", first, replayed)
+	}
+	if references.calls != 1 || len(audits.events) != 1 ||
+		audits.events[0].Action != biz.AuditActionAutomatic ||
+		audits.events[0].ActorID != "system:auto-deployment" {
+		t.Fatalf("automatic references/audit = %d/%+v", references.calls, audits.events)
+	}
+	references.automaticErr = biz.ErrAutomaticDeploymentNotAllowed
+	input.ArtifactID = "artifact-2"
+	if _, err := useCase.CreateAutomatic(t.Context(), input); !errors.Is(err, biz.ErrAutomaticDeploymentNotAllowed) {
+		t.Fatalf("production automatic Deployment error = %v", err)
 	}
 }
 

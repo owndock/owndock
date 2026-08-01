@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -26,6 +30,12 @@ type Runner struct {
 	retryInterval  time.Duration
 	candidateLimit int
 	now            func() time.Time
+	tracer         trace.Tracer
+}
+
+func (r *Runner) WithObservability(tracer trace.Tracer) *Runner {
+	r.tracer = tracer
+	return r
 }
 
 func NewRunner(
@@ -59,7 +69,7 @@ func NewRunner(
 
 // RunOnce claims at most one target. A Mongo lease is the cross-process
 // non-overlap guard; callers can safely run several Runner loops concurrently.
-func (r *Runner) RunOnce(ctx context.Context) error {
+func (r *Runner) RunOnce(ctx context.Context) (runErr error) {
 	targets, err := r.repository.ListReadyTargets(
 		ctx,
 		r.candidateLimit,
@@ -82,6 +92,22 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		}
 		if !acquired {
 			continue
+		}
+		var span trace.Span
+		if r.tracer != nil {
+			ctx, span = r.tracer.Start(ctx, "runtime_inventory.collect", trace.WithAttributes(
+				attribute.String("runtime_inventory.project_id", target.ProjectID),
+				attribute.String("runtime_inventory.managed_host_id", target.ManagedHostID),
+				attribute.String("runtime_inventory.runtime_target_id", target.RuntimeTargetID),
+				attribute.String("runtime_inventory.connection_mode", string(target.Connection.Mode)),
+				attribute.String("runtime_inventory.lease_token", strconv.FormatUint(lease.Token, 10)),
+			))
+			defer func() {
+				if runErr != nil {
+					span.SetStatus(codes.Error, "Runtime Inventory collection failed")
+				}
+				span.End()
+			}()
 		}
 		collectErr := r.collector.Collect(ctx, target)
 		finishedAt := r.now().UTC()

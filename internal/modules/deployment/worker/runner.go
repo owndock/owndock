@@ -10,6 +10,9 @@ import (
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/transaction"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -34,6 +37,7 @@ type Runner struct {
 	transaction   transaction.Manager
 	audit         sharedaudit.Recorder
 	newID         biz.IDGenerator
+	tracer        trace.Tracer
 }
 
 func NewRunner(
@@ -78,7 +82,12 @@ func (r *Runner) WithAudit(
 	return r
 }
 
-func (r *Runner) RunOnce(ctx context.Context) error {
+func (r *Runner) WithObservability(tracer trace.Tracer) *Runner {
+	r.tracer = tracer
+	return r
+}
+
+func (r *Runner) RunOnce(ctx context.Context) (runErr error) {
 	now := r.now().UTC()
 	item, claimed, err := r.repo.ClaimNext(ctx, biz.Claim{
 		WorkerID:  r.workerID,
@@ -87,6 +96,22 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	})
 	if err != nil || !claimed {
 		return err
+	}
+	var span trace.Span
+	if r.tracer != nil {
+		ctx, span = r.tracer.Start(ctx, "deployment.execute", trace.WithAttributes(
+			attribute.String("deployment.id", item.ID),
+			attribute.String("deployment.project_id", item.ProjectID),
+			attribute.String("deployment.operation", string(item.Operation)),
+			attribute.String("deployment.status", string(item.Status)),
+			attribute.Int64("deployment.lease_generation", int64(item.Lease.Generation)),
+		))
+		defer func() {
+			if runErr != nil {
+				span.SetStatus(codes.Error, "Deployment operation failed")
+			}
+			span.End()
+		}()
 	}
 
 	if item.Status == biz.StatusQueued {

@@ -45,6 +45,12 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 	if len(segments) >= 5 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects" {
 		projectID := segments[3]
 		switch {
+		case len(segments) == 5 && segments[4] == "members":
+			s.projectMembers(w, r, principal, projectID)
+			return
+		case len(segments) == 6 && segments[4] == "members":
+			s.projectMember(w, r, principal, projectID, segments[5])
+			return
 		case len(segments) == 5 && segments[4] == "applications":
 			s.applications(w, r, principal, projectID)
 			return
@@ -66,6 +72,83 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+}
+
+func (s *HTTP) projectMembers(
+	w http.ResponseWriter, r *http.Request, principal security.Principal, projectID string,
+) {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.useCase.ListProjectMembers(r.Context(), principal, projectID)
+		if writeError(w, r, err) {
+			return
+		}
+		responses := make([]projectMemberResponse, len(items))
+		for i, item := range items {
+			responses[i] = projectMemberResponseFromDomain(item)
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
+	case http.MethodPost:
+		var request struct {
+			Email string        `json:"email"`
+			Role  security.Role `json:"role"`
+		}
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		item, err := s.useCase.CreateProjectMember(
+			r.Context(), principal, projectID, request.Email, request.Role,
+			httpx.RequestIDFromContext(r.Context()),
+		)
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusCreated, projectMemberResponseFromDomain(item))
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
+func (s *HTTP) projectMember(
+	w http.ResponseWriter, r *http.Request, principal security.Principal, projectID, userID string,
+) {
+	switch r.Method {
+	case http.MethodPatch:
+		var request struct {
+			Role            security.Role `json:"role"`
+			ExpectedVersion uint64        `json:"expected_version"`
+		}
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		if request.ExpectedVersion == 0 {
+			httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_expected_version")
+			return
+		}
+		item, err := s.useCase.UpdateProjectMember(
+			r.Context(), principal, projectID, userID, request.Role,
+			request.ExpectedVersion, httpx.RequestIDFromContext(r.Context()),
+		)
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusOK, projectMemberResponseFromDomain(item))
+	case http.MethodDelete:
+		expectedVersion, err := strconv.ParseUint(r.URL.Query().Get("expected_version"), 10, 64)
+		if err != nil || expectedVersion == 0 {
+			httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_expected_version")
+			return
+		}
+		if err := s.useCase.DeleteProjectMember(
+			r.Context(), principal, projectID, userID, expectedVersion,
+			httpx.RequestIDFromContext(r.Context()),
+		); writeError(w, r, err) {
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
 }
 
 func (s *HTTP) probeRuntimeTarget(
@@ -366,6 +449,12 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusConflict, "name_conflict")
 	case errors.Is(err, biz.ErrDuplicateRelease):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "release_conflict")
+	case errors.Is(err, biz.ErrProjectMemberConflict):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "project_member_conflict")
+	case errors.Is(err, biz.ErrCannotModifySelf):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "cannot_modify_self")
+	case errors.Is(err, biz.ErrInvalidProjectMember):
+		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_project_member")
 	case errors.Is(err, biz.ErrInvalidImage):
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_image")
 	case errors.Is(err, biz.ErrInvalidRuntimeTarget):
@@ -396,6 +485,27 @@ type projectResponse struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
+type projectMemberResponse struct {
+	ProjectID string        `json:"project_id"`
+	UserID    string        `json:"user_id"`
+	Email     string        `json:"email"`
+	Role      security.Role `json:"role"`
+	Version   uint64        `json:"version"`
+	CreatedBy string        `json:"created_by"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedBy string        `json:"updated_by"`
+	UpdatedAt time.Time     `json:"updated_at"`
+}
+
+func projectMemberResponseFromDomain(item biz.ProjectMember) projectMemberResponse {
+	return projectMemberResponse{
+		ProjectID: item.ProjectID, UserID: item.UserID, Email: item.Email,
+		Role: item.Role, Version: item.Version,
+		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+		UpdatedBy: item.UpdatedBy, UpdatedAt: item.UpdatedAt,
+	}
+}
+
 func projectResponseFromDomain(item biz.Project) projectResponse {
 	return projectResponse{
 		ID: item.ID, OrganizationID: item.OrganizationID, Name: item.Name,
@@ -424,6 +534,7 @@ type releaseResponse struct {
 	ApplicationID        string             `json:"application_id"`
 	ImageDigest          string             `json:"image_digest"`
 	RegistryCredentialID string             `json:"registry_credential_id,omitempty"`
+	SourceArtifactID     string             `json:"source_artifact_id,omitempty"`
 	RuntimeSpec          runtimeSpecPayload `json:"runtime_spec"`
 	CreatedBy            string             `json:"created_by"`
 	CreatedAt            time.Time          `json:"created_at"`
@@ -433,8 +544,9 @@ func releaseResponseFromDomain(item biz.Release) releaseResponse {
 	return releaseResponse{
 		ID: item.ID, ProjectID: item.ProjectID, ApplicationID: item.ApplicationID,
 		ImageDigest: item.ImageDigest, RegistryCredentialID: item.RegistryCredentialID,
-		RuntimeSpec: runtimeSpecPayloadFromDomain(item.RuntimeSpec),
-		CreatedBy:   item.CreatedBy, CreatedAt: item.CreatedAt,
+		SourceArtifactID: item.SourceArtifactID,
+		RuntimeSpec:      runtimeSpecPayloadFromDomain(item.RuntimeSpec),
+		CreatedBy:        item.CreatedBy, CreatedAt: item.CreatedAt,
 	}
 }
 

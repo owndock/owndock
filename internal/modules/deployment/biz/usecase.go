@@ -2,6 +2,8 @@ package biz
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -15,14 +17,15 @@ type IDGenerator func() (string, error)
 type Clock func() time.Time
 
 type UseCase struct {
-	repo             Repository
-	applications     ApplicationLookup
-	environments     EnvironmentLookup
-	formalReferences FormalReferenceLookup
-	transaction      transaction.Manager
-	audit            sharedaudit.Recorder
-	newID            IDGenerator
-	now              Clock
+	repo                Repository
+	applications        ApplicationLookup
+	environments        EnvironmentLookup
+	formalReferences    FormalReferenceLookup
+	automaticReferences AutomaticReferenceLookup
+	transaction         transaction.Manager
+	audit               sharedaudit.Recorder
+	newID               IDGenerator
+	now                 Clock
 }
 
 type FormalReferenceLookup interface {
@@ -30,8 +33,18 @@ type FormalReferenceLookup interface {
 	Validate(context.Context, string, string, string, string, string) error
 }
 
+type AutomaticReferenceLookup interface {
+	ValidateProject(context.Context, string, string) error
+	ValidateAutomatic(context.Context, string, string, string, string, string) error
+}
+
 func (u *UseCase) WithFormalReferences(references FormalReferenceLookup) *UseCase {
 	u.formalReferences = references
+	return u
+}
+
+func (u *UseCase) WithAutomaticReferences(references AutomaticReferenceLookup) *UseCase {
+	u.automaticReferences = references
 	return u
 }
 
@@ -124,6 +137,56 @@ func (u *UseCase) CreateFormal(
 		return Deployment{}, err
 	}
 	return u.persistFormal(ctx, principal, item, requestID, AuditActionCreate)
+}
+
+// CreateAutomatic creates the same immutable Deployment used by the public
+// API, but only through the narrow Artifact delivery boundary. It cannot
+// bypass Project ownership, development-only policy, target readiness,
+// idempotency, or transactional audit.
+func (u *UseCase) CreateAutomatic(
+	ctx context.Context,
+	input AutomaticDeploymentInput,
+) (Deployment, error) {
+	if u.automaticReferences == nil {
+		return Deployment{}, ErrAutomaticDeploymentUnavailable
+	}
+	if u.transaction == nil || u.audit == nil {
+		return Deployment{}, ErrFormalSecurity
+	}
+	id, err := u.newID()
+	if err != nil {
+		return Deployment{}, err
+	}
+	hash := sha256.Sum256([]byte(
+		input.ArtifactID + "\x00" + input.EnvironmentID + "\x00" + input.RuntimeTargetID,
+	))
+	item, err := NewAutomatic(id, "auto:"+hex.EncodeToString(hash[:]), input, u.now())
+	if err != nil {
+		return Deployment{}, err
+	}
+	if err := u.automaticReferences.ValidateProject(
+		ctx, item.OrganizationID, item.ProjectID,
+	); err != nil {
+		return Deployment{}, err
+	}
+	if existing, replayed, err := u.findReplay(ctx, item); err != nil {
+		return Deployment{}, err
+	} else if replayed {
+		return existing, nil
+	}
+	if err := u.automaticReferences.ValidateAutomatic(
+		ctx, item.ProjectID, item.ReleaseID, item.ApplicationID,
+		item.EnvironmentID, item.RuntimeTargetID,
+	); err != nil {
+		return Deployment{}, err
+	}
+	principal := security.Principal{
+		UserID: "system:auto-deployment", OrganizationID: item.OrganizationID,
+		SessionID: "system:auto-deployment", Role: security.RoleMaintainer,
+	}
+	return u.persistFormal(
+		ctx, principal, item, "artifact:"+item.SourceArtifactID, AuditActionAutomatic,
+	)
 }
 
 func (u *UseCase) ListFormal(
@@ -299,7 +362,10 @@ func (u *UseCase) findReplay(ctx context.Context, intent Deployment) (Deployment
 	}
 	if existing.ReleaseID != intent.ReleaseID || existing.ApplicationID != intent.ApplicationID ||
 		existing.EnvironmentID != intent.EnvironmentID || existing.RuntimeTargetID != intent.RuntimeTargetID ||
-		existing.Operation != intent.Operation || existing.SourceDeploymentID != intent.SourceDeploymentID {
+		existing.Operation != intent.Operation || existing.TriggerSource != intent.TriggerSource ||
+		existing.SourceArtifactID != intent.SourceArtifactID || existing.SourceBuildID != intent.SourceBuildID ||
+		existing.BuildConfigurationID != intent.BuildConfigurationID ||
+		existing.SourceDeploymentID != intent.SourceDeploymentID {
 		return Deployment{}, false, ErrIdempotencyMismatch
 	}
 	return existing, true, nil

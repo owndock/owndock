@@ -57,3 +57,24 @@ func TestEnvironmentRepositorySecretResolverHonorsCanceledContext(t *testing.T) 
 		t.Fatalf("error = %v", err)
 	}
 }
+
+func TestEnvironmentRepositorySecretResolverResolvesRegistryPassword(t *testing.T) {
+	resolver := &EnvironmentRepositorySecretResolver{lookup: func(name string) (string, bool) {
+		if name == "OWNDOCK_REGISTRY_PRODUCTION_PASSWORD" {
+			return "registry-secret", true
+		}
+		return "", false
+	}}
+	password, err := resolver.ResolveRegistryPassword(t.Context(), biz.BuildRegistryCredential{
+		ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
+		Username: "builder", PasswordRef: "secret://production",
+	})
+	if err != nil || string(password) != "registry-secret" {
+		t.Fatalf("ResolveRegistryPassword() = %q, %v", password, err)
+	}
+	if _, err := resolver.ResolveRegistryPassword(t.Context(), biz.BuildRegistryCredential{
+		Server: "registry.example.com", Username: "builder", PasswordRef: "secret://missing",
+	}); err != biz.ErrRegistrySecretUnavailable {
+		t.Fatalf("missing password error = %v", err)
+	}
+}

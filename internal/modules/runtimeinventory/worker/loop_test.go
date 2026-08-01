@@ -28,6 +28,7 @@ func TestLoopReportsCollectionFailureAndStops(t *testing.T) {
 		t.Fatal(err)
 	}
 	failures := make(chan error, 1)
+	observed := make(chan string, 1)
 	loop, err := NewLoop(
 		runner,
 		time.Millisecond,
@@ -38,6 +39,15 @@ func TestLoopReportsCollectionFailureAndStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loop.WithObservability(func(result string, _ time.Duration) {
+		if result != "error" {
+			return
+		}
+		select {
+		case observed <- result:
+		default:
+		}
+	})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- loop.Run(ctx) }()
@@ -48,6 +58,14 @@ func TestLoopReportsCollectionFailureAndStops(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("loop did not report collection failure")
+	}
+	select {
+	case result := <-observed:
+		if result != "error" {
+			t.Fatalf("observed result = %q", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("loop did not report its telemetry result")
 	}
 	cancel()
 	select {

@@ -24,18 +24,26 @@ type Credentials struct {
 }
 
 type UseCase struct {
-	repository  Repository
-	transaction transaction.Manager
-	audit       sharedaudit.Recorder
-	passwords   PasswordHasher
-	tokens      SessionTokens
-	newID       IDGenerator
-	now         Clock
-	sessionTTL  time.Duration
-	loginGuard  LoginGuard
-	loginLimit  int
-	loginWindow time.Duration
-	maxSessions int
+	repository    Repository
+	transaction   transaction.Manager
+	audit         sharedaudit.Recorder
+	passwords     PasswordHasher
+	tokens        SessionTokens
+	newID         IDGenerator
+	now           Clock
+	sessionTTL    time.Duration
+	loginGuard    LoginGuard
+	loginLimit    int
+	loginWindow   time.Duration
+	maxSessions   int
+	invitationTTL time.Duration
+	invitations   UserInvitationRepository
+	adminSessions AdministrativeSessionRepository
+}
+
+func (u *UseCase) WithAdministrativeSessions(repository AdministrativeSessionRepository) *UseCase {
+	u.adminSessions = repository
+	return u
 }
 
 func NewUseCase(
@@ -68,6 +76,203 @@ func (u *UseCase) WithLoginProtection(
 func (u *UseCase) WithSessionPolicy(maximumActive int) *UseCase {
 	u.maxSessions = maximumActive
 	return u
+}
+
+func (u *UseCase) WithInvitationPolicy(repository UserInvitationRepository, ttl time.Duration) *UseCase {
+	u.invitations, u.invitationTTL = repository, ttl
+	return u
+}
+
+func (u *UseCase) ListUsers(ctx context.Context, principal security.Principal) ([]User, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return nil, err
+	}
+	if u.invitations == nil {
+		return nil, ErrInvalidInvitation
+	}
+	items, err := u.invitations.ListUsers(ctx, principal.OrganizationID)
+	for index := range items {
+		items[index].PasswordHash = ""
+	}
+	return items, err
+}
+
+func (u *UseCase) CreateInvitation(ctx context.Context, principal security.Principal,
+	email, requestID string) (InvitationCredential, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return InvitationCredential{}, err
+	}
+	if u.invitationTTL < time.Minute || u.invitationTTL > 7*24*time.Hour {
+		return InvitationCredential{}, ErrInvalidInvitation
+	}
+	if u.invitations == nil {
+		return InvitationCredential{}, ErrInvalidInvitation
+	}
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	if _, err := u.repository.FindUserByEmail(ctx, normalized); err == nil {
+		return InvitationCredential{}, ErrUserAlreadyExists
+	} else if !errors.Is(err, ErrNotFound) {
+		return InvitationCredential{}, err
+	}
+	raw, tokenHash, err := u.tokens.New()
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	id, err := u.newID()
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	now := u.now().UTC()
+	item, err := NewInvitation(id, principal.OrganizationID, normalized, tokenHash,
+		principal.UserID, now, u.invitationTTL)
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		created, createErr := u.invitations.CreateInvitation(transactionContext, item)
+		if createErr != nil {
+			return createErr
+		}
+		item = created
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+			Action: "identity.invitation_create", ResourceType: "user_invitation", ResourceID: item.ID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+	if err != nil {
+		return InvitationCredential{}, err
+	}
+	return InvitationCredential{Invitation: item.Safe(), Token: raw}, nil
+}
+
+func (u *UseCase) ListInvitations(ctx context.Context, principal security.Principal) ([]Invitation, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return nil, err
+	}
+	if u.invitations == nil {
+		return nil, ErrInvalidInvitation
+	}
+	items, err := u.invitations.ListInvitations(ctx, principal.OrganizationID)
+	for index := range items {
+		items[index] = items[index].Safe()
+	}
+	return items, err
+}
+
+func (u *UseCase) RevokeInvitation(ctx context.Context, principal security.Principal,
+	invitationID, requestID string) (Invitation, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return Invitation{}, err
+	}
+	if u.invitations == nil {
+		return Invitation{}, ErrInvalidInvitation
+	}
+	item, err := u.invitations.GetInvitation(ctx, principal.OrganizationID, strings.TrimSpace(invitationID))
+	if err != nil {
+		return Invitation{}, err
+	}
+	if item.Status == InvitationStatusRevoked {
+		return item.Safe(), nil
+	}
+	now := u.now().UTC()
+	updated, err := item.Revoke(principal.UserID, now)
+	if err != nil {
+		return Invitation{}, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return Invitation{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		var updateErr error
+		updated, updateErr = u.invitations.RevokeInvitation(transactionContext, updated, item.Version)
+		if updateErr != nil {
+			return updateErr
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+			Action: "identity.invitation_revoke", ResourceType: "user_invitation", ResourceID: item.ID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+	return updated.Safe(), err
+}
+
+func (u *UseCase) AcceptInvitation(ctx context.Context, rawToken, password,
+	requestID string) (Credentials, error) {
+	rawToken = strings.TrimSpace(rawToken)
+	if len(rawToken) < 32 || len(rawToken) > 256 || u.maxSessions < 1 || u.invitations == nil {
+		return Credentials{}, ErrInvalidInvitation
+	}
+	if err := ValidatePassword(password); err != nil {
+		return Credentials{}, err
+	}
+	now := u.now().UTC()
+	invitation, err := u.invitations.FindInvitationByTokenHash(ctx, u.tokens.Hash(rawToken), now)
+	if err != nil {
+		if errors.Is(err, ErrInvalidInvitation) || errors.Is(err, ErrNotFound) {
+			return Credentials{}, ErrInvalidInvitation
+		}
+		return Credentials{}, err
+	}
+	passwordHash, err := u.passwords.Hash(password)
+	if err != nil {
+		return Credentials{}, err
+	}
+	userID, err := u.newID()
+	if err != nil {
+		return Credentials{}, err
+	}
+	sessionID, err := u.newID()
+	if err != nil {
+		return Credentials{}, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return Credentials{}, err
+	}
+	user, err := NewInvitedUser(userID, invitation.OrganizationID, invitation.Email,
+		passwordHash, now)
+	if err != nil {
+		return Credentials{}, ErrInvalidInvitation
+	}
+	rawSession, sessionHash, err := u.tokens.New()
+	if err != nil {
+		return Credentials{}, err
+	}
+	session := Session{ID: sessionID, UserID: user.ID, TokenHash: sessionHash,
+		CreatedAt: now, ExpiresAt: now.Add(u.sessionTTL)}
+	accepted, err := invitation.Accept(user.ID, now)
+	if err != nil {
+		return Credentials{}, ErrInvalidInvitation
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if acceptErr := u.invitations.AcceptInvitation(transactionContext, accepted,
+			invitation.Version, user, session); acceptErr != nil {
+			return acceptErr
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: invitation.OrganizationID, ActorID: user.ID,
+			Action: "identity.invitation_accept", ResourceType: "user", ResourceID: user.ID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidInvitation) || errors.Is(err, ErrUserAlreadyExists) {
+			return Credentials{}, ErrInvalidInvitation
+		}
+		return Credentials{}, err
+	}
+	user.PasswordHash = ""
+	return Credentials{AccessToken: rawSession, ExpiresAt: session.ExpiresAt, User: user}, nil
 }
 
 func (u *UseCase) Bootstrap(ctx context.Context, organizationName, email, password, requestID string) (Credentials, error) {
@@ -224,11 +429,112 @@ func (u *UseCase) ListSessions(
 	if !principal.Valid() {
 		return nil, security.ErrUnauthenticated
 	}
-	return u.repository.ListSessions(
+	items, err := u.repository.ListSessions(
 		ctx,
 		principal.UserID,
 		u.now().UTC(),
 	)
+	for index := range items {
+		items[index].TokenHash = ""
+	}
+	return items, err
+}
+
+func (u *UseCase) ListUserSessions(
+	ctx context.Context, principal security.Principal, userID string,
+) ([]Session, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return nil, err
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" || len(userID) > 128 || u.adminSessions == nil {
+		return nil, ErrNotFound
+	}
+	if _, err := u.adminSessions.GetOrganizationUser(
+		ctx, principal.OrganizationID, userID,
+	); err != nil {
+		return nil, err
+	}
+	items, err := u.adminSessions.ListSessions(ctx, userID, u.now().UTC())
+	for index := range items {
+		items[index].TokenHash = ""
+	}
+	return items, err
+}
+
+func (u *UseCase) RevokeUserSession(
+	ctx context.Context, principal security.Principal, userID, sessionID, requestID string,
+) error {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return err
+	}
+	userID, sessionID = strings.TrimSpace(userID), strings.TrimSpace(sessionID)
+	if userID == "" || sessionID == "" || len(userID) > 128 || len(sessionID) > 128 ||
+		u.adminSessions == nil {
+		return ErrNotFound
+	}
+	if userID == principal.UserID && sessionID == principal.SessionID {
+		return ErrCannotRevokeCurrent
+	}
+	if _, err := u.adminSessions.GetOrganizationUser(
+		ctx, principal.OrganizationID, userID,
+	); err != nil {
+		return err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return err
+	}
+	now := u.now().UTC()
+	return u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if deleteErr := u.adminSessions.DeleteSession(transactionContext, sessionID, userID); deleteErr != nil {
+			return deleteErr
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+			Action: "identity.session_revoke_admin", ResourceType: "session", ResourceID: sessionID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+}
+
+func (u *UseCase) RevokeAllUserSessions(
+	ctx context.Context, principal security.Principal, userID, requestID string,
+) (int64, error) {
+	if err := principal.Require(security.PermissionOrganizationManage); err != nil {
+		return 0, err
+	}
+	userID = strings.TrimSpace(userID)
+	if userID == "" || len(userID) > 128 || u.adminSessions == nil {
+		return 0, ErrNotFound
+	}
+	if userID == principal.UserID {
+		return 0, ErrCannotRevokeCurrent
+	}
+	if _, err := u.adminSessions.GetOrganizationUser(
+		ctx, principal.OrganizationID, userID,
+	); err != nil {
+		return 0, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return 0, err
+	}
+	now := u.now().UTC()
+	var revoked int64
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		var deleteErr error
+		revoked, deleteErr = u.adminSessions.DeleteUserSessions(transactionContext, userID)
+		if deleteErr != nil {
+			return deleteErr
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+			Action: "identity.session_revoke_all_admin", ResourceType: "user", ResourceID: userID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+	return revoked, err
 }
 
 func (u *UseCase) RevokeSession(

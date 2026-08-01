@@ -1,0 +1,82 @@
+services:
+  buildkit:
+    image: moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
+    command:
+      - --config=/etc/buildkit/buildkitd.toml
+      - --addr=tcp://0.0.0.0:1234
+      - --tlscacert=/etc/owndock/buildkit/ca.pem
+      - --tlscert=/etc/owndock/buildkit/server-cert.pem
+      - --tlskey=/etc/owndock/buildkit/server-key.pem
+    ports:
+      # mTLS is mandatory; bind only on loopback for local diagnostics.
+      - 127.0.0.1:${OWNDOCK_BUILDKIT_PORT:-1234}:1234
+    volumes:
+      - ./buildkitd.toml:/etc/buildkit/buildkitd.toml:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/ca.pem:/etc/owndock/buildkit/ca.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/server-cert.pem:/etc/owndock/buildkit/server-cert.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/server-key.pem:/etc/owndock/buildkit/server-key.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-cert.pem:/etc/owndock/buildkit/worker-cert.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-key.pem:/etc/owndock/buildkit/worker-key.pem:ro
+      # Put this volume on a filesystem with an enforced quota. BuildKit GC is
+      # a reclamation policy, not a hard protection against a sudden disk fill.
+      - buildkit-cache:/home/user/.local/share/buildkit
+    tmpfs:
+      - /run/user/1000:rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000
+      - /home/user/.local/tmp:rw,noexec,nosuid,nodev,size=536870912,mode=0700,uid=1000,gid=1000
+    security_opt:
+      # Required by rootless BuildKit for user namespaces and per-step /proc.
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+    pids_limit: 1024
+    mem_limit: 4g
+    cpus: 2.0
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - buildctl
+        - --addr=tcp://127.0.0.1:1234
+        - --tlsservername=buildkit
+        - --tlscacert=/etc/owndock/buildkit/ca.pem
+        - --tlscert=/etc/owndock/buildkit/worker-cert.pem
+        - --tlskey=/etc/owndock/buildkit/worker-key.pem
+        - debug
+        - workers
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  build-worker:
+    # The release pipeline must provide an immutable image@sha256 reference.
+    image: ${OWNDOCK_BUILD_WORKER_IMAGE:?set an immutable image digest}
+    command: ["-conf", "/etc/owndock/config.yaml"]
+    environment:
+      OWNDOCK_MONGODB_URI: ${OWNDOCK_MONGODB_URI:?required}
+    volumes:
+      - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/ca.pem:/etc/owndock/buildkit/ca.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-cert.pem:/etc/owndock/buildkit/worker-cert.pem:ro
+      - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-key.pem:/etc/owndock/buildkit/worker-key.pem:ro
+      # This host path must be a dedicated filesystem/project quota no larger
+      # than runtime.build_worker.max_workspace_bytes.
+      - ${OWNDOCK_BUILD_WORKSPACE:?required}:/var/lib/owndock/builds
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=268435456,mode=0700,uid=1000,gid=1000
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: 2.0
+    restart: unless-stopped
+    stop_grace_period: 30s
+    depends_on:
+      buildkit:
+        condition: service_healthy
+
+volumes:
+  buildkit-cache:

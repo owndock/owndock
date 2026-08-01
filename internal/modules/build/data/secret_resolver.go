@@ -53,3 +53,26 @@ func (r *EnvironmentRepositorySecretResolver) ResolveRepositoryCredential(
 	}
 	return []byte(value), nil
 }
+
+func (r *EnvironmentRepositorySecretResolver) ResolveRegistryPassword(
+	ctx context.Context,
+	credential biz.BuildRegistryCredential,
+) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	alias, err := secretref.Alias(credential.PasswordRef)
+	if err != nil || strings.TrimSpace(credential.Server) == "" ||
+		strings.TrimSpace(credential.Username) == "" {
+		return nil, biz.ErrRegistrySecretUnavailable
+	}
+	name := "OWNDOCK_REGISTRY_" +
+		strings.ToUpper(strings.ReplaceAll(alias, "-", "_")) + "_PASSWORD"
+	value, found := r.lookup(name)
+	if !found || value == "" {
+		return nil, biz.ErrRegistrySecretUnavailable
+	}
+	return []byte(value), nil
+}
+
+var _ biz.RegistrySecretResolver = (*EnvironmentRepositorySecretResolver)(nil)

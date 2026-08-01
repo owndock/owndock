@@ -3,6 +3,9 @@ server:
     address: 0.0.0.0:8000
     timeout: 30s
     shutdown_timeout: 15s
+    # Exact origins for the separate browser frontend. Empty means same-origin
+    # only. Use HTTPS outside loopback development; wildcards are rejected.
+    cors_allowed_origins: []
   agent:
     enabled: false
     address: 0.0.0.0:8443
@@ -29,8 +32,33 @@ development:
 product:
   enabled: false
   source_probe_timeout: 10s
+  build_trigger_rate_limit: 60
+  build_trigger_rate_window: 1m
+  build_webhook_rate_limit: 120
+  build_webhook_rate_window: 1m
+  build_webhook_max_body_bytes: 1048576
 
 runtime:
+  build_worker:
+    enabled: false
+    poll_interval: 2s
+    lease_duration: 30s
+    operation_timeout: 2h15m
+    checkout_timeout: 10m
+    workspace_root: /var/lib/owndock/builds
+    max_workspace_bytes: 5368709120
+    max_workspace_files: 250000
+    git_executable: git
+    git_version: 2.55.0
+    buildkit_endpoint: unix:///run/owndock-buildkit/buildkitd.sock
+    buildkit_server_name: ""
+    buildkit_ca_cert_file: ""
+    buildkit_client_cert_file: ""
+    buildkit_client_key_file: ""
+    log_retention: 168h
+    log_max_bytes: 10485760
+    log_chunk_bytes: 16384
+    metrics_address: 127.0.0.1:9091
   deployment_worker:
     enabled: false
     poll_interval: 2s
@@ -55,8 +83,15 @@ security:
   bootstrap_token_env: OWNDOCK_BOOTSTRAP_TOKEN
   session_ttl: 24h
   max_active_sessions: 10
+  user_invitation_ttl: 24h
   login_attempt_limit: 5
   login_attempt_window: 15m
+  ingress_source_limit: 600
+  ingress_global_limit: 6000
+  ingress_rate_window: 1m
+  # X-Forwarded-For is trusted only when the direct peer matches one of these
+  # canonical CIDRs. Keep empty for direct deployments.
+  trusted_proxy_cidrs: []
   agent_pki:
     enabled: false
     ca_certificate_env: OWNDOCK_AGENT_CA_CERT_PEM

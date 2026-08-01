@@ -8,7 +8,9 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口和 Source Repository/Repository Credential 安全登记与只读连接探测；Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、显式 presence current 投影、四类 Docker 安全 mapper/List Reader、有界分块、Agent 内存拉取协议、snapshot window 与持续 Event transport、Docker 时间游标恢复、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的默认关闭周期 Worker，以及 Project/Host 权限分离的公开审计查询 API；重连、快照丢失、背压、多 Runner 竞争与 Event/Finish 调度竞态已覆盖，真实双主机、容量与事件洪峰系统验收仍未完成。Git checkout 和构建链尚未实现，后续必须进入隔离 Build Worker/BuildKit 边界；默认关闭的顶层工程样例不属于正式产品实现。
+产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、认证 Registry push、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 自建 CA/代理兼容矩阵尚未实现；默认关闭的顶层工程样例不属于正式产品实现。
+
+平台触发链也已落地：通用 Trigger Token 适合任意能发出 HTTPS 请求的自动化系统；GitHub、GitLab、Gitea 和 Forgejo 使用独立 Build Hook。Build Hook 固定平台、Build Configuration 和允许 ref，使用与 Git 读取凭据分离的 Secret 引用，先对原始 body 验签再解析，并按 delivery 长期去重。
 
 ## 模块边界
 
@@ -35,15 +37,21 @@ internal/modules/<domain>/
 
 Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `LoginGuard`，Mongo adapter 以 normalized email 的 SHA-256 键和 revision 条件更新提供跨 Server 共享限制。阈值与窗口来自 Server 安全配置；达到阈值或极端并发重试耗尽时失败关闭，正确登录清理记录，TTL migration 回收过期状态。来源 IP 和全局连接限制属于可信入口职责，不能用该账号维度保护替代。
 
+## 本地化边界
+
+`internal/platform/localization` 是后端统一本地化边界。HTTP 中间件只解析有界的 `Accept-Language` 并把规范化 locale 写入 request context；`httpx` 根据稳定 error code 从内嵌 `locales/en-US.json` 或 `zh-CN.json` 取得安全文案，并返回对应 `Content-Language`。缺失、无效或不支持的语言回退到 `en-US`，未知 code 只返回通用提示。
+
+业务模块不导入语言文件，也不在 `biz`、`data` 中拼接客户文案。机器字段、日志、指标、Trace、审计 action 和底层错误保持稳定技术语义。两份目录的 key 等价性以及 Service 中静态使用的公开错误码由测试守护。未来正式客户 CLI 复用 locale 解析规则，但 Agent、Build Worker 和 Server 的结构化运行日志不做本地化。
+
 ## 进程边界
 
-当前建立两个有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker probe。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。Build Worker 和 CLI 仍只在职责与完整生命周期实现后创建。Web 前端由独立项目维护。
+当前建立三个有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker 执行；`cmd/build-worker` 负责领取 Build、续租和隔离 Git checkout。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。CLI 仍只在职责与完整生命周期明确后创建。Web 前端由独立项目维护。
 
 常驻任务实现 `Run(context.Context) error`，通过 `internal/platform/lifecycle.Server` 接入 Kratos App。构造函数不得启动 goroutine；停止过程必须响应 context，并受统一 shutdown timeout 约束。
 
 ## Build Boundary
 
-Git-to-Deploy 已进入产品架构。当前已实现 Source Repository/Repository Credential 领域、MongoDB、RBAC、事务审计、公开登记查询和受限 Git probe；Build 与 Artifact 尚未实现。probe 只列远端引用，并在执行期解析秘密、验证 TLS/固定 SSH Host Key、检查默认分支，不能扩展为 checkout 或客户代码执行。构建链必须与 API Server 和生产 Runtime Boundary 隔离：
+Git-to-Deploy 已进入产品架构。当前已实现 Source Repository/Repository Credential、Build Configuration、三类 Build 触发入口、状态机、Mongo queue/lease/generation fence，以及独立 Build Worker 的受控 checkout、rootless BuildKit 构建、认证 Registry push 和 Artifact/Release 交接。Worker 使用固定 Git 2.55.0、HTTPS/SSH 临时凭据、强制 TLS/SSH Host Key、精确 Commit 二次验证与有界临时目录；API Server 不执行仓库内容。推送成功后的真实 OCI digest 会在 fence 下形成唯一 Artifact，再幂等创建 Release。构建链必须与 API Server 和生产 Runtime Boundary 隔离：
 
 - API Server 只校验并持久化 Source Repository、Build Configuration 和 Build 任务，不执行 Git checkout、Dockerfile 或任意 Shell；
 - 独立 Build Worker 领取带租约和 fence 的任务，通过受认证窄接口调用固定版本、不可变镜像 digest 的 BuildKit；
@@ -52,7 +60,7 @@ Git-to-Deploy 已进入产品架构。当前已实现 Source Repository/Reposito
 - Registry 返回真实 OCI digest 后创建 Artifact，Artifact 再通过窄用例接口创建不可变 Release；
 - 外部 CI 镜像继续直接创建 Release，不依赖 Build 模块。
 
-领域、Webhook 与安全图见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)，当前连接和探测规则见 [Source Repository 使用说明](source-repositories.md)。真实 Git 服务兼容矩阵仍是 BUILD-001 的剩余门禁；在 Build Worker、BuildKit 和系统测试完成前不注册占位构建 API。
+领域与安全图见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)，连接、配方、手动触发、日志、结果交接、Worker 运维和平台通知规则分别见 [Source Repository 使用说明](source-repositories.md)、[Build Configuration 使用说明](build-configurations.md)、[手动触发 Build](builds.md)、[Build 日志](build-logs.md)、[Artifact 与 Release 交接](artifacts.md)、[Build Worker](build-worker.md)和[平台 Webhook](webhooks.md)。Git 自建 CA/代理矩阵仍是后续兼容门禁。
 
 ## Runtime Gateway 边界
 
@@ -63,6 +71,12 @@ Deployment `biz` 只定义 Execution Resolver、Credential Resolver、Executor �
 Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent prober 与 Deployment Gateway 在 Agent Control Server 启用时配套注册，因此只有连接到可执行当前协议的 Agent 才能把 Target 探测为 `ready`；离线不会回退 direct。direct Host 可选保存外部 SSH 引用，但主机终端实现前不会读取该引用。
 
 基础 Docker 适配器使用作用域稳定的容器名、Deployment 标签、同 Deployment 的 lease fencing token 和跨 Deployment 的 cutover sequence 实现幂等及安全取消。cutover sequence 由 MongoDB 在创建同一 Project/Application/Environment/Runtime Target 槽位的 Deployment 时单调分配，并写入 Docker 标签；因此较旧 Deployment 的延迟命令不能覆盖已激活的新版本。适配器会应用 Release 声明的端口、环境变量、资源限制和 Docker HEALTHCHECK：候选容器启动并进入 healthy 后，Worker 再验证 MongoDB 活跃租约、移除旧容器并把候选容器改为稳定名称。不健康候选会被清理且旧容器保持运行。该策略仍需在真实 Engine、入口路由和端口所有权场景中验证实际停机窗口。
+
+## Terminal Boundary
+
+`internal/modules/terminal` 已建立独立的 `biz/data/service` 边界。领域层拥有五项动作权限、Project/Organization 策略、TerminalSession 状态机和幂等终止；MongoDB adapter 通过部分唯一索引提供跨 Server 一致的每用户、每目标并发槽位。Terminal 不直接读取其他模块 collection，而是通过窄接口解析 Project、当前成功 Deployment、Runtime Target 和 Managed Host。
+
+创建容器会话只接受 Deployment ID，创建主机会话只接受路径中的 Managed Host ID。原始连接票据只返回一次，MongoDB 只保存 SHA-256 hash；HTTP 通过限定 connect path 的 Secure、HttpOnly、SameSite=Strict Cookie 下发，不把票据写进 JSON、URL、日志或 Trace。当前控制面/API 已实现，Docker exec、Agent PTY/direct SSH 和同域 WSS transport 仍是后续适配器，详见[安全终端会话](terminal-sessions.md)。
 
 ## Runtime Inventory 边界
 
@@ -86,9 +100,13 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 指标标签和 Span 名称不得包含原始 URL、资源 ID、租户 ID 等无界值。业务模块需要增加手工 Span 时，应通过明确依赖获得 tracer，不能让 `biz` 依赖 exporter 或 SDK 实现。
 
+Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一的固定名称/结果轮询指标，记录次数、耗时与最近成功/错误时间；资源 ID 不进入 Prometheus 标签。只有领取任务后才创建固定名称的操作 Span，空轮询不制造 Trace。独立 Build Worker 另提供 `/livez`、MongoDB `/readyz` 和 `/metrics`，嵌入式 Worker 复用 Server 运维端点。指标语义、Span 安全属性和告警示例见 [Worker 可观测性与告警](worker-observability.md)。
+
 ## API 契约
 
 `api/openapi.yaml` 是发布前 HTTP 行为的机器可读契约，覆盖运维接口、首个正式产品切片和当前工程样例；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。正式切片 operation 已具备 Organization 所有权、内置角色授权、审计和 MongoDB 持久化，但在首个端到端部署用例完成前仍标记为 pre-release。Handler 显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
+
+REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session Cookie。浏览器跨域默认拒绝，只接受 `server.http.cors_allowed_origins` 中不含通配符的精确 HTTPS Origin；loopback HTTP 仅供本机开发。跨域响应不启用 credentials，预检方法和 Header 使用封闭集合。所有 `/api/` 响应 `no-store`，并设置 API 专用 CSP、nosniff、frame deny、no-referrer 和权限策略。独立 Web 前端需要配置适合自身资源的 CSP，公网 HSTS 由实际 TLS 终止层负责。未来 Terminal 的一次性 HttpOnly Cookie 与 WSS Origin 校验是独立安全边界，不能从 REST CORS 配置推导权限。完整客户规则见[浏览器接入 API](browser-api-security.md)。
 
 契约文件必须通过 oasdiff 严格校验，真实 Handler 的请求与响应必须通过 kin-openapi 契约测试。工程样例在产品接受前允许显式删除或重塑；正式 operation 则执行 breaking-change 门禁，不兼容变更进入新的 API 主版本并记录迁移窗口。
 

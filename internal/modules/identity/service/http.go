@@ -42,6 +42,12 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		s.authenticated(s.me).ServeHTTP(w, r)
 	case "/api/v1/auth/sessions":
 		s.authenticated(s.sessions).ServeHTTP(w, r)
+	case "/api/v1/auth/users":
+		s.authenticated(s.users).ServeHTTP(w, r)
+	case "/api/v1/auth/invitations":
+		s.authenticated(s.invitations).ServeHTTP(w, r)
+	case "/api/v1/auth/invitations:accept":
+		s.acceptInvitation(w, r)
 	default:
 		segments := strings.Split(
 			strings.TrimPrefix(r.URL.Path, "/"),
@@ -63,8 +69,144 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 			).ServeHTTP(w, r)
 			return
 		}
+		if len(segments) == 6 && segments[0] == "api" && segments[1] == "v1" &&
+			segments[2] == "auth" && segments[3] == "users" && segments[4] != "" &&
+			segments[5] == "sessions" {
+			s.authenticated(func(w http.ResponseWriter, r *http.Request) {
+				s.userSessions(w, r, segments[4])
+			}).ServeHTTP(w, r)
+			return
+		}
+		if len(segments) == 7 && segments[0] == "api" && segments[1] == "v1" &&
+			segments[2] == "auth" && segments[3] == "users" && segments[4] != "" &&
+			segments[5] == "sessions" && segments[6] != "" {
+			s.authenticated(func(w http.ResponseWriter, r *http.Request) {
+				s.userSession(w, r, segments[4], segments[6])
+			}).ServeHTTP(w, r)
+			return
+		}
+		if len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
+			segments[2] == "auth" && segments[3] == "invitations" &&
+			strings.HasSuffix(segments[4], ":revoke") {
+			invitationID := strings.TrimSuffix(segments[4], ":revoke")
+			if invitationID != "" {
+				s.authenticated(func(w http.ResponseWriter, r *http.Request) {
+					s.revokeInvitation(w, r, invitationID)
+				}).ServeHTTP(w, r)
+				return
+			}
+		}
 		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
 	}
+}
+
+func (s *HTTP) users(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	items, err := s.useCase.ListUsers(r.Context(), principal)
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	result := make([]map[string]any, len(items))
+	for index, item := range items {
+		result[index] = map[string]any{
+			"id": item.ID, "organization_id": item.OrganizationID, "email": item.Email,
+			"role": item.Role, "created_at": item.CreatedAt.UTC().Format(time.RFC3339),
+		}
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *HTTP) invitations(w http.ResponseWriter, r *http.Request) {
+	principal, _ := security.PrincipalFromContext(r.Context())
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.useCase.ListInvitations(r.Context(), principal)
+		if writeIdentityError(w, r, err) {
+			return
+		}
+		result := make([]map[string]any, len(items))
+		for index, item := range items {
+			result[index] = invitationResponse(item)
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"items": result})
+	case http.MethodPost:
+		var request struct {
+			Email string `json:"email"`
+		}
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		credential, err := s.useCase.CreateInvitation(r.Context(), principal, request.Email,
+			httpx.RequestIDFromContext(r.Context()))
+		if writeIdentityError(w, r, err) {
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		response := invitationResponse(credential.Invitation)
+		response["token"] = credential.Token
+		httpx.JSON(w, http.StatusCreated, response)
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
+func (s *HTTP) acceptInvitation(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	var request struct {
+		Token    string `json:"token"`
+		Password string `json:"password"`
+	}
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+	credentials, err := s.useCase.AcceptInvitation(r.Context(), request.Token, request.Password,
+		httpx.RequestIDFromContext(r.Context()))
+	if errors.Is(err, biz.ErrInvalidInvitation) || errors.Is(err, biz.ErrUserAlreadyExists) {
+		w.Header().Set("Cache-Control", "no-store")
+		httpx.ErrorRequest(w, r, http.StatusUnauthorized, "invalid_invitation")
+		return
+	}
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	writeCredentials(w, http.StatusCreated, credentials)
+}
+
+func (s *HTTP) revokeInvitation(w http.ResponseWriter, r *http.Request, invitationID string) {
+	if r.Method != http.MethodPost {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	item, err := s.useCase.RevokeInvitation(r.Context(), principal, invitationID,
+		httpx.RequestIDFromContext(r.Context()))
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	httpx.JSON(w, http.StatusOK, invitationResponse(item))
+}
+
+func invitationResponse(item biz.Invitation) map[string]any {
+	response := map[string]any{
+		"id": item.ID, "organization_id": item.OrganizationID, "email": item.Email,
+		"status": item.Status, "version": item.Version, "invited_by": item.InvitedBy,
+		"created_at": item.CreatedAt.UTC().Format(time.RFC3339),
+		"expires_at": item.ExpiresAt.UTC().Format(time.RFC3339),
+	}
+	if !item.AcceptedAt.IsZero() {
+		response["accepted_by"], response["accepted_at"] = item.AcceptedBy, item.AcceptedAt.UTC().Format(time.RFC3339)
+	}
+	if !item.RevokedAt.IsZero() {
+		response["revoked_by"], response["revoked_at"] = item.RevokedBy, item.RevokedAt.UTC().Format(time.RFC3339)
+	}
+	return response
 }
 
 func (s *HTTP) Authenticate(next http.Handler) http.Handler {
@@ -179,6 +321,7 @@ func (s *HTTP) sessions(w http.ResponseWriter, r *http.Request) {
 	if writeIdentityError(w, r, err) {
 		return
 	}
+	w.Header().Set("Cache-Control", "no-store")
 	result := make([]map[string]any, len(items))
 	for index, item := range items {
 		result[index] = map[string]any{
@@ -189,6 +332,55 @@ func (s *HTTP) sessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"items": result})
+}
+
+func (s *HTTP) userSessions(w http.ResponseWriter, r *http.Request, userID string) {
+	principal, _ := security.PrincipalFromContext(r.Context())
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.useCase.ListUserSessions(r.Context(), principal, userID)
+		if writeIdentityError(w, r, err) {
+			return
+		}
+		result := make([]map[string]any, len(items))
+		for index, item := range items {
+			result[index] = map[string]any{
+				"id": item.ID, "created_at": item.CreatedAt.UTC().Format(time.RFC3339),
+				"expires_at": item.ExpiresAt.UTC().Format(time.RFC3339),
+				"current":    item.ID == principal.SessionID,
+			}
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		httpx.JSON(w, http.StatusOK, map[string]any{"items": result})
+	case http.MethodDelete:
+		revoked, err := s.useCase.RevokeAllUserSessions(
+			r.Context(), principal, userID, httpx.RequestIDFromContext(r.Context()),
+		)
+		if writeIdentityError(w, r, err) {
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		httpx.JSON(w, http.StatusOK, map[string]any{"revoked_sessions": revoked})
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
+func (s *HTTP) userSession(
+	w http.ResponseWriter, r *http.Request, userID, sessionID string,
+) {
+	if r.Method != http.MethodDelete {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	if err := s.useCase.RevokeUserSession(
+		r.Context(), principal, userID, sessionID,
+		httpx.RequestIDFromContext(r.Context()),
+	); writeIdentityError(w, r, err) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *HTTP) session(
@@ -259,6 +451,14 @@ func writeIdentityError(w http.ResponseWriter, r *http.Request, err error) bool 
 		errors.Is(err, biz.ErrInvalidName),
 		errors.Is(err, biz.ErrInvalidPassword):
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_identity")
+	case errors.Is(err, biz.ErrUserAlreadyExists):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "user_already_exists")
+	case errors.Is(err, biz.ErrInvalidInvitation):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "invalid_invitation_state")
+	case errors.Is(err, biz.ErrCannotRevokeCurrent):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "cannot_revoke_current_session")
+	case errors.Is(err, security.ErrForbidden):
+		httpx.ErrorRequest(w, r, http.StatusForbidden, "forbidden")
 	case errors.Is(err, biz.ErrNotFound):
 		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
 	default:

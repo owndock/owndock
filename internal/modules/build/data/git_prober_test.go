@@ -8,6 +8,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +213,96 @@ func TestGitSourceProberHonorsCallerCancellation(t *testing.T) {
 	status, err := NewGitSourceProber(nil).ProbeSource(ctx, biz.SourceRepository{}, nil)
 	if status != "" || !errors.Is(err, context.Canceled) {
 		t.Fatalf("ProbeSource() = %s, %v", status, err)
+	}
+}
+
+func TestGitSourceProberResolvesBranchAndExpectedCommit(t *testing.T) {
+	commit := plumbing.NewHash("a975c10d68a2d7461634f13b15c52a2efba72d16")
+	prober := NewGitSourceProber(nil)
+	prober.resolve = func(
+		context.Context,
+		string,
+		transport.AuthMethod,
+		time.Duration,
+	) ([]*plumbing.Reference, error) {
+		return []*plumbing.Reference{
+			plumbing.NewHashReference(plumbing.ReferenceName("refs/heads/main"), commit),
+		}, nil
+	}
+	revision, err := prober.ResolveSourceRevision(
+		context.Background(),
+		biz.SourceRepository{
+			ID: "source-1", RepositoryURL: "https://git.example.com/team/api.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		nil, "refs/heads/main", commit.String(),
+	)
+	if err != nil || revision.SourceRepositoryID != "source-1" ||
+		revision.Ref != "refs/heads/main" || revision.CommitSHA != commit.String() {
+		t.Fatalf("ResolveSourceRevision() = %+v, %v", revision, err)
+	}
+	_, err = prober.ResolveSourceRevision(
+		context.Background(),
+		biz.SourceRepository{
+			ID: "source-1", RepositoryURL: "https://git.example.com/team/api.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		nil, "refs/heads/main", "b975c10d68a2d7461634f13b15c52a2efba72d16",
+	)
+	if !errors.Is(err, biz.ErrRevisionMismatch) {
+		t.Fatalf("mismatch error = %v", err)
+	}
+}
+
+func TestGitSourceProberPrefersPeeledTagCommit(t *testing.T) {
+	tagObject := plumbing.NewHash("a975c10d68a2d7461634f13b15c52a2efba72d16")
+	commit := plumbing.NewHash("b975c10d68a2d7461634f13b15c52a2efba72d16")
+	prober := NewGitSourceProber(nil)
+	prober.resolve = func(
+		context.Context,
+		string,
+		transport.AuthMethod,
+		time.Duration,
+	) ([]*plumbing.Reference, error) {
+		return []*plumbing.Reference{
+			plumbing.NewHashReference(plumbing.ReferenceName("refs/tags/v1.0.0"), tagObject),
+			plumbing.NewHashReference(plumbing.ReferenceName("refs/tags/v1.0.0^{}"), commit),
+		}, nil
+	}
+	revision, err := prober.ResolveSourceRevision(
+		context.Background(),
+		biz.SourceRepository{
+			ID: "source-1", RepositoryURL: "https://git.example.com/team/api.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		nil, "refs/tags/v1.0.0", "",
+	)
+	if err != nil || revision.CommitSHA != commit.String() {
+		t.Fatalf("ResolveSourceRevision() = %+v, %v", revision, err)
+	}
+}
+
+func TestGitSourceProberReturnsSafeRevisionErrors(t *testing.T) {
+	prober := NewGitSourceProber(nil)
+	prober.resolve = func(
+		context.Context,
+		string,
+		transport.AuthMethod,
+		time.Duration,
+	) ([]*plumbing.Reference, error) {
+		return nil, errors.New("transport contains sensitive detail")
+	}
+	_, err := prober.ResolveSourceRevision(
+		context.Background(),
+		biz.SourceRepository{
+			ID: "source-1", RepositoryURL: "https://git.example.com/team/api.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		nil, "refs/heads/main", "",
+	)
+	if !errors.Is(err, biz.ErrRevisionResolveUnavailable) ||
+		strings.Contains(err.Error(), "sensitive") {
+		t.Fatalf("resolution error = %v", err)
 	}
 }
 

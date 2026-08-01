@@ -2,6 +2,7 @@ package data
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/owndock/owndock/internal/modules/controlplane/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
+	"github.com/owndock/owndock/internal/shared/security"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -16,6 +18,8 @@ import (
 
 type MongoStore struct {
 	projects     *mongo.Collection
+	members      *mongo.Collection
+	users        *mongo.Collection
 	applications *mongo.Collection
 	releases     *mongo.Collection
 	targets      *mongo.Collection
@@ -26,6 +30,8 @@ type MongoStore struct {
 func NewMongoStore(database *mongo.Database) *MongoStore {
 	return &MongoStore{
 		projects:     database.Collection("projects"),
+		members:      database.Collection("project_members"),
+		users:        database.Collection("users"),
 		applications: database.Collection("product_applications"),
 		releases:     database.Collection("releases"),
 		targets:      database.Collection("runtime_targets"),
@@ -79,6 +85,161 @@ func (s *MongoStore) ProjectExists(ctx context.Context, organizationID, projectI
 		return false, fmt.Errorf("check project: %w", err)
 	}
 	return count == 1, nil
+}
+
+func (s *MongoStore) ListProjectIDsForUser(
+	ctx context.Context, organizationID, userID string,
+) ([]string, error) {
+	cursor, err := s.members.Find(ctx, bson.D{
+		{Key: "organization_id", Value: organizationID}, {Key: "user_id", Value: userID},
+	}, options.Find().SetProjection(bson.D{{Key: "project_id", Value: 1}, {Key: "_id", Value: 0}}))
+	if err != nil {
+		return nil, fmt.Errorf("find project memberships: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []struct {
+		ProjectID string `bson:"project_id"`
+	}
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode project memberships: %w", err)
+	}
+	result := make([]string, len(documents))
+	for i, document := range documents {
+		result[i] = document.ProjectID
+	}
+	return result, nil
+}
+
+func (s *MongoStore) ResolveProjectRole(
+	ctx context.Context, organizationID, projectID, userID string,
+) (security.Role, error) {
+	if exists, err := s.ProjectExists(ctx, organizationID, projectID); err != nil {
+		return "", err
+	} else if !exists {
+		return "", biz.ErrNotFound
+	}
+	var document struct {
+		Role security.Role `bson:"role"`
+	}
+	err := s.members.FindOne(ctx, bson.D{
+		{Key: "organization_id", Value: organizationID},
+		{Key: "project_id", Value: projectID}, {Key: "user_id", Value: userID},
+	}, options.FindOne().SetProjection(bson.D{{Key: "role", Value: 1}})).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return "", biz.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve project role: %w", err)
+	}
+	if !document.Role.Valid() || document.Role == security.RoleOwner {
+		return "", biz.ErrNotFound
+	}
+	return document.Role, nil
+}
+
+func (s *MongoStore) FindOrganizationUserByEmail(
+	ctx context.Context, organizationID, email string,
+) (biz.OrganizationUser, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	var document struct {
+		ID             string        `bson:"_id"`
+		OrganizationID string        `bson:"organization_id"`
+		Email          string        `bson:"email"`
+		Role           security.Role `bson:"role"`
+	}
+	err := s.users.FindOne(ctx, bson.D{
+		{Key: "organization_id", Value: organizationID},
+		{Key: "email_normalized", Value: email},
+	}, options.FindOne().SetProjection(bson.D{
+		{Key: "organization_id", Value: 1}, {Key: "email", Value: 1}, {Key: "role", Value: 1},
+	})).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.OrganizationUser{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.OrganizationUser{}, fmt.Errorf("find organization user: %w", err)
+	}
+	return biz.OrganizationUser{
+		ID: document.ID, OrganizationID: document.OrganizationID,
+		Email: document.Email, Role: document.Role,
+	}, nil
+}
+
+func (s *MongoStore) ListProjectMembers(ctx context.Context, projectID string) ([]biz.ProjectMember, error) {
+	cursor, err := s.members.Find(ctx, bson.D{{Key: "project_id", Value: projectID}},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "user_id", Value: 1}}))
+	if err != nil {
+		return nil, fmt.Errorf("find project members: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []projectMemberDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode project members: %w", err)
+	}
+	result := make([]biz.ProjectMember, len(documents))
+	for i, document := range documents {
+		result[i] = document.domain()
+	}
+	return result, nil
+}
+
+func (s *MongoStore) GetProjectMember(ctx context.Context, projectID, userID string) (biz.ProjectMember, error) {
+	var document projectMemberDocument
+	err := s.members.FindOne(ctx, bson.D{{Key: "project_id", Value: projectID}, {Key: "user_id", Value: userID}}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.ProjectMember{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.ProjectMember{}, fmt.Errorf("find project member: %w", err)
+	}
+	return document.domain(), nil
+}
+
+func (s *MongoStore) CreateProjectMember(ctx context.Context, item biz.ProjectMember) (biz.ProjectMember, error) {
+	_, err := s.members.InsertOne(ctx, projectMemberDocumentFromDomain(item))
+	if mongo.IsDuplicateKeyError(err) {
+		return biz.ProjectMember{}, biz.ErrProjectMemberConflict
+	}
+	if err != nil {
+		return biz.ProjectMember{}, fmt.Errorf("insert project member: %w", err)
+	}
+	return item, nil
+}
+
+func (s *MongoStore) UpdateProjectMember(
+	ctx context.Context, item biz.ProjectMember, expectedVersion uint64,
+) (biz.ProjectMember, error) {
+	var document projectMemberDocument
+	err := s.members.FindOneAndUpdate(ctx, bson.D{
+		{Key: "project_id", Value: item.ProjectID}, {Key: "user_id", Value: item.UserID},
+		{Key: "version", Value: expectedVersion},
+	}, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "role", Value: item.Role}, {Key: "version", Value: item.Version},
+		{Key: "updated_by", Value: item.UpdatedBy}, {Key: "updated_at", Value: item.UpdatedAt},
+	}}}, options.FindOneAndUpdate().SetReturnDocument(options.After)).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.ProjectMember{}, biz.ErrProjectMemberConflict
+	}
+	if err != nil {
+		return biz.ProjectMember{}, fmt.Errorf("update project member: %w", err)
+	}
+	return document.domain(), nil
+}
+
+func (s *MongoStore) DeleteProjectMember(
+	ctx context.Context, projectID, userID string, expectedVersion uint64,
+) error {
+	result, err := s.members.DeleteOne(ctx, bson.D{
+		{Key: "project_id", Value: projectID}, {Key: "user_id", Value: userID},
+		{Key: "version", Value: expectedVersion},
+	})
+	if err != nil {
+		return fmt.Errorf("delete project member: %w", err)
+	}
+	if result.DeletedCount != 1 {
+		return biz.ErrProjectMemberConflict
+	}
+	return nil
 }
 
 // ReleaseExists verifies ownership before a deployment may reference a release.
@@ -350,8 +511,9 @@ func (s *MongoStore) CreateRelease(ctx context.Context, item biz.Release) (biz.R
 	_, err := s.releases.InsertOne(ctx, releaseDocument{
 		ID: item.ID, ProjectID: item.ProjectID, ApplicationID: item.ApplicationID,
 		ImageDigest: item.ImageDigest, RegistryCredentialID: item.RegistryCredentialID,
-		RuntimeSpec: runtimeSpecDocumentFromDomain(item.RuntimeSpec),
-		CreatedBy:   item.CreatedBy, CreatedAt: item.CreatedAt,
+		SourceArtifactID: item.SourceArtifactID,
+		RuntimeSpec:      runtimeSpecDocumentFromDomain(item.RuntimeSpec),
+		CreatedBy:        item.CreatedBy, CreatedAt: item.CreatedAt,
 	})
 	if mongo.IsDuplicateKeyError(err) {
 		return biz.Release{}, biz.ErrDuplicateRelease
@@ -360,6 +522,20 @@ func (s *MongoStore) CreateRelease(ctx context.Context, item biz.Release) (biz.R
 		return biz.Release{}, fmt.Errorf("insert release: %w", err)
 	}
 	return item, nil
+}
+
+func (s *MongoStore) GetReleaseByArtifact(ctx context.Context, projectID, artifactID string) (biz.Release, error) {
+	var document releaseDocument
+	err := s.releases.FindOne(ctx, bson.D{
+		{Key: "project_id", Value: projectID}, {Key: "source_artifact_id", Value: artifactID},
+	}).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.Release{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Release{}, fmt.Errorf("find artifact release: %w", err)
+	}
+	return document.domain(), nil
 }
 
 func (s *MongoStore) ListRegistryCredentials(
@@ -521,6 +697,22 @@ func (s *MongoStore) ListEnvironments(ctx context.Context, projectID string) ([]
 	return items, nil
 }
 
+func (s *MongoStore) EnvironmentStage(ctx context.Context, projectID, environmentID string) (string, error) {
+	var document struct {
+		Stage string `bson:"stage"`
+	}
+	err := s.environments.FindOne(ctx, bson.D{
+		{Key: "_id", Value: environmentID}, {Key: "project_id", Value: projectID},
+	}, options.FindOne().SetProjection(bson.D{{Key: "stage", Value: 1}})).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", biz.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("find environment stage: %w", err)
+	}
+	return document.Stage, nil
+}
+
 func (s *MongoStore) CreateEnvironment(ctx context.Context, item biz.Environment) (biz.Environment, error) {
 	_, err := s.environments.InsertOne(ctx, environmentDocument{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name, NameNormalized: normalizeName(item.Name),
@@ -547,6 +739,37 @@ type projectDocument struct {
 	NameNormalized string    `bson:"name_normalized"`
 	CreatedBy      string    `bson:"created_by"`
 	CreatedAt      time.Time `bson:"created_at"`
+}
+
+type projectMemberDocument struct {
+	OrganizationID string        `bson:"organization_id"`
+	ProjectID      string        `bson:"project_id"`
+	UserID         string        `bson:"user_id"`
+	Email          string        `bson:"email"`
+	Role           security.Role `bson:"role"`
+	Version        uint64        `bson:"version"`
+	CreatedBy      string        `bson:"created_by"`
+	CreatedAt      time.Time     `bson:"created_at"`
+	UpdatedBy      string        `bson:"updated_by"`
+	UpdatedAt      time.Time     `bson:"updated_at"`
+}
+
+func projectMemberDocumentFromDomain(item biz.ProjectMember) projectMemberDocument {
+	return projectMemberDocument{
+		OrganizationID: item.OrganizationID, ProjectID: item.ProjectID,
+		UserID: item.UserID, Email: item.Email, Role: item.Role, Version: item.Version,
+		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+		UpdatedBy: item.UpdatedBy, UpdatedAt: item.UpdatedAt,
+	}
+}
+
+func (d projectMemberDocument) domain() biz.ProjectMember {
+	return biz.ProjectMember{
+		OrganizationID: d.OrganizationID, ProjectID: d.ProjectID,
+		UserID: d.UserID, Email: d.Email, Role: d.Role, Version: d.Version,
+		CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt,
+		UpdatedBy: d.UpdatedBy, UpdatedAt: d.UpdatedAt,
+	}
 }
 
 func (d projectDocument) domain() biz.Project {
@@ -578,6 +801,7 @@ type releaseDocument struct {
 	ApplicationID        string              `bson:"application_id"`
 	ImageDigest          string              `bson:"image_digest"`
 	RegistryCredentialID string              `bson:"registry_credential_id,omitempty"`
+	SourceArtifactID     string              `bson:"source_artifact_id,omitempty"`
 	RuntimeSpec          runtimeSpecDocument `bson:"runtime_spec"`
 	CreatedBy            string              `bson:"created_by"`
 	CreatedAt            time.Time           `bson:"created_at"`
@@ -587,8 +811,9 @@ func (d releaseDocument) domain() biz.Release {
 	return biz.Release{
 		ID: d.ID, ProjectID: d.ProjectID, ApplicationID: d.ApplicationID,
 		ImageDigest: d.ImageDigest, RegistryCredentialID: d.RegistryCredentialID,
-		RuntimeSpec: normalizedRuntimeSpec(d.RuntimeSpec.domain()),
-		CreatedBy:   d.CreatedBy, CreatedAt: d.CreatedAt,
+		SourceArtifactID: d.SourceArtifactID,
+		RuntimeSpec:      normalizedRuntimeSpec(d.RuntimeSpec.domain()),
+		CreatedBy:        d.CreatedBy, CreatedAt: d.CreatedAt,
 	}
 }
 

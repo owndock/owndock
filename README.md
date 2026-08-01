@@ -14,19 +14,28 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - Go：1.26.5（`.go-version`、`go.mod`、CI 和构建镜像保持一致）
 - Kratos：v2.9.2
 - 依赖组装：composition root 手工组装，不使用 Google Wire
-- 进程：控制面 `owndock`；主机侧 `owndock-agent`
-- 可观测性：结构化 Access Log、Prometheus 指标；OpenTelemetry Trace 默认关闭，可通过 OTLP/HTTP 导出
+- 进程：控制面 `owndock`；主机侧 `owndock-agent`；隔离源码执行进程 `owndock-build-worker`
+- 可观测性：结构化 Access Log、HTTP 与统一 Worker Prometheus 指标、独立 Build Worker 健康/就绪端点；OpenTelemetry HTTP/Worker Trace 默认关闭，可通过 OTLP/HTTP 导出
+- 浏览器 API 安全：默认同源；可配置精确 HTTPS CORS Origin，拒绝通配符和 credentialed CORS；`/api/` 统一 `no-store` 并设置 API 安全响应头
 - MongoDB：官方 Go Driver v2.8.0；服务端测试基线 8.3.7，默认关闭
-- 正式产品切片：本地 bootstrap/login/session、内置 RBAC、Organization Managed Host、一次性 Agent enrollment 与证书身份、Project、Project Application、Source Repository/Repository Credential 与只读连接探测、不可变 Release、Runtime Target、Runtime Inventory 安全查询、基础审计和 MongoDB migration
-- 已接受、尚未实现：Git-to-Deploy 的 Build/Artifact/Webhook 链、Agent 自动安装与证书轮换、Template、多主机系统验收和安全 Terminal
+- 正式产品切片：本地 bootstrap/login/session、一次性用户邀请、Owner 管理员会话治理、Project 成员绑定与即时撤权、可信代理来源识别和来源/实例共享入口限流、内置 RBAC、Organization Managed Host、一次性 Agent enrollment 与证书身份、Project、Project Application、Source Repository/Repository Credential 与只读连接探测、Build Configuration、三类 Build 触发入口、状态机、取消/重试与 Mongo queue/lease/fence、隔离 Build Worker 的固定 Git HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建与认证 Registry push、按 digest 固定的 Artifact 与幂等 Release 交接、development 显式自动部署、不可变 Release、Runtime Target、Runtime Inventory 安全查询、基础审计和 MongoDB migration
+- 已接受、尚未实现：Git 自建 CA/代理兼容矩阵、Agent 自动安装与证书轮换、Template、多主机系统验收和安全 Terminal
 - 默认接口：健康和版本接口；产品切片需要显式启用 MongoDB 与 `product.enabled`
 - 工程样例：Application、Environment、Deployment JSON API，默认关闭；概念已进入产品模型，但当前实现不属于正式产品契约
 
-当前版本已经提供 Project 范围的正式 Deployment 创建、查询、取消、失败重试、回滚、幂等回放、MongoDB 持久化和审计事务。本地登录使用 MongoDB 共享的账号尝试窗口，多 Server 实例不会因各自内存计数而绕过阈值，成功登录会清理计数。Managed Host 归 Organization 所有，Project Runtime Target 必须绑定同一 Organization 的 Host，并保持 `agent/direct` 连接模式一致。Agent 首次接入已支持一次性 token、CSR 签发客户端证书和固定 Host/instance 身份；Server 端独立 TLS 1.3 监听已支持 mTLS 数据库身份校验、`v1` 协商、心跳、在线状态、重连 fence、禁用 Host 后断流，以及严格类型化的 probe 和部署命令、有界发送队列、并发去重和只保存指纹/安全结果的进程内缓存。正式 `owndock-agent` 进程可以使用已签发证书主动连接 Server，通过受信任的本机 Unix Socket 执行 Docker probe、镜像准备、候选容器健康门禁、激活和安全取消，并以权限受限、原子写入的磁盘状态跨重启重放安全结果。Agent 另用独立、不可淘汰且失败关闭的槽位水位保存最高 cutover sequence，使容器被删除或 Agent 重启后仍能拒绝延迟旧命令。Agent 部署采用 `stage → Server 验证 Mongo lease/cutover fence → activate`，不会把控制面 fencing 压缩进一个远程命令；Agent Server 和 Deployment Worker 同时启用时，Agent prober 与 Gateway 会配套注册。Agent 自动安装、证书轮换和多主机故障系统验收仍未完成。Release 可绑定 Project 范围的 Registry Credential，并声明端口、Environment 配置键、CPU/内存和容器健康检查；凭据与秘密值只通过 `secret://` 引用在 Worker 执行期解析。默认关闭的受管 Worker 可以通过 direct mTLS 或 Agent 连接 Docker Engine，携带私有仓库认证按 digest 拉取镜像，候选容器健康后再替换旧容器；同 Deployment 的租约 generation 阻止过期 Worker，同一部署槽位单调递增的 cutover sequence 阻止跨 Deployment 的延迟旧命令覆盖新版本。真实本地 Docker Engine 集成测试覆盖 Agent probe、两阶段 Agent 部署/取消、direct 固定 digest 健康替换、失败保留、过期执行隔离和取消清理。Source Repository 支持标准 HTTPS/SSH 地址、外部秘密引用、双指纹校验和显式只读 probe；probe 不 checkout 源码、不执行仓库内容，也不启动 Build。Template、实际入口流量、远程 mTLS Engine 和故障注入验证仍需补齐。
+本地用户由 Owner 使用一次性邀请接入并自行设置密码。受邀 Viewer 默认看不到任何 Project；Owner 或 Project Maintainer 显式绑定 Project 角色。角色不缓存到 Session，每次 Project 请求实时解析，因此移除成员后原 Session 的下一次请求立即失去访问权限。Owner 还可以查看同 Organization 用户的不含 Token/hash 的 Session 摘要，并在账号泄漏或离职时撤销一个或全部 Session。
+
+正式产品 API 在认证和业务 Handler 之前使用 MongoDB 共享的来源/实例两级入口限流。只有显式配置的可信直连代理才能提供客户来源链；超过阈值返回 `429` 和 `Retry-After`，保护状态不可用时请求失败关闭。部署规则见 [docs/ingress-protection.md](docs/ingress-protection.md)。
+
+当前版本已经提供 Project 范围的正式 Deployment 创建、查询、取消、失败重试、回滚、幂等回放、MongoDB 持久化和审计事务。本地登录使用 MongoDB 共享的账号尝试窗口，多 Server 实例不会因各自内存计数而绕过阈值，成功登录会清理计数。Managed Host 归 Organization 所有，Project Runtime Target 必须绑定同一 Organization 的 Host，并保持 `agent/direct` 连接模式一致。Agent 首次接入已支持一次性 token、CSR 签发客户端证书和固定 Host/instance 身份；Server 端独立 TLS 1.3 监听已支持 mTLS 数据库身份校验、`v1` 协商、心跳、在线状态、重连 fence、禁用 Host 后断流，以及严格类型化的 probe 和部署命令、有界发送队列、并发去重和只保存指纹/安全结果的进程内缓存。正式 `owndock-agent` 进程可以使用已签发证书主动连接 Server，通过受信任的本机 Unix Socket 执行 Docker probe、镜像准备、候选容器健康门禁、激活和安全取消，并以权限受限、原子写入的磁盘状态跨重启重放安全结果。Agent 另用独立、不可淘汰且失败关闭的槽位水位保存最高 cutover sequence，使容器被删除或 Agent 重启后仍能拒绝延迟旧命令。Agent 部署采用 `stage → Server 验证 Mongo lease/cutover fence → activate`，不会把控制面 fencing 压缩进一个远程命令；Agent Server 和 Deployment Worker 同时启用时，Agent prober 与 Gateway 会配套注册。Agent 自动安装、证书轮换和多主机故障系统验收仍未完成。Release 可绑定 Project 范围的 Registry Credential，并声明端口、Environment 配置键、CPU/内存和容器健康检查；凭据与秘密值只通过 `secret://` 引用在 Worker 执行期解析。默认关闭的受管 Worker 可以通过 direct mTLS 或 Agent 连接 Docker Engine，携带私有仓库认证按 digest 拉取镜像，候选容器健康后再替换旧容器；同 Deployment 的租约 generation 阻止过期 Worker，同一部署槽位单调递增的 cutover sequence 阻止跨 Deployment 的延迟旧命令覆盖新版本。真实本地 Docker Engine 集成测试覆盖 Agent probe、两阶段 Agent 部署/取消、direct 固定 digest 健康替换、失败保留、过期执行隔离和取消清理。Source Repository 支持标准 HTTPS/SSH 地址、外部秘密引用、双指纹校验和显式只读 probe；probe 不 checkout 源码、不执行仓库内容。Build Configuration 提供 Application 范围版本化配方 API；手动、通用 Trigger Token 和 GitHub/GitLab/Gitea/Forgejo 签名 Webhook 都会固定允许 ref、完整 Commit SHA 和非秘密配置快照，再创建 queued Build。API Server 不 checkout 或执行客户代码；独立 `owndock-build-worker` 使用固定 Git 2.55.0 检出精确 Commit，通过固定版本和 digest 的 rootless BuildKit 构建，并以单次 Session 凭据推送 Registry；真实 OCI digest 会在 lease generation fence 下形成 Artifact，并按配置幂等创建带同一运行规格的不可变 Release。Maintainer/Owner 可为 development 配置最多 8 个自动部署目标；规则进入不可变快照，并通过普通 Deployment 用例执行就绪检查、幂等与审计，staging/production 首版始终人工触发。BuildKit status 在持久化前流式脱敏，并通过有界 cursor API 增量读取。Template、实际入口流量、远程 mTLS Engine 和故障注入验证仍需补齐。
 
 Docker Runtime Inventory 已建立独立领域模型、MongoDB observation/history/current Repository、direct/Agent 可复用的四类 Docker 安全 mapper、精确字节有界分块、Agent 内存快照协议、持续 Event 游标和默认关闭的受管 Worker。新 generation 在全部分块完成前不会修改 current presence；完整提交会在同一事务标记 absent、恢复 present 并切换 head。模型不保存原始 Inspect、Environment 值、Registry authorization、Volume options/status 或宿主 Mount source。Project 查询只返回经成功 Deployment 核验的受管容器，Host 查询以独立权限返回四类安全资源；固定过滤、不透明游标和审计已进入公开 API。真实双主机、网络分区和容量故障验收仍需补齐，详见 [docs/runtime-inventory.md](docs/runtime-inventory.md)。
 
 顶层 Application、Environment 和 Deployment 使用进程内存仓储，服务重启后数据会丢失，只用于验证架构、契约和并发机制。它们与 Project 范围的正式 API 隔离。正式 Deployment 已采用 Project 作用域的幂等键、原子领取、租约版本控制和受管 Worker；Worker 默认关闭，启用和凭据约定见 [docs/worker.md](docs/worker.md)。
+
+通用 Build Trigger API 现已独立于用户 Session：Owner/Maintainer 为一个 Build Configuration 创建只显示一次的 Token，数据库只保存哈希；Git 平台只能提交完整 ref 与 Commit SHA，不能覆盖仓库和构建目标，并受 MongoDB 跨 Server 共享限流保护。详见 [docs/build-triggers.md](docs/build-triggers.md)。
+
+平台 Webhook Adapter 已支持 GitHub、GitLab Standard Webhooks、Gitea 和 Forgejo：先对原始请求体验签，再解析 Push，按 delivery ID 去重并快速返回 `202`。详见 [docs/webhooks.md](docs/webhooks.md)。
 
 ## 本地运行
 
@@ -59,7 +68,7 @@ make run
 
 随后调用 `POST /api/v1/auth/bootstrap` 创建首个 Organization 和 Owner。Bootstrap、登录、资源写入和未来部署流程见 [docs/flows.md](docs/flows.md)，Agent 首次安全接入见 [docs/agent-enrollment.md](docs/agent-enrollment.md)，完整请求契约见 [api/openapi.yaml](api/openapi.yaml)。
 
-`make build` 会同时生成 `bin/owndock` 和 `bin/owndock-agent`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)；提交的 [configs/agent.yaml](configs/agent.yaml) 只是非敏感模板，不能直接用于生产。
+`make build` 会同时生成 `bin/owndock`、`bin/owndock-agent` 和 `bin/owndock-build-worker`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)；Build Worker 见 [docs/build-worker.md](docs/build-worker.md)。提交的配置文件只是非敏感模板，不能直接用于生产。
 
 如需启用链路追踪，将 `observability.tracing.enabled` 设为 `true`，并将 `endpoint` 配置为 OTLP/HTTP Collector 的 `host:port`（通常为 `localhost:4318`）。`sample_ratio` 取值为 `0` 到 `1`，默认配置为 `1`；设为 `0` 时不采样新的根 Span，无需追踪时应直接关闭 tracing。生产环境建议由应用发送至 OpenTelemetry Collector，再由 Collector 转发到后端。
 
@@ -79,7 +88,9 @@ internal/server/     HTTP/gRPC transport 装配
 internal/shared/     Server 与 Agent 的仓内共享纯 Go 契约
 ```
 
-文档入口见 [docs/README.md](docs/README.md)，产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，Git 仓库连接见 [docs/source-repositories.md](docs/source-repositories.md)，Docker 资源清单见 [docs/runtime-inventory.md](docs/runtime-inventory.md)，核心时序见 [docs/flows.md](docs/flows.md)，发布前契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、OpenAPI 校验、静态检查和构建验证；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make test-runtime-integration` 针对本机 Docker Engine 验证固定 digest 的容器切换；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+文档入口见 [docs/README.md](docs/README.md)，本地用户接入见 [docs/users-and-invitations.md](docs/users-and-invitations.md)，Project 授权见 [docs/project-members.md](docs/project-members.md)，第一次从 Git 部署见 [docs/git-to-deploy-quickstart.md](docs/git-to-deploy-quickstart.md)，产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，Git 仓库连接见 [docs/source-repositories.md](docs/source-repositories.md)，构建配方见 [docs/build-configurations.md](docs/build-configurations.md)，手动构建见 [docs/builds.md](docs/builds.md)，自动部署见 [docs/automatic-deployments.md](docs/automatic-deployments.md)，Docker 资源清单见 [docs/runtime-inventory.md](docs/runtime-inventory.md)，核心时序见 [docs/flows.md](docs/flows.md)，发布前契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、OpenAPI 校验、静态检查和构建验证；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make test-runtime-integration` 针对本机 Docker Engine 验证固定 digest 的容器切换；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+
+入口限流与反向代理信任配置见 [docs/ingress-protection.md](docs/ingress-protection.md)。
 
 ## License
 

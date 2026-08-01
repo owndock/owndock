@@ -8,37 +8,40 @@ import (
 )
 
 var (
-	ErrInvalidApplication    = errors.New("application id is required")
-	ErrInvalidProject        = errors.New("project id is required")
-	ErrInvalidEnvironment    = errors.New("environment id is required")
-	ErrInvalidTransition     = errors.New("invalid deployment status transition")
-	ErrInvalidLease          = errors.New("invalid deployment lease")
-	ErrNotClaimable          = errors.New("deployment is not claimable")
-	ErrNotFound              = errors.New("deployment not found")
-	ErrConflict              = errors.New("deployment version conflict")
-	ErrDuplicateIdempotency  = errors.New("idempotency key already used")
-	ErrLeaseExpired          = errors.New("deployment lease expired")
-	ErrApplicationNotFound   = errors.New("application not found")
-	ErrEnvironmentNotFound   = errors.New("environment not found")
-	ErrReleaseNotFound       = errors.New("release not found")
-	ErrRuntimeTargetNotFound = errors.New("runtime target not found")
-	ErrRuntimeTargetNotReady = errors.New("runtime target is not ready")
-	ErrReferenceLookup       = errors.New("formal deployment reference lookup is required")
-	ErrFormalSecurity        = errors.New("formal deployment transaction and audit are required")
-	ErrInvalidRelease        = errors.New("release id is required")
-	ErrInvalidRuntimeTarget  = errors.New("runtime target id is required")
-	ErrInvalidIdempotencyKey = errors.New("idempotency key is required")
-	ErrIdempotencyMismatch   = errors.New("idempotency key was used with different deployment references")
-	ErrRetryRequiresFailed   = errors.New("only a failed deployment can be retried")
-	ErrRollbackRequiresFinal = errors.New("only a completed deployment can be rolled back")
-	ErrRollbackSameRelease   = errors.New("rollback release must differ from the source release")
-	ErrRollbackNotSucceeded  = errors.New("rollback release has no successful deployment on the selected target")
-	ErrInvalidFailure        = errors.New("deployment failure category is invalid")
-	ErrStaleExecution        = errors.New("deployment execution lease is stale")
+	ErrInvalidApplication             = errors.New("application id is required")
+	ErrInvalidProject                 = errors.New("project id is required")
+	ErrInvalidEnvironment             = errors.New("environment id is required")
+	ErrInvalidTransition              = errors.New("invalid deployment status transition")
+	ErrInvalidLease                   = errors.New("invalid deployment lease")
+	ErrNotClaimable                   = errors.New("deployment is not claimable")
+	ErrNotFound                       = errors.New("deployment not found")
+	ErrConflict                       = errors.New("deployment version conflict")
+	ErrDuplicateIdempotency           = errors.New("idempotency key already used")
+	ErrLeaseExpired                   = errors.New("deployment lease expired")
+	ErrApplicationNotFound            = errors.New("application not found")
+	ErrEnvironmentNotFound            = errors.New("environment not found")
+	ErrReleaseNotFound                = errors.New("release not found")
+	ErrRuntimeTargetNotFound          = errors.New("runtime target not found")
+	ErrRuntimeTargetNotReady          = errors.New("runtime target is not ready")
+	ErrReferenceLookup                = errors.New("formal deployment reference lookup is required")
+	ErrFormalSecurity                 = errors.New("formal deployment transaction and audit are required")
+	ErrInvalidRelease                 = errors.New("release id is required")
+	ErrInvalidRuntimeTarget           = errors.New("runtime target id is required")
+	ErrInvalidIdempotencyKey          = errors.New("idempotency key is required")
+	ErrIdempotencyMismatch            = errors.New("idempotency key was used with different deployment references")
+	ErrRetryRequiresFailed            = errors.New("only a failed deployment can be retried")
+	ErrRollbackRequiresFinal          = errors.New("only a completed deployment can be rolled back")
+	ErrRollbackSameRelease            = errors.New("rollback release must differ from the source release")
+	ErrRollbackNotSucceeded           = errors.New("rollback release has no successful deployment on the selected target")
+	ErrInvalidFailure                 = errors.New("deployment failure category is invalid")
+	ErrStaleExecution                 = errors.New("deployment execution lease is stale")
+	ErrAutomaticDeploymentUnavailable = errors.New("automatic deployment is unavailable")
+	ErrAutomaticDeploymentNotAllowed  = errors.New("automatic deployment is allowed only for development environments")
 )
 
 type Status string
 type Operation string
+type TriggerSource string
 
 const (
 	StatusQueued    Status = "queued"
@@ -52,7 +55,14 @@ const (
 	OperationDeploy   Operation = "deploy"
 	OperationRetry    Operation = "retry"
 	OperationRollback Operation = "rollback"
+
+	TriggerSourceManual    TriggerSource = "manual"
+	TriggerSourceAutomatic TriggerSource = "automatic"
 )
+
+func (s TriggerSource) Valid() bool {
+	return s == TriggerSourceManual || s == TriggerSourceAutomatic
+}
 
 type Lease struct {
 	Owner      string
@@ -65,19 +75,23 @@ func (l Lease) Active(now time.Time) bool {
 }
 
 type Deployment struct {
-	ID                 string
-	OrganizationID     string
-	ProjectID          string
-	ReleaseID          string
-	ApplicationID      string
-	EnvironmentID      string
-	RuntimeTargetID    string
-	IdempotencyKey     string
-	Operation          Operation
-	SourceDeploymentID string
-	Revision           string
-	Status             Status
-	FailureCategory    FailureCategory
+	ID                   string
+	OrganizationID       string
+	ProjectID            string
+	ReleaseID            string
+	ApplicationID        string
+	EnvironmentID        string
+	RuntimeTargetID      string
+	IdempotencyKey       string
+	Operation            Operation
+	TriggerSource        TriggerSource
+	SourceArtifactID     string
+	SourceBuildID        string
+	BuildConfigurationID string
+	SourceDeploymentID   string
+	Revision             string
+	Status               Status
+	FailureCategory      FailureCategory
 	// CutoverSequence is monotonic within one deployment slot
 	// (Project/Application/Environment/Runtime Target). Unlike the worker
 	// lease generation, it is comparable across separate Deployments.
@@ -119,6 +133,43 @@ func NewFormal(id, projectID, releaseID, applicationID, environmentID, runtimeTa
 	item.RuntimeTargetID = strings.TrimSpace(runtimeTargetID)
 	item.IdempotencyKey = idempotencyKey
 	item.Operation = OperationDeploy
+	item.TriggerSource = TriggerSourceManual
+	return item, nil
+}
+
+type AutomaticDeploymentInput struct {
+	OrganizationID       string
+	ProjectID            string
+	ReleaseID            string
+	ApplicationID        string
+	EnvironmentID        string
+	RuntimeTargetID      string
+	ArtifactID           string
+	BuildID              string
+	BuildConfigurationID string
+}
+
+func NewAutomatic(id, idempotencyKey string, input AutomaticDeploymentInput, now time.Time) (Deployment, error) {
+	item, err := NewFormal(
+		id, input.ProjectID, input.ReleaseID, input.ApplicationID,
+		input.EnvironmentID, input.RuntimeTargetID, idempotencyKey, now,
+	)
+	if err != nil {
+		return Deployment{}, err
+	}
+	input.OrganizationID = strings.TrimSpace(input.OrganizationID)
+	input.ArtifactID = strings.TrimSpace(input.ArtifactID)
+	input.BuildID = strings.TrimSpace(input.BuildID)
+	input.BuildConfigurationID = strings.TrimSpace(input.BuildConfigurationID)
+	if input.OrganizationID == "" || input.ArtifactID == "" || input.BuildID == "" ||
+		input.BuildConfigurationID == "" {
+		return Deployment{}, ErrAutomaticDeploymentUnavailable
+	}
+	item.OrganizationID = input.OrganizationID
+	item.TriggerSource = TriggerSourceAutomatic
+	item.SourceArtifactID = input.ArtifactID
+	item.SourceBuildID = input.BuildID
+	item.BuildConfigurationID = input.BuildConfigurationID
 	return item, nil
 }
 

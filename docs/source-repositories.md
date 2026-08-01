@@ -1,6 +1,6 @@
 # Source Repository 与读取凭据
 
-OwnDock 已提供 Project 范围的源码仓库连接和显式探测 API。它负责说明“代码在哪里、用哪把受保护的钥匙读取、SSH 主机是否可信”，并可验证仓库及默认分支当前是否可访问。探测只读取远端引用，不 checkout 源码、不执行仓库内容，也不会构建镜像或接收 Webhook；这些后续能力会在独立 Build Worker 完成后逐步开放。
+OwnDock 已提供 Project 范围的源码仓库连接和显式探测 API。它负责说明“代码在哪里、用哪把受保护的钥匙读取、SSH 主机是否可信”，并可验证仓库及默认分支当前是否可访问。探测只读取远端引用，不 checkout 源码、不执行仓库内容，也不会构建镜像。Webhook 已由独立 Adapter 接收，仍不会在 API Server 内执行源码或 Dockerfile。
 
 ## 三个容易混淆的概念
 
@@ -22,7 +22,7 @@ flowchart LR
     S --> C
     P[显式连接探测] --> S
     P -.单次解析.-> X
-    W[未来 Webhook 通知] -.触发.-> B[未来 Build]
+    W[签名 Webhook 通知] -.触发.-> B[queued Build]
     B -.按 ID 读取.-> S
     B -.执行期短时解析.-> X
 ```
@@ -124,4 +124,4 @@ sequenceDiagram
 
 ## 后续阶段
 
-BUILD-001 的受限 Git 连接探测、执行期秘密解析和 `/probe` 契约已经落地，仍需补齐真实 Git 服务的 HTTPS/SSH 兼容矩阵门禁。Build Configuration、触发、Webhook、checkout 和 BuildKit 分别由后续 BUILD 任务实现；API Server 始终不 checkout 源码或执行客户代码。
+BUILD-001 的受限 Git 连接探测、执行期秘密解析和 `/probe` 契约已经落地，仍需补齐真实 Git 服务的自建 CA/代理兼容矩阵门禁。Build Configuration、手动触发、通用 Trigger Token、原生 Webhook Adapter、精确 Commit checkout、rootless BuildKit 构建和认证 Registry push 已经落地。API Server 始终不 checkout 源码或执行客户代码。

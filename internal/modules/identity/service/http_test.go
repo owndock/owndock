@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -57,13 +58,15 @@ func TestIdentityHTTPBootstrapAuthenticationAndLogout(t *testing.T) {
 	bootstrapRequest.Header.Set(bootstrapTokenHeader, "bootstrap-secret")
 	bootstrap := httptest.NewRecorder()
 	handler.ServeHTTP(bootstrap, bootstrapRequest)
-	if bootstrap.Code != http.StatusCreated || !strings.Contains(bootstrap.Body.String(), `"access_token"`) {
+	if bootstrap.Code != http.StatusCreated || !strings.Contains(bootstrap.Body.String(), `"access_token"`) ||
+		bootstrap.Header().Get("Cache-Control") != "no-store" || bootstrap.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("bootstrap status=%d body=%s", bootstrap.Code, bootstrap.Body.String())
 	}
 
 	login := request(handler, http.MethodPost, "/api/v1/auth/login",
 		`{"email":"owner@example.com","password":"long-enough-password"}`, "")
-	if login.Code != http.StatusOK {
+	if login.Code != http.StatusOK || login.Header().Get("Cache-Control") != "no-store" ||
+		login.Header().Get("Set-Cookie") != "" {
 		t.Fatalf("login status=%d body=%s", login.Code, login.Body.String())
 	}
 	rawToken := tokens.lastRaw
@@ -174,6 +177,84 @@ func TestIdentityHTTPReturnsRetryAfterWhenLoginIsLimited(t *testing.T) {
 	}
 }
 
+func TestIdentityHTTPInvitationIsOneTimeAndSecretSafe(t *testing.T) {
+	passwords, err := identitydata.NewPasswordHasher()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &memoryIdentityRepository{}
+	tokens := &testTokens{}
+	sequence := 0
+	useCase := biz.NewUseCase(repository, transaction.Passthrough{}, discardAudit{}, passwords, tokens,
+		func() (string, error) { sequence++; return fmt.Sprintf("id-%d", sequence), nil },
+		func() time.Time { return time.Unix(100, 0) }, time.Hour).
+		WithLoginProtection(allowedLoginGuard{}, 5, time.Minute).
+		WithSessionPolicy(10).
+		WithInvitationPolicy(repository, 24*time.Hour).
+		WithAdministrativeSessions(repository)
+	handler := NewHTTP(useCase, func() (string, error) { return "bootstrap-secret", nil })
+	bootstrapRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/bootstrap",
+		strings.NewReader(`{"organization_name":"Example","email":"owner@example.com","password":"owner-long-password"}`))
+	bootstrapRequest.Header.Set("Content-Type", "application/json")
+	bootstrapRequest.Header.Set(bootstrapTokenHeader, "bootstrap-secret")
+	bootstrap := httptest.NewRecorder()
+	handler.ServeHTTP(bootstrap, bootstrapRequest)
+	if bootstrap.Code != http.StatusCreated {
+		t.Fatalf("bootstrap status/body = %d/%s", bootstrap.Code, bootstrap.Body.String())
+	}
+	ownerToken := tokens.lastRaw
+	created := request(handler, http.MethodPost, "/api/v1/auth/invitations",
+		`{"email":"member@example.com"}`, ownerToken)
+	if created.Code != http.StatusCreated || created.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("create invitation status/body = %d/%s", created.Code, created.Body.String())
+	}
+	var invitation struct {
+		ID    string `json:"id"`
+		Token string `json:"token"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &invitation); err != nil || invitation.ID == "" || len(invitation.Token) < 32 {
+		t.Fatalf("invitation response = %+v/%v", invitation, err)
+	}
+	listed := request(handler, http.MethodGet, "/api/v1/auth/invitations", "", ownerToken)
+	if listed.Code != http.StatusOK || strings.Contains(listed.Body.String(), invitation.Token) ||
+		strings.Contains(listed.Body.String(), "token_hash") {
+		t.Fatalf("list invitations status/body = %d/%s", listed.Code, listed.Body.String())
+	}
+	accepted := request(handler, http.MethodPost, "/api/v1/auth/invitations:accept",
+		fmt.Sprintf(`{"token":%q,"password":"member-long-password"}`, invitation.Token), "")
+	if accepted.Code != http.StatusCreated || !strings.Contains(accepted.Body.String(), `"role":"viewer"`) ||
+		accepted.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("accept invitation status/body = %d/%s", accepted.Code, accepted.Body.String())
+	}
+	memberToken := tokens.lastRaw
+	member := repository.users["member@example.com"]
+	adminSessions := request(handler, http.MethodGet,
+		"/api/v1/auth/users/"+member.ID+"/sessions", "", ownerToken)
+	if adminSessions.Code != http.StatusOK || adminSessions.Header().Get("Cache-Control") != "no-store" ||
+		strings.Contains(adminSessions.Body.String(), "token_hash") {
+		t.Fatalf("admin session list status/body = %d/%s", adminSessions.Code, adminSessions.Body.String())
+	}
+	revokeAll := request(handler, http.MethodDelete,
+		"/api/v1/auth/users/"+member.ID+"/sessions", "", ownerToken)
+	if revokeAll.Code != http.StatusOK || !strings.Contains(revokeAll.Body.String(), `"revoked_sessions":1`) {
+		t.Fatalf("admin revoke all status/body = %d/%s", revokeAll.Code, revokeAll.Body.String())
+	}
+	memberAfterRevoke := request(handler, http.MethodGet, "/api/v1/auth/me", "", memberToken)
+	if memberAfterRevoke.Code != http.StatusUnauthorized {
+		t.Fatalf("member after admin revoke status/body = %d/%s", memberAfterRevoke.Code, memberAfterRevoke.Body.String())
+	}
+	replayed := request(handler, http.MethodPost, "/api/v1/auth/invitations:accept",
+		fmt.Sprintf(`{"token":%q,"password":"member-long-password"}`, invitation.Token), "")
+	if replayed.Code != http.StatusUnauthorized || !strings.Contains(replayed.Body.String(), `"code":"invalid_invitation"`) {
+		t.Fatalf("replay invitation status/body = %d/%s", replayed.Code, replayed.Body.String())
+	}
+	users := request(handler, http.MethodGet, "/api/v1/auth/users", "", ownerToken)
+	if users.Code != http.StatusOK || !strings.Contains(users.Body.String(), "member@example.com") ||
+		strings.Contains(users.Body.String(), "password_hash") {
+		t.Fatalf("list users status/body = %d/%s", users.Code, users.Body.String())
+	}
+}
+
 func request(handler http.Handler, method, path, body, bearer string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if body != "" {
@@ -190,6 +271,9 @@ func request(handler http.Handler, method, path, body, bearer string) *httptest.
 type memoryIdentityRepository struct {
 	organization biz.Organization
 	user         biz.User
+	users        map[string]biz.User
+	usersByID    map[string]biz.User
+	invitations  map[string]biz.Invitation
 	sessions     map[string]biz.Session
 }
 
@@ -205,15 +289,100 @@ func (r *memoryIdentityRepository) CreateBootstrap(
 ) error {
 	r.organization = organization
 	r.user = user
+	r.users = map[string]biz.User{user.EmailNormalized: user}
+	r.usersByID = map[string]biz.User{user.ID: user}
+	r.invitations = make(map[string]biz.Invitation)
 	r.sessions = map[string]biz.Session{session.TokenHash: session}
 	return nil
 }
 
 func (r *memoryIdentityRepository) FindUserByEmail(_ context.Context, email string) (biz.User, error) {
+	if user, ok := r.users[email]; ok {
+		return user, nil
+	}
 	if r.user.EmailNormalized != email {
 		return biz.User{}, biz.ErrNotFound
 	}
 	return r.user, nil
+}
+
+func (r *memoryIdentityRepository) ListUsers(_ context.Context, organizationID string) ([]biz.User, error) {
+	var result []biz.User
+	for _, user := range r.users {
+		if user.OrganizationID == organizationID {
+			user.PasswordHash = ""
+			result = append(result, user)
+		}
+	}
+	return result, nil
+}
+
+func (r *memoryIdentityRepository) GetOrganizationUser(
+	_ context.Context, organizationID, userID string,
+) (biz.User, error) {
+	user, ok := r.usersByID[userID]
+	if !ok || user.OrganizationID != organizationID {
+		return biz.User{}, biz.ErrNotFound
+	}
+	user.PasswordHash = ""
+	return user, nil
+}
+
+func (r *memoryIdentityRepository) CreateInvitation(_ context.Context, item biz.Invitation) (biz.Invitation, error) {
+	r.invitations[item.ID] = item
+	return item, nil
+}
+
+func (r *memoryIdentityRepository) ListInvitations(_ context.Context, organizationID string) ([]biz.Invitation, error) {
+	var result []biz.Invitation
+	for _, item := range r.invitations {
+		if item.OrganizationID == organizationID {
+			result = append(result, item.Safe())
+		}
+	}
+	return result, nil
+}
+
+func (r *memoryIdentityRepository) GetInvitation(_ context.Context, organizationID, invitationID string) (biz.Invitation, error) {
+	item, ok := r.invitations[invitationID]
+	if !ok || item.OrganizationID != organizationID {
+		return biz.Invitation{}, biz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *memoryIdentityRepository) FindInvitationByTokenHash(_ context.Context, tokenHash string, now time.Time) (biz.Invitation, error) {
+	for _, item := range r.invitations {
+		if item.TokenHash == tokenHash && item.Status == biz.InvitationStatusActive && item.ExpiresAt.After(now) {
+			return item, nil
+		}
+	}
+	return biz.Invitation{}, biz.ErrInvalidInvitation
+}
+
+func (r *memoryIdentityRepository) AcceptInvitation(_ context.Context, accepted biz.Invitation,
+	expectedVersion uint64, user biz.User, session biz.Session) error {
+	current, ok := r.invitations[accepted.ID]
+	if !ok || current.Version != expectedVersion || current.Status != biz.InvitationStatusActive {
+		return biz.ErrInvalidInvitation
+	}
+	if _, exists := r.users[user.EmailNormalized]; exists {
+		return biz.ErrUserAlreadyExists
+	}
+	r.invitations[accepted.ID] = accepted
+	r.users[user.EmailNormalized], r.usersByID[user.ID] = user, user
+	r.sessions[session.TokenHash] = session
+	return nil
+}
+
+func (r *memoryIdentityRepository) RevokeInvitation(_ context.Context, revoked biz.Invitation,
+	expectedVersion uint64) (biz.Invitation, error) {
+	current, ok := r.invitations[revoked.ID]
+	if !ok || current.Version != expectedVersion || current.Status != biz.InvitationStatusActive {
+		return biz.Invitation{}, biz.ErrInvalidInvitation
+	}
+	r.invitations[revoked.ID] = revoked
+	return revoked, nil
 }
 
 func (r *memoryIdentityRepository) CreateSession(
@@ -231,7 +400,11 @@ func (r *memoryIdentityRepository) FindSession(_ context.Context, tokenHash stri
 	if !ok || !session.ExpiresAt.After(now) {
 		return biz.Session{}, biz.User{}, biz.ErrNotFound
 	}
-	return session, r.user, nil
+	user, ok := r.usersByID[session.UserID]
+	if !ok {
+		return biz.Session{}, biz.User{}, biz.ErrNotFound
+	}
+	return session, user, nil
 }
 
 func (r *memoryIdentityRepository) ListSessions(
@@ -256,6 +429,17 @@ func (r *memoryIdentityRepository) DeleteSession(_ context.Context, sessionID, u
 		}
 	}
 	return biz.ErrNotFound
+}
+
+func (r *memoryIdentityRepository) DeleteUserSessions(_ context.Context, userID string) (int64, error) {
+	var deleted int64
+	for hash, session := range r.sessions {
+		if session.UserID == userID {
+			delete(r.sessions, hash)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 type discardAudit struct{}
@@ -309,7 +493,7 @@ func (deniedLoginGuard) ResetLoginAttempts(
 
 func (t *testTokens) New() (string, string, error) {
 	t.count++
-	t.lastRaw = fmt.Sprintf("token-%d", t.count)
+	t.lastRaw = fmt.Sprintf("token-%d-012345678901234567890123456789", t.count)
 	return t.lastRaw, t.Hash(t.lastRaw), nil
 }
 

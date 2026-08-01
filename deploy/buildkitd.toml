@@ -1,0 +1,23 @@
+debug = false
+trace = false
+
+[worker.oci]
+  enabled = true
+  rootless = true
+  snapshotter = "native"
+  gc = true
+  reservedSpace = "2GB"
+  maxUsedSpace = "8GB"
+  minFreeSpace = "2GB"
+  max-parallelism = 2
+
+  [[worker.oci.gcpolicy]]
+    filters = ["type==source.local", "type==exec.cachemount", "type==source.git.checkout"]
+    keepDuration = "48h"
+    maxUsedSpace = "2GB"
+
+  [[worker.oci.gcpolicy]]
+    all = true
+    reservedSpace = "2GB"
+    maxUsedSpace = "8GB"
+    minFreeSpace = "2GB"

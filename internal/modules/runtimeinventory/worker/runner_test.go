@@ -9,6 +9,9 @@ import (
 
 	"github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
+	"go.opentelemetry.io/otel/codes"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type scheduleRepositoryStub struct {
@@ -172,6 +175,10 @@ func TestRunnerSchedulesSuccessAndRetry(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+			runner.WithObservability(provider.Tracer("runtime-inventory-worker"))
 			runErr := runner.RunOnce(t.Context())
 			if (runErr != nil) != (test.collectErr != nil) {
 				t.Fatalf("RunOnce() error = %v", runErr)
@@ -184,6 +191,18 @@ func TestRunnerSchedulesSuccessAndRetry(t *testing.T) {
 					repository.succeeded,
 					repository.nextDueAt,
 				)
+			}
+			spans := recorder.Ended()
+			wantStatus := codes.Unset
+			if test.collectErr != nil {
+				wantStatus = codes.Error
+			}
+			if len(spans) != 1 || spans[0].Name() != "runtime_inventory.collect" ||
+				spans[0].Status().Code != wantStatus {
+				t.Fatalf("ended spans = %+v", spans)
+			}
+			if test.collectErr != nil && spans[0].Status().Description != "Runtime Inventory collection failed" {
+				t.Fatalf("error span description = %q", spans[0].Status().Description)
 			}
 		})
 	}
@@ -245,6 +264,10 @@ func TestEventRunnerAdvancesCursorOnlyAfterSuccess(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			recorder := tracetest.NewSpanRecorder()
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			t.Cleanup(func() { _ = provider.Shutdown(context.Background()) })
+			runner.WithObservability(provider.Tracer("runtime-inventory-event-worker"))
 			runErr := runner.RunOnce(t.Context())
 			if (runErr != nil) != (test.collectErr != nil) {
 				t.Fatalf("RunOnce() error = %v", runErr)
@@ -254,6 +277,18 @@ func TestEventRunnerAdvancesCursorOnlyAfterSuccess(t *testing.T) {
 				!repository.nextPollAt.Equal(now.Add(test.wantDelay)) ||
 				repository.succeeded != test.succeeded {
 				t.Fatalf("event settlement = %#v", repository)
+			}
+			spans := recorder.Ended()
+			wantStatus := codes.Unset
+			if test.collectErr != nil {
+				wantStatus = codes.Error
+			}
+			if len(spans) != 1 || spans[0].Name() != "runtime_inventory.events.collect" ||
+				spans[0].Status().Code != wantStatus {
+				t.Fatalf("ended spans = %+v", spans)
+			}
+			if test.collectErr != nil && spans[0].Status().Description != "Runtime Inventory event collection failed" {
+				t.Fatalf("error span description = %q", spans[0].Status().Description)
 			}
 		})
 	}

@@ -8,7 +8,7 @@ Deployment API 创建身份与目标不可变、执行状态可演进的交付�
 queued → preparing → deploying → succeeded
 ```
 
-Deployment Worker 不执行源码构建。已接受但尚未实现的 Git-to-Deploy 会由隔离 Build Worker/BuildKit 生成 digest Artifact，再创建 Release；构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段创建或替换目标容器。
+Deployment Worker 不执行源码构建。Git-to-Deploy 由隔离 Build Worker/BuildKit 构建并推送 digest 镜像，再通过 Artifact 创建不可变 Release 后进入本 Worker。构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段创建或替换目标容器。
 
 当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。Agent Gateway 对 Worker 保持相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机；内部把 Deploy 拆为候选 stage、Server Mongo fence 验证和 activate。Agent Control Server 启用时，Agent prober 与 Gateway 配套注册；未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
 
@@ -30,6 +30,8 @@ runtime:
     lease_duration: 30s
     operation_timeout: 10m
 ```
+
+启用后，Server `/metrics` 会出现 `worker="deployment"` 的统一轮询次数、耗时和最近成功/错误时间；领取 Deployment 后创建固定 `deployment.execute` Span。指标不会用 Project 或 Deployment ID 作为标签，Trace 不记录 endpoint、凭据或 Docker 原始错误。告警和排障方法见 [Worker 可观测性与告警](worker-observability.md)。
 
 Runtime Target 的 `credential_ref` 当前只接受 `secret://{alias}`。例如 `secret://docker-production` 从以下进程环境变量读取 PEM，秘密正文不会进入配置、MongoDB、API 或审计：
 

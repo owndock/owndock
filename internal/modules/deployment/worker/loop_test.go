@@ -30,6 +30,7 @@ func TestLoopRunsUntilCanceledAndReportsSafeExecutionError(t *testing.T) {
 		t.Fatal(err)
 	}
 	reported := make(chan error, 1)
+	observed := make(chan string, 1)
 	loop, err := NewLoop(runner, 5*time.Millisecond, time.Second, func(err error) {
 		select {
 		case reported <- err:
@@ -39,6 +40,12 @@ func TestLoopRunsUntilCanceledAndReportsSafeExecutionError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	loop.WithObservability(func(result string, _ time.Duration) {
+		select {
+		case observed <- result:
+		default:
+		}
+	})
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- loop.Run(ctx) }()
@@ -50,6 +57,14 @@ func TestLoopRunsUntilCanceledAndReportsSafeExecutionError(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("worker error was not reported")
+	}
+	select {
+	case result := <-observed:
+		if result != "error" {
+			t.Fatalf("observed result = %q", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("worker poll was not observed")
 	}
 	cancel()
 	if err := <-done; !errors.Is(err, context.Canceled) {

@@ -243,9 +243,106 @@ func TestSessionGovernanceListsAndRevokesOnlyOwnedSession(t *testing.T) {
 	}
 }
 
+func TestInvitationCreatesViewerWithoutExposingTokenHash(t *testing.T) {
+	now := time.Unix(100, 0)
+	repository := &fakeRepository{
+		user: User{ID: "owner-1", OrganizationID: "organization-1", Email: "owner@example.com",
+			EmailNormalized: "owner@example.com", Role: security.RoleOwner},
+		users:       make(map[string]User),
+		invitations: make(map[string]Invitation),
+		sessions:    make(map[string]Session),
+	}
+	repository.users[repository.user.EmailNormalized] = repository.user
+	audits := &fakeAudit{}
+	sequence := 0
+	useCase := NewUseCase(repository, transaction.Passthrough{}, audits, fakePasswords{}, fakeTokens{},
+		func() (string, error) { sequence++; return fmt.Sprintf("id-%d", sequence), nil },
+		func() time.Time { return now }, time.Hour).
+		WithSessionPolicy(10).
+		WithInvitationPolicy(repository, 24*time.Hour)
+	owner := security.Principal{UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-owner", Role: security.RoleOwner}
+	credential, err := useCase.CreateInvitation(t.Context(), owner, "Member@Example.com", "request-create")
+	if err != nil || len(credential.Token) < 32 || credential.Invitation.TokenHash != "" ||
+		credential.Invitation.Email != "member@example.com" || credential.Invitation.Status != InvitationStatusActive {
+		t.Fatalf("CreateInvitation() = %+v/%v", credential, err)
+	}
+	listed, err := useCase.ListInvitations(t.Context(), owner)
+	if err != nil || len(listed) != 1 || listed[0].TokenHash != "" {
+		t.Fatalf("ListInvitations() = %+v/%v", listed, err)
+	}
+	viewer := owner
+	viewer.Role = security.RoleViewer
+	if _, err := useCase.CreateInvitation(t.Context(), viewer, "other@example.com", "request-forbidden"); !errors.Is(err, security.ErrForbidden) {
+		t.Fatalf("Viewer CreateInvitation() error = %v", err)
+	}
+	accepted, err := useCase.AcceptInvitation(t.Context(), credential.Token,
+		"member-long-password", "request-accept")
+	if err != nil || accepted.User.Email != "member@example.com" ||
+		accepted.User.Role != security.RoleViewer || accepted.User.PasswordHash != "" || accepted.AccessToken == "" {
+		t.Fatalf("AcceptInvitation() = %+v/%v", accepted, err)
+	}
+	if _, err := useCase.AcceptInvitation(t.Context(), credential.Token,
+		"another-long-password", "request-replay"); !errors.Is(err, ErrInvalidInvitation) {
+		t.Fatalf("replayed invitation error = %v", err)
+	}
+	users, err := useCase.ListUsers(t.Context(), owner)
+	if err != nil || len(users) != 2 {
+		t.Fatalf("ListUsers() = %+v/%v", users, err)
+	}
+	for _, user := range users {
+		if user.PasswordHash != "" {
+			t.Fatalf("ListUsers() exposed password hash: %+v", user)
+		}
+	}
+	if len(audits.events) != 2 || audits.events[0].Action != "identity.invitation_create" ||
+		audits.events[1].Action != "identity.invitation_accept" {
+		t.Fatalf("invitation audits = %+v", audits.events)
+	}
+}
+
+func TestInvitationCanBeRevokedAndExpiredInvitationFailsClosed(t *testing.T) {
+	now := time.Unix(100, 0)
+	repository := &fakeRepository{user: User{ID: "owner-1", OrganizationID: "organization-1",
+		EmailNormalized: "owner@example.com", Role: security.RoleOwner}, users: make(map[string]User),
+		invitations: make(map[string]Invitation), sessions: make(map[string]Session)}
+	repository.users["owner@example.com"] = repository.user
+	sequence := 0
+	useCase := NewUseCase(repository, transaction.Passthrough{}, &fakeAudit{}, fakePasswords{}, fakeTokens{},
+		func() (string, error) { sequence++; return fmt.Sprintf("id-%d", sequence), nil },
+		func() time.Time { return now }, time.Hour).WithSessionPolicy(10).
+		WithInvitationPolicy(repository, time.Minute)
+	owner := security.Principal{UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-owner", Role: security.RoleOwner}
+	credential, err := useCase.CreateInvitation(t.Context(), owner, "member@example.com", "request-create")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := useCase.RevokeInvitation(t.Context(), owner, credential.Invitation.ID, "request-revoke")
+	if err != nil || revoked.Status != InvitationStatusRevoked || revoked.TokenHash != "" {
+		t.Fatalf("RevokeInvitation() = %+v/%v", revoked, err)
+	}
+	if _, err := useCase.AcceptInvitation(t.Context(), credential.Token,
+		"member-long-password", "request-revoked"); !errors.Is(err, ErrInvalidInvitation) {
+		t.Fatalf("revoked invitation error = %v", err)
+	}
+	expired, err := NewInvitation("expired-1", "organization-1", "expired@example.com",
+		"hash:expired-invitation-token-0123456789", "owner-1", now.Add(-2*time.Minute), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository.invitations[expired.ID] = expired
+	if _, err := useCase.AcceptInvitation(t.Context(), "expired-invitation-token-0123456789",
+		"member-long-password", "request-expired"); !errors.Is(err, ErrInvalidInvitation) {
+		t.Fatalf("expired invitation error = %v", err)
+	}
+}
+
 type fakeRepository struct {
 	organization Organization
 	user         User
+	users        map[string]User
+	invitations  map[string]Invitation
 	sessions     map[string]Session
 }
 
@@ -261,10 +358,103 @@ func (r *fakeRepository) CreateBootstrap(_ context.Context, organization Organiz
 }
 
 func (r *fakeRepository) FindUserByEmail(_ context.Context, email string) (User, error) {
+	if user, ok := r.users[email]; ok {
+		return user, nil
+	}
 	if r.user.EmailNormalized != email {
 		return User{}, ErrNotFound
 	}
 	return r.user, nil
+}
+
+func (r *fakeRepository) ListUsers(_ context.Context, organizationID string) ([]User, error) {
+	result := make([]User, 0, len(r.users))
+	for _, user := range r.users {
+		if user.OrganizationID == organizationID {
+			user.PasswordHash = ""
+			result = append(result, user)
+		}
+	}
+	return result, nil
+}
+
+func (r *fakeRepository) GetOrganizationUser(_ context.Context, organizationID, userID string) (User, error) {
+	if r.user.ID == userID && r.user.OrganizationID == organizationID {
+		item := r.user
+		item.PasswordHash = ""
+		return item, nil
+	}
+	for _, user := range r.users {
+		if user.ID == userID && user.OrganizationID == organizationID {
+			user.PasswordHash = ""
+			return user, nil
+		}
+	}
+	return User{}, ErrNotFound
+}
+
+func (r *fakeRepository) CreateInvitation(_ context.Context, item Invitation) (Invitation, error) {
+	if r.invitations == nil {
+		r.invitations = make(map[string]Invitation)
+	}
+	r.invitations[item.ID] = item
+	return item, nil
+}
+
+func (r *fakeRepository) ListInvitations(_ context.Context, organizationID string) ([]Invitation, error) {
+	var result []Invitation
+	for _, item := range r.invitations {
+		if item.OrganizationID == organizationID {
+			result = append(result, item.Safe())
+		}
+	}
+	return result, nil
+}
+
+func (r *fakeRepository) GetInvitation(_ context.Context, organizationID, invitationID string) (Invitation, error) {
+	item, ok := r.invitations[invitationID]
+	if !ok || item.OrganizationID != organizationID {
+		return Invitation{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *fakeRepository) FindInvitationByTokenHash(_ context.Context, tokenHash string, now time.Time) (Invitation, error) {
+	for _, item := range r.invitations {
+		if item.TokenHash == tokenHash && item.Status == InvitationStatusActive && item.ExpiresAt.After(now) {
+			return item, nil
+		}
+	}
+	return Invitation{}, ErrInvalidInvitation
+}
+
+func (r *fakeRepository) AcceptInvitation(_ context.Context, accepted Invitation,
+	expectedVersion uint64, user User, session Session) error {
+	current, ok := r.invitations[accepted.ID]
+	if !ok || current.Version != expectedVersion || current.Status != InvitationStatusActive {
+		return ErrInvalidInvitation
+	}
+	if _, exists := r.users[user.EmailNormalized]; exists {
+		return ErrUserAlreadyExists
+	}
+	r.invitations[accepted.ID] = accepted
+	r.users[user.EmailNormalized] = user
+	r.user = user
+	if r.sessions == nil {
+		r.sessions = make(map[string]Session)
+	}
+	r.sessions[session.TokenHash] = session
+	return nil
+}
+
+func (r *fakeRepository) RevokeInvitation(_ context.Context, revoked Invitation,
+	expectedVersion uint64) (Invitation, error) {
+	current, ok := r.invitations[revoked.ID]
+	if !ok || current.Version != expectedVersion || current.Status != InvitationStatusActive {
+		return Invitation{}, ErrInvalidInvitation
+	}
+	r.invitations[revoked.ID] = revoked
+	return revoked, nil
 }
 
 func (r *fakeRepository) CreateSession(
@@ -309,6 +499,77 @@ func (r *fakeRepository) DeleteSession(_ context.Context, sessionID, userID stri
 	return ErrNotFound
 }
 
+func (r *fakeRepository) DeleteUserSessions(_ context.Context, userID string) (int64, error) {
+	var deleted int64
+	for hash, session := range r.sessions {
+		if session.UserID == userID {
+			delete(r.sessions, hash)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
+func TestAdministrativeSessionGovernance(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	repository := &fakeRepository{
+		user: User{ID: "owner", OrganizationID: "organization", Email: "owner@example.com",
+			EmailNormalized: "owner@example.com", Role: security.RoleOwner},
+		users: map[string]User{
+			"member@example.com": {ID: "member", OrganizationID: "organization",
+				Email: "member@example.com", EmailNormalized: "member@example.com",
+				PasswordHash: "secret-hash", Role: security.RoleViewer},
+			"foreign@example.com": {ID: "foreign", OrganizationID: "other",
+				Email: "foreign@example.com", EmailNormalized: "foreign@example.com", Role: security.RoleViewer},
+		},
+		sessions: map[string]Session{
+			"owner-hash":  {ID: "owner-session", UserID: "owner", TokenHash: "owner-hash", ExpiresAt: now.Add(time.Hour)},
+			"member-hash": {ID: "member-session", UserID: "member", TokenHash: "member-hash", ExpiresAt: now.Add(time.Hour)},
+			"member-hash-2": {ID: "member-session-2", UserID: "member", TokenHash: "member-hash-2",
+				ExpiresAt: now.Add(time.Hour)},
+		},
+	}
+	audits := &fakeAudit{}
+	sequence := 0
+	useCase := NewUseCase(repository, transaction.Passthrough{}, audits, fakePasswords{}, fakeTokens{},
+		func() (string, error) { sequence++; return fmt.Sprintf("audit-%d", sequence), nil },
+		func() time.Time { return now }, time.Hour).WithAdministrativeSessions(repository)
+	owner := security.Principal{UserID: "owner", OrganizationID: "organization",
+		SessionID: "owner-session", Role: security.RoleOwner}
+
+	sessions, err := useCase.ListUserSessions(t.Context(), owner, "member")
+	if err != nil || len(sessions) != 2 {
+		t.Fatalf("ListUserSessions() = %+v/%v", sessions, err)
+	}
+	for _, session := range sessions {
+		if session.TokenHash != "" {
+			t.Fatalf("ListUserSessions() exposed token hash: %+v", session)
+		}
+	}
+	if _, err := useCase.ListUserSessions(t.Context(), owner, "foreign"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-organization ListUserSessions() error = %v", err)
+	}
+	if err := useCase.RevokeUserSession(t.Context(), owner, "member", "member-session", "request-1"); err != nil {
+		t.Fatalf("RevokeUserSession() error = %v", err)
+	}
+	revoked, err := useCase.RevokeAllUserSessions(t.Context(), owner, "member", "request-2")
+	if err != nil || revoked != 1 {
+		t.Fatalf("RevokeAllUserSessions() = %d/%v", revoked, err)
+	}
+	if len(audits.events) != 2 || audits.events[0].Action != "identity.session_revoke_admin" ||
+		audits.events[1].Action != "identity.session_revoke_all_admin" {
+		t.Fatalf("audits = %+v", audits.events)
+	}
+	if _, err := useCase.RevokeAllUserSessions(t.Context(), owner, "owner", "self"); !errors.Is(err, ErrCannotRevokeCurrent) {
+		t.Fatalf("self RevokeAllUserSessions() error = %v", err)
+	}
+	viewer := security.Principal{UserID: "member", OrganizationID: "organization",
+		SessionID: "viewer-session", Role: security.RoleViewer}
+	if _, err := useCase.ListUserSessions(t.Context(), viewer, "member"); !errors.Is(err, security.ErrForbidden) {
+		t.Fatalf("viewer ListUserSessions() error = %v", err)
+	}
+}
+
 type fakePasswords struct{}
 
 func (fakePasswords) Hash(value string) (string, error) { return "hash:" + value, nil }
@@ -317,8 +578,10 @@ func (fakePasswords) DummyHash() string                 { return "hash:dummy-pas
 
 type fakeTokens struct{}
 
-func (fakeTokens) New() (string, string, error) { return "raw-token", "hash:raw-token", nil }
-func (fakeTokens) Hash(value string) string     { return "hash:" + value }
+func (fakeTokens) New() (string, string, error) {
+	return "raw-token-012345678901234567890123456789", "hash:raw-token-012345678901234567890123456789", nil
+}
+func (fakeTokens) Hash(value string) string { return "hash:" + value }
 
 type fakeAudit struct {
 	events []sharedaudit.Event

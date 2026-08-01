@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/mail"
 	"net/url"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/secretref"
+	"github.com/owndock/owndock/internal/shared/security"
 )
 
 var (
@@ -24,6 +26,9 @@ var (
 	ErrInvalidRuntimeSpec            = errors.New("release runtime specification is invalid")
 	ErrInvalidRuntimeTarget          = errors.New("runtime target is invalid")
 	ErrManagedHostNotFound           = errors.New("managed host was not found")
+	ErrInvalidProjectMember          = errors.New("project member is invalid")
+	ErrProjectMemberConflict         = errors.New("project member already exists or has changed")
+	ErrCannotModifySelf              = errors.New("project member cannot modify their own membership")
 	ErrRuntimeTargetHostMismatch     = errors.New("runtime target connection mode does not match managed host")
 	ErrRuntimeTargetProbeUnavailable = errors.New("runtime target probe is unavailable")
 	ErrNotFound                      = errors.New("resource was not found")
@@ -35,6 +40,28 @@ type Project struct {
 	Name           string
 	CreatedBy      string
 	CreatedAt      time.Time
+}
+
+// ProjectMember grants a local Organization user access to one Project. Owner
+// access is implicit and is deliberately never persisted as a membership row.
+type ProjectMember struct {
+	OrganizationID string
+	ProjectID      string
+	UserID         string
+	Email          string
+	Role           security.Role
+	Version        uint64
+	CreatedBy      string
+	CreatedAt      time.Time
+	UpdatedBy      string
+	UpdatedAt      time.Time
+}
+
+type OrganizationUser struct {
+	ID             string
+	OrganizationID string
+	Email          string
+	Role           security.Role
 }
 
 type Application struct {
@@ -51,6 +78,7 @@ type Release struct {
 	ApplicationID        string
 	ImageDigest          string
 	RegistryCredentialID string
+	SourceArtifactID     string
 	RuntimeSpec          runtimespec.Spec
 	CreatedBy            string
 	CreatedAt            time.Time
@@ -117,6 +145,54 @@ type ProjectRepository interface {
 	ProjectExists(context.Context, string, string) (bool, error)
 }
 
+type ProjectMemberRepository interface {
+	ListProjectIDsForUser(context.Context, string, string) ([]string, error)
+	ResolveProjectRole(context.Context, string, string, string) (security.Role, error)
+	FindOrganizationUserByEmail(context.Context, string, string) (OrganizationUser, error)
+	ListProjectMembers(context.Context, string) ([]ProjectMember, error)
+	GetProjectMember(context.Context, string, string) (ProjectMember, error)
+	CreateProjectMember(context.Context, ProjectMember) (ProjectMember, error)
+	UpdateProjectMember(context.Context, ProjectMember, uint64) (ProjectMember, error)
+	DeleteProjectMember(context.Context, string, string, uint64) error
+}
+
+func NewProjectMember(
+	projectID string, user OrganizationUser, role security.Role, createdBy string, now time.Time,
+) (ProjectMember, error) {
+	projectID, createdBy = strings.TrimSpace(projectID), strings.TrimSpace(createdBy)
+	if projectID == "" || user.ID == "" || user.OrganizationID == "" || user.Email == "" || createdBy == "" || now.IsZero() ||
+		user.Role == security.RoleOwner || !validProjectMemberRole(role) {
+		return ProjectMember{}, ErrInvalidProjectMember
+	}
+	return ProjectMember{
+		OrganizationID: user.OrganizationID, ProjectID: projectID, UserID: user.ID, Email: user.Email, Role: role,
+		Version: 1, CreatedBy: createdBy, CreatedAt: now.UTC(),
+		UpdatedBy: createdBy, UpdatedAt: now.UTC(),
+	}, nil
+}
+
+func (m ProjectMember) ChangeRole(role security.Role, updatedBy string, now time.Time) (ProjectMember, error) {
+	updatedBy = strings.TrimSpace(updatedBy)
+	if !validProjectMemberRole(role) || updatedBy == "" || now.IsZero() || m.Version == 0 {
+		return ProjectMember{}, ErrInvalidProjectMember
+	}
+	m.Role, m.Version, m.UpdatedBy, m.UpdatedAt = role, m.Version+1, updatedBy, now.UTC()
+	return m, nil
+}
+
+func validProjectMemberRole(role security.Role) bool {
+	return role == security.RoleMaintainer || role == security.RoleDeveloper || role == security.RoleViewer
+}
+
+func normalizeProjectMemberEmail(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	address, err := mail.ParseAddress(value)
+	if err != nil || address.Address != value || len(value) > 254 {
+		return "", ErrInvalidProjectMember
+	}
+	return value, nil
+}
+
 type ApplicationRepository interface {
 	ListApplications(context.Context, string) ([]Application, error)
 	CreateApplication(context.Context, Application) (Application, error)
@@ -126,6 +202,10 @@ type ApplicationRepository interface {
 type ReleaseRepository interface {
 	ListReleases(context.Context, string, string) ([]Release, error)
 	CreateRelease(context.Context, Release) (Release, error)
+}
+
+type ArtifactReleaseRepository interface {
+	GetReleaseByArtifact(context.Context, string, string) (Release, error)
 }
 
 type RuntimeTargetRepository interface {
@@ -218,6 +298,27 @@ func NewReleaseWithRuntimeSpec(
 		RuntimeSpec: runtimeSpec,
 		CreatedBy:   createdBy, CreatedAt: now.UTC(),
 	}, nil
+}
+
+func NewReleaseFromArtifact(
+	id, projectID, applicationID, image, registryCredentialID, artifactID string,
+	runtimeSpec runtimespec.Spec,
+	createdBy string,
+	now time.Time,
+) (Release, error) {
+	artifactID = strings.TrimSpace(artifactID)
+	if artifactID == "" {
+		return Release{}, ErrInvalidImage
+	}
+	item, err := NewReleaseWithRuntimeSpec(
+		id, projectID, applicationID, image, registryCredentialID,
+		runtimeSpec, createdBy, now,
+	)
+	if err != nil {
+		return Release{}, err
+	}
+	item.SourceArtifactID = artifactID
+	return item, nil
 }
 
 func NewRegistryCredential(

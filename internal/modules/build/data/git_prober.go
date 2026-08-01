@@ -35,6 +35,7 @@ type GitSourceProber struct {
 	resolver RepositorySecretResolver
 	timeout  time.Duration
 	list     listRemoteFunc
+	resolve  listRemoteFunc
 }
 
 func NewGitSourceProber(resolver RepositorySecretResolver) *GitSourceProber {
@@ -42,7 +43,60 @@ func NewGitSourceProber(resolver RepositorySecretResolver) *GitSourceProber {
 		resolver: resolver,
 		timeout:  defaultSourceProbeTimeout,
 		list:     listRemote,
+		resolve:  listRemotePeeled,
 	}
+}
+
+func (p *GitSourceProber) ResolveSourceRevision(
+	ctx context.Context,
+	source biz.SourceRepository,
+	credential *biz.RepositoryCredential,
+	ref, expectedCommitSHA string,
+) (biz.SourceRevision, error) {
+	if err := ctx.Err(); err != nil {
+		return biz.SourceRevision{}, err
+	}
+	resolveContext, cancel := context.WithTimeout(ctx, p.timeout)
+	defer cancel()
+	auth, secret, status := p.authentication(resolveContext, source, credential)
+	if secret != nil {
+		defer clearBytes(secret)
+	}
+	if status != "" {
+		if err := ctx.Err(); err != nil {
+			return biz.SourceRevision{}, err
+		}
+		return biz.SourceRevision{}, biz.ErrRevisionResolveUnavailable
+	}
+	references, err := p.resolve(resolveContext, source.RepositoryURL, auth, p.timeout)
+	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return biz.SourceRevision{}, err
+		}
+		return biz.SourceRevision{}, biz.ErrRevisionResolveUnavailable
+	}
+	wanted := plumbing.ReferenceName(ref)
+	peeled := plumbing.ReferenceName(ref + "^{}")
+	var commit plumbing.Hash
+	for _, reference := range references {
+		if reference != nil && reference.Name() == wanted {
+			commit = reference.Hash()
+		}
+	}
+	for _, reference := range references {
+		if reference != nil && reference.Name() == peeled {
+			commit = reference.Hash()
+			break
+		}
+	}
+	if commit.IsZero() {
+		return biz.SourceRevision{}, biz.ErrRevisionNotFound
+	}
+	commitSHA := commit.String()
+	if expectedCommitSHA != "" && !strings.EqualFold(expectedCommitSHA, commitSHA) {
+		return biz.SourceRevision{}, biz.ErrRevisionMismatch
+	}
+	return biz.NewSourceRevision(source.ID, ref, commitSHA)
 }
 
 func (p *GitSourceProber) WithTimeout(timeout time.Duration) *GitSourceProber {
@@ -162,6 +216,25 @@ func listRemote(
 	})
 }
 
+func listRemotePeeled(
+	ctx context.Context,
+	repositoryURL string,
+	auth transport.AuthMethod,
+	timeout time.Duration,
+) ([]*plumbing.Reference, error) {
+	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
+		Name: "origin", URLs: []string{repositoryURL},
+	})
+	seconds := int(timeout.Round(time.Second) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	return remote.ListContext(ctx, &git.ListOptions{
+		Auth: auth, InsecureSkipTLS: false,
+		PeelingOption: git.AppendPeeled, Timeout: seconds,
+	})
+}
+
 func classifyProbeError(err error) biz.SourceRepositoryStatus {
 	switch {
 	case errors.Is(err, errSSHHostKeyMismatch):
@@ -195,3 +268,4 @@ func clearBytes(value []byte) {
 }
 
 var _ biz.SourceProber = (*GitSourceProber)(nil)
+var _ biz.SourceRevisionResolver = (*GitSourceProber)(nil)

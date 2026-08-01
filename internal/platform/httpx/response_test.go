@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/owndock/owndock/internal/platform/localization"
 )
 
 func TestRequestIDGeneratesAndPropagatesID(t *testing.T) {
@@ -22,11 +24,38 @@ func TestRequestIDGeneratesAndPropagatesID(t *testing.T) {
 	if got := recorder.Header().Get(RequestIDHeader); got != "request-123" {
 		t.Fatalf("response request ID = %q", got)
 	}
+	if got := recorder.Header().Get("Content-Language"); got != "en-US" {
+		t.Fatalf("error content language = %q", got)
+	}
 	var response ErrorResponse
 	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
 		t.Fatal(err)
 	}
 	if response.Error.Code != "invalid_json" || response.Error.RequestID != "request-123" {
+		t.Fatalf("response = %+v", response)
+	}
+}
+
+func TestErrorRequestLocalizesSafeMessage(t *testing.T) {
+	handler := localization.HTTP()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ErrorRequest(w, r, http.StatusBadRequest, "invalid_json")
+	}))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects", nil)
+	request.Header.Set("Accept-Language", "zh-CN,zh;q=0.9")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+
+	if got := recorder.Header().Get("Content-Language"); got != "zh-CN" {
+		t.Fatalf("content language = %q", got)
+	}
+	if got := recorder.Header().Values("Vary"); len(got) != 1 || got[0] != "Accept-Language" {
+		t.Fatalf("vary = %v", got)
+	}
+	var response ErrorResponse
+	if err := json.NewDecoder(recorder.Body).Decode(&response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Error.Code != "invalid_json" || response.Error.Message != "请求正文必须是有效的 JSON" {
 		t.Fatalf("response = %+v", response)
 	}
 }
@@ -53,5 +82,8 @@ func TestRequestIDGenerationFailureIsSafe(t *testing.T) {
 	})).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/livez", nil))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Language"); got != "en-US" {
+		t.Fatalf("error content language = %q", got)
 	}
 }

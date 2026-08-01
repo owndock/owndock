@@ -88,6 +88,13 @@ func (t *Tracing) Instrument(next http.Handler) http.Handler {
 	)
 }
 
+func (t *Tracing) Tracer(name string) trace.Tracer {
+	if t == nil || t.provider == nil {
+		return trace.NewNoopTracerProvider().Tracer(name)
+	}
+	return t.provider.Tracer(name)
+}
+
 func (t *Tracing) Shutdown(ctx context.Context) error {
 	if t == nil || t.shutdown == nil {
 		return nil

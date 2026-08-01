@@ -18,7 +18,9 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - 不提供任意 YAML/Shell 流水线，也不在 API Server 或生产 Runtime Target 上构建客户源码；
 - Kubernetes 和其他运行时通过后续适配器扩展。
 
-当前代码已经实现外部 OCI 镜像到 Release/Deployment 的基础链路，以及 Source Repository/Repository Credential 的安全登记和受限连接探测；Git checkout、构建与 Webhook 尚未实现。产品接受不等于代码已交付。
+当前代码已经实现外部 OCI 镜像到 Release/Deployment 的基础链路，以及 Source Repository/Repository Credential 的安全登记、受限连接探测、平台签名 Webhook 入队、精确 Git checkout、rootless BuildKit 构建、认证 Registry push、Artifact 和幂等 Release 交接、development 显式自动部署，以及有界脱敏 Build 日志。完整故障与攻击系统验收前仍属于 pre-release。
+
+产品首版同时支持 `zh-CN` 与 `en-US`。API 保持英文机器字段和稳定 error/status/action code，后端按请求语言生成安全错误文案；控制台、未来的客户 CLI、官网和客户文档在展示层本地化，详细边界见[多语言与本地化](localization.md)。
 
 ## 产品模型
 
@@ -28,7 +30,8 @@ Installation
           ├── Users / Role Bindings
           ├── Templates
           ├── Managed Hosts
-          │     └── Agent Identities
+          │     ├── Agent Identities
+          │     └── Host Terminal Sessions
           └── Projects
                 ├── Source Repositories
                 ├── Applications
@@ -40,15 +43,20 @@ Installation
                 ├── Runtime Targets
                 ├── Registry Credentials
                 └── Deployments
+                      └── Container Terminal Sessions
 
 Template --optional snapshot--> Application
 Source Repository 1 --* Build Configuration
+Build Configuration 1 --* Build Trigger
+Build Configuration 1 --* Build Hook
 Build Configuration 1 --* Build 1 --0..1 Artifact
 Artifact 1 --0..1 Release
 Application 1 --* Release
 Release 1 --* Deployment *--1 Environment
 Deployment *--1 Runtime Target
 Runtime Target *--1 Managed Host
+Terminal Session *--1 Managed Host
+Container Terminal Session *--1 Deployment
 ```
 
 首版一个安装实例对应一个 Organization。Managed Host 是 Organization 纳管的实际 Linux 主机；Agent Identity 是 agent 模式 Host 当前获准出站连接的机器身份。Project 是源码、Application、构建、Release、Environment、Runtime Target、Deployment 和项目级凭据的授权、查询与名称隔离边界。Project 通过 Runtime Target 获得某台 Host 上 Docker Engine 的部署入口，不自动获得主机级权限。
@@ -71,7 +79,7 @@ Application 是 Project 内长期存在、可多次发布的软件服务身份�
 
 Source Repository 保存平台无关的 Git HTTPS/SSH 地址，并通过 ID 关联只含外部秘密引用的 Repository Credential。Owner/Maintainer 可以显式探测连接：系统只列出远端引用，验证默认分支、HTTPS TLS 或固定 SSH Host Key，然后保存不含原始错误的安全状态。私有仓库读取凭据与 Webhook 秘密分开：前者允许 OwnDock 读取代码，后者只用于验证“何时触发构建”的通知。通俗解释、当前规则和安全隔离见 [Source Repository 使用说明](source-repositories.md) 与 [Git-to-Deploy 产品边界](git-to-deploy.md)。
 
-Build Configuration 属于 Application，声明 Dockerfile、构建上下文、目标 Registry、平台与资源限制；Build 固定 Commit 和配置快照；成功推送 Registry 后形成按 digest 固定的 Artifact，再由 Artifact 创建不可变 Release。
+Build Configuration 属于 Application，声明 Source Repository、Dockerfile、构建上下文、精确允许 ref、目标 Registry、单一平台、资源/超时/并发、Release 运行规格、自动 Release 意图和可选 development 自动部署目标。它是可修改的版本化配方。Build 固定完整 Commit SHA 和触发时的非秘密配置快照；手动、独立 Trigger Token 与 GitHub/GitLab/Gitea/Forgejo Webhook 自动触发和幂等创建已实现。Build 状态机、协作取消、不可变重试、Mongo queue/lease/heartbeat/失联接管/generation fence 也已进入控制面。Trigger Token 与 Build Hook 都固定绑定配置并可进一步收窄 ref，不能让外部调用覆盖仓库或构建目标。独立 Build Worker 已实现固定 Git、HTTPS/SSH 临时凭据、Commit 二次验证、有界工作区、rootless BuildKit 与认证 Registry push；推送得到的真实 digest 会在 fence 下原子形成 Artifact 和成功 Build。Artifact 按 `source_artifact_id` 幂等创建不可变 Release，再按 Artifact/Environment/Runtime Target 幂等创建普通 Deployment；协调失败只重试交接、不重新构建。
 
 Git checkout、不可信 Dockerfile 和 BuildKit 缓存必须位于隔离 Build Boundary，不能写入 MongoDB、进入 API Server，或挂载生产 Runtime Target 的 Docker Socket 和数据卷。
 
@@ -85,7 +93,11 @@ Environment 表示 dev、staging、prod 等逻辑阶段。Runtime Target 表示 
 
 ### Deployment
 
-Deployment 是把一个 Release 交付到 Environment 和 Runtime Target 的不可变操作记录。相同幂等键不能创建重复操作；重试和回滚都创建新 Deployment，并保留来源关系和原始结果。
+Deployment 是把一个 Release 交付到 Environment 和 Runtime Target 的不可变操作记录。相同幂等键不能创建重复操作；重试和回滚都创建新 Deployment，并保留来源关系和原始结果。Maintainer/Owner 可为 development 显式开启构建成功自动部署，规则进入不可变 Build/Artifact 快照并继续走相同的就绪检查、Worker 和审计链路；staging/production 首版只能人工触发。
+
+### Terminal Session
+
+Terminal Session 是短期、可审计的受控操作，不是通用 Docker Proxy 或任意 SSH。容器会话固定到 Deployment 当前成功切流实例；主机会话固定到 Organization 的 Managed Host。策略控制角色、环境/目标范围、idle/max timeout 和并发。当前控制面与 REST 契约已经实现，实际 exec、PTY/SSH 与 WSS 仍在后续阶段，详见[安全终端会话](terminal-sessions.md)。
 
 ## 身份与权限
 
@@ -98,7 +110,7 @@ Deployment 是把一个 Release 交付到 Environment 和 Runtime Target 的不�
 | Developer | Application、Build Configuration、构建/取消/重试、Release、部署和状态查看 |
 | Viewer | 只读查看资源、状态和允许公开的审计信息 |
 
-所有写操作和权限变更都必须形成基础审计事件。OIDC 保留为稳定扩展边界，但社区版首个用例不依赖 OIDC。主机终端属于独立的 Organization 高权限，不因 Maintainer 拥有 Project Runtime Target 而自动获得。
+Owner 是 Organization 全局角色并隐式访问全部 Project；受邀用户默认没有 Project 权限，必须显式绑定为 Maintainer、Developer 或 Viewer。Project 角色不写入 Session，每次请求实时解析，因此降权和移除立即生效。所有写操作和权限变更都必须形成基础审计事件。OIDC 保留为稳定扩展边界，但社区版首个用例不依赖 OIDC。主机终端属于独立的 Organization 高权限，不因 Maintainer 拥有 Project Runtime Target 而自动获得。
 
 ## 商业边界
 

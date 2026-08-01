@@ -1,6 +1,6 @@
 # Git-to-Deploy 产品与安全边界
 
-> 状态：产品已接受；Source Repository/Repository Credential 登记与受限连接探测 API 已实现，构建链尚未开放。
+> 状态：产品已接受；Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease、独立 Worker 的受控 Git checkout、rootless BuildKit、认证 Registry push、Artifact/Release 衔接、development 自动部署规则和有界脱敏日志已实现。
 
 Git-to-Deploy 的目标是让用户连接现有 Git 仓库，选择一个 Commit，通过受约束的 Dockerfile 构建 OCI 镜像，并自动形成可部署、可追踪、可回滚的 Release。用户仍可以跳过内置构建，直接使用外部 CI 已生成的 OCI 镜像。
 
@@ -42,7 +42,7 @@ flowchart LR
 - 手动触发和平台无关的通用 Trigger API；
 - GitHub、GitLab、Gitea/Forgejo Webhook 通过独立 Adapter 扩展；
 - Build 日志有大小、保留时间和脱敏边界；
-- Artifact 成功后再创建不可变 Release。
+- Artifact 成功后再创建不可变 Release；development 可由 Maintainer/Owner 显式配置自动 Deployment，staging/production 首版强制人工触发。
 
 首版不包含任意 YAML/Shell Pipeline、用户自定义插件、PR/Fork 自动构建、submodule、Git LFS、多架构或分布式构建。
 
@@ -71,4 +71,4 @@ flowchart TB
 
 ## 当前实现状态
 
-目前 OwnDock 已实现外部 OCI digest → Release → Deployment 的基础链路，以及 Source Repository/Repository Credential 的 Project 所有权、RBAC、MongoDB、事务审计、登记查询和显式 probe API。probe 在 10 秒边界内执行等价于 `ls-remote` 的只读引用查询，运行时解析外部秘密，验证系统 CA 或固定 SSH Host Key，并只持久化安全状态；它不 checkout 源码、不运行仓库内容。真实 Git 服务兼容矩阵、Build Configuration、Build、Artifact、Build Worker、BuildKit 和 Webhook API 尚未完成。具体连接格式、状态和客户解释见 [Source Repository 使用说明](source-repositories.md)。
+目前 OwnDock 已实现外部 OCI digest → Release → Deployment，以及 Git → Build → Artifact → Release → development 自动 Deployment 的基础链路。独立 `owndock-build-worker` 使用固定 Git 2.55.0 执行 HTTPS/SSH 精确 Commit checkout，再通过 mTLS 调用固定 `v0.31.2` rootless BuildKit 和 `1.25.0` Dockerfile frontend，把镜像推到带临时认证的 Registry。真实 HTTPS/SSH Git、rootless BuildKit、mTLS、认证 Registry push、错误凭据、取消、digest 校验、推送后不重建的 Artifact/Release 恢复，以及脱敏日志分片已通过。Git 自建 CA/代理兼容矩阵和尚未完成的 BUILD-011 故障/攻击系统矩阵仍阻止生产默认开启。第一次接入先看[从 Git 到开发环境：完整用户旅程](git-to-deploy-quickstart.md)；具体规则见 [Source Repository 使用说明](source-repositories.md)、[Build Configuration 使用说明](build-configurations.md)、[Build](builds.md)、[Build 日志](build-logs.md)、[Artifact 与 Release](artifacts.md)、[自动部署规则](automatic-deployments.md)、[Build Worker](build-worker.md)、[Trigger Token](build-triggers.md)和[平台 Webhook](webhooks.md)。

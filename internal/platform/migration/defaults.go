@@ -32,7 +32,384 @@ func Default() []Migration {
 		{Version: 16, Name: "index_runtime_inventory_views", Up: indexRuntimeInventoryViews},
 		{Version: 17, Name: "optimize_runtime_inventory_view_indexes", Up: optimizeRuntimeInventoryViewIndexes},
 		{Version: 18, Name: "index_source_repositories", Up: indexSourceRepositories},
+		{Version: 19, Name: "index_build_configurations", Up: indexBuildConfigurations},
+		{Version: 20, Name: "index_builds", Up: indexBuilds},
+		{Version: 21, Name: "index_build_triggers", Up: indexBuildTriggers},
+		{Version: 22, Name: "index_build_hooks", Up: indexBuildHooks},
+		{Version: 23, Name: "build_execution_queue", Up: buildExecutionQueue},
+		{Version: 24, Name: "index_build_push_results", Up: indexBuildPushResults},
+		{Version: 25, Name: "index_build_artifacts", Up: indexBuildArtifacts},
+		{Version: 26, Name: "backfill_build_release_runtime_spec", Up: backfillBuildReleaseRuntimeSpec},
+		{Version: 27, Name: "index_bounded_build_logs", Up: indexBoundedBuildLogs},
+		{Version: 28, Name: "add_automatic_deployment_rules", Up: addAutomaticDeploymentRules},
+		{Version: 29, Name: "add_user_invitations", Up: addUserInvitations},
+		{Version: 30, Name: "add_project_members", Up: addProjectMembers},
+		{Version: 31, Name: "add_ingress_rate_limits", Up: addIngressRateLimits},
+		{Version: 32, Name: "add_terminal_access_and_sessions", Up: addTerminalAccessAndSessions},
 	}
+}
+
+func addTerminalAccessAndSessions(ctx context.Context, database *mongo.Database) error {
+	policies := database.Collection("terminal_access_policies")
+	if _, err := policies.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1}}, Options: options.Index().
+			SetName("uniq_terminal_project_policy").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "scope", Value: "project"}})},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}}, Options: options.Index().
+			SetName("uniq_terminal_organization_policy").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "scope", Value: "organization"}})},
+	}); err != nil {
+		return fmt.Errorf("create terminal access policy indexes: %w", err)
+	}
+	sessions := database.Collection("terminal_sessions")
+	if _, err := sessions.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "ticket_hash", Value: 1}}, Options: options.Index().
+			SetName("uniq_terminal_ticket_hash").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "ticket_hash", Value: bson.D{{Key: "$type", Value: "string"}}}})},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "actor_id", Value: 1}, {Key: "user_concurrency_slot", Value: 1}}, Options: options.Index().
+			SetName("uniq_active_terminal_user_slot").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "active", Value: true}})},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "target_scope", Value: 1}, {Key: "target_concurrency_slot", Value: 1}}, Options: options.Index().
+			SetName("uniq_active_terminal_target_slot").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "active", Value: true}})},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1}, {Key: "created_at", Value: -1}, {Key: "_id", Value: -1}}, Options: options.Index().
+			SetName("idx_terminal_project_created")},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "actor_id", Value: 1}, {Key: "created_at", Value: -1}}, Options: options.Index().
+			SetName("idx_terminal_actor_created")},
+		{Keys: bson.D{{Key: "active", Value: 1}, {Key: "maximum_deadline", Value: 1}, {Key: "idle_deadline", Value: 1}}, Options: options.Index().
+			SetName("idx_terminal_expiry_reconciliation")},
+	}); err != nil {
+		return fmt.Errorf("create terminal session indexes: %w", err)
+	}
+	return nil
+}
+
+func addIngressRateLimits(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("ingress_rate_limits").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetName("ttl_ingress_rate_limit").SetExpireAfterSeconds(0),
+	})
+	if err != nil {
+		return fmt.Errorf("create ingress rate limit index: %w", err)
+	}
+	return nil
+}
+
+func addProjectMembers(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("project_members").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_project_member_user", bson.D{{Key: "project_id", Value: 1}, {Key: "user_id", Value: 1}}),
+		uniqueIndex("uniq_project_member_email", bson.D{{Key: "project_id", Value: 1}, {Key: "email", Value: 1}}),
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "user_id", Value: 1}, {Key: "project_id", Value: 1}},
+			Options: options.Index().SetName("idx_project_member_user_projects")},
+	})
+	if err != nil {
+		return fmt.Errorf("create project member indexes: %w", err)
+	}
+	return nil
+}
+
+func addUserInvitations(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("user_invitations").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "token_hash", Value: 1}}, Options: options.Index().
+			SetName("uniq_user_invitation_token_hash").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "token_hash", Value: bson.D{{Key: "$type", Value: "string"}}}})},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "created_at", Value: -1}, {Key: "_id", Value: -1}},
+			Options: options.Index().SetName("idx_user_invitation_organization_created")},
+		{Keys: bson.D{{Key: "expires_at", Value: 1}}, Options: options.Index().
+			SetName("ttl_active_user_invitation").SetExpireAfterSeconds(0).
+			SetPartialFilterExpression(bson.D{{Key: "status", Value: "active"}})},
+	})
+	if err != nil {
+		return fmt.Errorf("create user invitation indexes: %w", err)
+	}
+	return nil
+}
+
+func addAutomaticDeploymentRules(ctx context.Context, database *mongo.Database) error {
+	for _, update := range []struct {
+		collection string
+		field      string
+	}{
+		{collection: "build_configurations", field: "automatic_deployments"},
+		{collection: "builds", field: "configuration_snapshot.automatic_deployments"},
+		{collection: "artifacts", field: "automatic_deployments"},
+	} {
+		if _, err := database.Collection(update.collection).UpdateMany(ctx,
+			bson.D{{Key: update.field, Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: update.field, Value: bson.A{}}}}},
+		); err != nil {
+			return fmt.Errorf("backfill %s automatic deployments: %w", update.collection, err)
+		}
+	}
+	if _, err := database.Collection("deployments").UpdateMany(ctx,
+		bson.D{{Key: "trigger_source", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "trigger_source", Value: "manual"}}}},
+	); err != nil {
+		return fmt.Errorf("backfill deployment trigger source: %w", err)
+	}
+	_, err := database.Collection("deployments").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1}, {Key: "source_artifact_id", Value: 1},
+			{Key: "environment_id", Value: 1}, {Key: "runtime_target_id", Value: 1},
+		},
+		Options: options.Index().SetName("idx_automatic_deployment_artifact").
+			SetPartialFilterExpression(bson.D{{Key: "trigger_source", Value: "automatic"}}),
+	})
+	if err != nil {
+		return fmt.Errorf("create automatic deployment index: %w", err)
+	}
+	return nil
+}
+
+func indexBoundedBuildLogs(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("build_log_streams").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("idx_build_log_stream_project")},
+		{Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().SetName("ttl_build_log_stream").SetExpireAfterSeconds(0)},
+	})
+	if err != nil {
+		return fmt.Errorf("create build log stream indexes: %w", err)
+	}
+	_, err = database.Collection("build_log_chunks").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_build_log_sequence", bson.D{{Key: "build_id", Value: 1}, {Key: "sequence", Value: 1}}),
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "build_id", Value: 1}, {Key: "sequence", Value: 1}},
+			Options: options.Index().SetName("idx_build_log_read")},
+		{Keys: bson.D{{Key: "expires_at", Value: 1}},
+			Options: options.Index().SetName("ttl_build_log_chunk").SetExpireAfterSeconds(0)},
+	})
+	if err != nil {
+		return fmt.Errorf("create build log chunk indexes: %w", err)
+	}
+	return nil
+}
+
+func backfillBuildReleaseRuntimeSpec(ctx context.Context, database *mongo.Database) error {
+	defaultSpec := bson.D{
+		{Key: "ports", Value: bson.A{}},
+		{Key: "environment_keys", Value: bson.A{}},
+		{Key: "resources", Value: bson.D{
+			{Key: "cpu_milli", Value: int64(500)},
+			{Key: "memory_bytes", Value: int64(256 * 1024 * 1024)},
+		}},
+	}
+	updates := []struct {
+		collection string
+		field      string
+	}{
+		{collection: "build_configurations", field: "release_runtime_spec"},
+		{collection: "builds", field: "configuration.release_runtime_spec"},
+		{collection: "artifacts", field: "release_runtime_spec"},
+	}
+	for _, update := range updates {
+		if _, err := database.Collection(update.collection).UpdateMany(
+			ctx,
+			bson.D{{Key: update.field, Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: update.field, Value: defaultSpec}}}},
+		); err != nil {
+			return fmt.Errorf("backfill %s release runtime spec: %w", update.collection, err)
+		}
+	}
+	return nil
+}
+
+func indexBuildArtifacts(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("artifacts").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_artifact_build", bson.D{{Key: "build_id", Value: 1}}),
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "created_at", Value: -1}, {Key: "_id", Value: -1}},
+			Options: options.Index().SetName("idx_artifact_project_created")},
+		{Keys: bson.D{{Key: "release_status", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("idx_artifact_release_queue")},
+		{Keys: bson.D{{Key: "image_repository", Value: 1}, {Key: "image_digest", Value: 1}, {Key: "target_platform", Value: 1}},
+			Options: options.Index().SetName("idx_artifact_image")},
+	})
+	if err != nil {
+		return fmt.Errorf("create artifact indexes: %w", err)
+	}
+	_, err = database.Collection("releases").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "source_artifact_id", Value: 1}},
+		Options: options.Index().SetName("uniq_release_source_artifact").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "source_artifact_id", Value: bson.D{{Key: "$type", Value: "string"}}}}),
+	})
+	if err != nil {
+		return fmt.Errorf("create artifact release index: %w", err)
+	}
+	_, err = database.Collection("builds").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1}},
+		Options: options.Index().SetName("idx_build_artifact")})
+	if err != nil {
+		return fmt.Errorf("create build artifact index: %w", err)
+	}
+	return nil
+}
+
+func indexBuildPushResults(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("builds").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "status", Value: 1}, {Key: "image_digest", Value: 1},
+			{Key: "lease.expires_at", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		},
+		Options: options.Index().SetName("idx_build_push_result_queue"),
+	})
+	if err != nil {
+		return fmt.Errorf("create build push result index: %w", err)
+	}
+	return nil
+}
+
+func buildExecutionQueue(ctx context.Context, database *mongo.Database) error {
+	if _, err := database.Collection("builds").UpdateMany(ctx,
+		bson.D{{Key: "updated_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.A{bson.D{{Key: "$set", Value: bson.D{{Key: "updated_at", Value: "$created_at"}}}}},
+	); err != nil {
+		return fmt.Errorf("backfill build execution metadata: %w", err)
+	}
+	_, err := database.Collection("builds").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "status", Value: 1}, {Key: "lease.expires_at", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}, Options: options.Index().SetName("idx_build_execution_queue")},
+		{Keys: bson.D{{Key: "build_configuration_id", Value: 1}, {Key: "status", Value: 1}}, Options: options.Index().SetName("idx_build_configuration_status")},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "source_build_id", Value: 1}}, Options: options.Index().SetName("idx_build_retry_source")},
+	})
+	if err != nil {
+		return fmt.Errorf("create build execution indexes: %w", err)
+	}
+	return nil
+}
+
+func indexBuildHooks(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("build_hooks").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_build_hook_project_name", bson.D{{Key: "project_id", Value: 1}, {Key: "name_normalized", Value: 1}}),
+		{Keys: bson.D{
+			{Key: "project_id", Value: 1}, {Key: "application_id", Value: 1},
+			{Key: "build_configuration_id", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}, Options: options.Index().SetName("idx_build_hook_configuration_created")},
+	})
+	if err != nil {
+		return fmt.Errorf("create build hook indexes: %w", err)
+	}
+	_, err = database.Collection("webhook_deliveries").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_webhook_delivery", bson.D{{Key: "hook_id", Value: 1}, {Key: "provider", Value: 1}, {Key: "delivery_id", Value: 1}}),
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "created_at", Value: -1}, {Key: "_id", Value: -1}},
+			Options: options.Index().SetName("idx_webhook_delivery_project_created")},
+		{Keys: bson.D{{Key: "build_id", Value: 1}}, Options: options.Index().SetName("idx_webhook_delivery_build")},
+	})
+	if err != nil {
+		return fmt.Errorf("create webhook delivery indexes: %w", err)
+	}
+	return nil
+}
+
+func indexBuildTriggers(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("build_triggers").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		uniqueIndex("uniq_build_trigger_project_name", bson.D{
+			{Key: "project_id", Value: 1}, {Key: "name_normalized", Value: 1},
+		}),
+		uniqueIndex("uniq_build_trigger_token_hash", bson.D{{Key: "token_hash", Value: 1}}),
+		{
+			Keys: bson.D{
+				{Key: "project_id", Value: 1}, {Key: "application_id", Value: 1},
+				{Key: "build_configuration_id", Value: 1}, {Key: "created_at", Value: 1},
+			},
+			Options: options.Index().SetName("idx_build_trigger_configuration_created"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create build trigger indexes: %w", err)
+	}
+	_, err = database.Collection("build_trigger_rate_limits").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "expires_at", Value: 1}},
+		Options: options.Index().SetName("ttl_build_trigger_rate_limit").SetExpireAfterSeconds(0),
+	})
+	if err != nil {
+		return fmt.Errorf("create build trigger rate limit index: %w", err)
+	}
+	return nil
+}
+
+func indexBuilds(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("builds").Indexes().CreateMany(
+		ctx,
+		[]mongo.IndexModel{
+			uniqueIndex("uniq_build_idempotency", bson.D{
+				{Key: "project_id", Value: 1},
+				{Key: "idempotency_key", Value: 1},
+			}),
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "created_at", Value: -1},
+					{Key: "_id", Value: -1},
+				},
+				Options: options.Index().SetName("idx_build_project_created"),
+			},
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "application_id", Value: 1},
+					{Key: "created_at", Value: -1},
+					{Key: "_id", Value: -1},
+				},
+				Options: options.Index().SetName("idx_build_application_created"),
+			},
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "build_configuration_id", Value: 1},
+					{Key: "created_at", Value: -1},
+				},
+				Options: options.Index().SetName("idx_build_configuration_created"),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create build indexes: %w", err)
+	}
+	return nil
+}
+
+func indexBuildConfigurations(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("build_configurations").Indexes().CreateMany(
+		ctx,
+		[]mongo.IndexModel{
+			uniqueIndex("uniq_build_configuration_application_name", bson.D{
+				{Key: "project_id", Value: 1},
+				{Key: "application_id", Value: 1},
+				{Key: "name_normalized", Value: 1},
+			}),
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "application_id", Value: 1},
+					{Key: "created_at", Value: 1},
+					{Key: "_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_build_configuration_application_created"),
+			},
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "source_repository_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_build_configuration_source"),
+			},
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "registry_credential_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_build_configuration_registry"),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create build configuration indexes: %w", err)
+	}
+	return nil
 }
 
 func indexSourceRepositories(

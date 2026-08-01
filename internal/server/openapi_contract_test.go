@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -69,12 +70,68 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusNotFound,
 		},
 		{
+			name: "create user invitation", method: http.MethodPost,
+			target: "/api/v1/auth/invitations", body: `{"email":"member@example.com"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list user invitations", method: http.MethodGet,
+			target: "/api/v1/auth/invitations", headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "accept user invitation", method: http.MethodPost,
+			target:     "/api/v1/auth/invitations:accept",
+			body:       fmt.Sprintf(`{"token":%q,"password":"member-long-password"}`, contractInvitationToken),
+			wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list organization users", method: http.MethodGet,
+			target: "/api/v1/auth/users", headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list member sessions as owner", method: http.MethodGet,
+			target:  "/api/v1/auth/users/contract-member-id/sessions",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "revoke member session as owner", method: http.MethodDelete,
+			target:  "/api/v1/auth/users/contract-member-id/sessions/contract-member-session",
+			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
+		},
+		{
+			name: "revoke all member sessions as owner", method: http.MethodDelete,
+			target:  "/api/v1/auth/users/contract-member-id/sessions",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "reject revoking accepted invitation", method: http.MethodPost,
+			target:  "/api/v1/auth/invitations/test-id:revoke",
+			headers: bearerHeaders(), wantStatus: http.StatusConflict,
+		},
+		{
 			name: "create project", method: http.MethodPost, target: "/api/v1/projects",
 			body: `{"name":"Delivery"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
 			name: "list projects", method: http.MethodGet, target: "/api/v1/projects",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create project member", method: http.MethodPost, target: "/api/v1/projects/test-id/members",
+			body: `{"email":"member@example.com","role":"developer"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list project members", method: http.MethodGet, target: "/api/v1/projects/test-id/members",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "update project member", method: http.MethodPatch, target: "/api/v1/projects/test-id/members/contract-member-id",
+			body: `{"role":"maintainer","expected_version":1}`, headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "delete project member", method: http.MethodDelete,
+			target:  "/api/v1/projects/test-id/members/contract-member-id?expected_version=2",
+			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
 		},
 		{
 			name: "list project runtime inventory", method: http.MethodGet,
@@ -123,6 +180,128 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		{
 			name: "probe source repository", method: http.MethodPost, target: "/api/v1/projects/test-id/source-repositories/test-id/probe",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create build configuration", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations",
+			body:    `{"name":"API build","source_repository_id":"test-id","registry_credential_id":"test-id","image_repository":"registry.example.com/team/api","allowed_refs":["refs/heads/main"],"resources":{"cpu_milli":2000,"memory_bytes":2147483648,"disk_bytes":10737418240}}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list build configurations", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get build configuration", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "update build configuration", method: http.MethodPatch,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id",
+			body:    `{"expected_version":1,"timeout_seconds":900}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create build trigger", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/triggers",
+			body:    `{"name":"Git automation","allowed_refs":["refs/heads/main"]}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list build triggers", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/triggers",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "trigger external build", method: http.MethodPost,
+			target: "/api/v1/build-triggers/test-id",
+			body:   `{"commit_sha":"a975c10d68a2d7461634f13b15c52a2efba72d16","ref":"refs/heads/main"}`,
+			headers: map[string]string{
+				"Authorization":   "Bearer contract-build-trigger-token-01234567890123",
+				"Idempotency-Key": "external-test-1",
+			},
+			wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "revoke build trigger", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/triggers/test-id:revoke",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create build hook", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/hooks",
+			body:    `{"name":"GitHub webhook","provider":"github","allowed_refs":["refs/heads/main"],"secret_ref":"secret://github-hook"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list build hooks", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/hooks",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "receive build webhook", method: http.MethodPost,
+			target: "/api/v1/build-hooks/github/test-id", body: `{"ref":"refs/heads/main"}`,
+			headers: map[string]string{
+				"X-GitHub-Delivery":   "contract-delivery-1",
+				"X-GitHub-Event":      "push",
+				"X-Hub-Signature-256": "sha256=contract",
+			},
+			wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "revoke build hook", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/applications/test-id/build-configurations/test-id/hooks/test-id:revoke",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "trigger manual build", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/builds",
+			body:    `{"application_id":"test-id","build_configuration_id":"test-id","ref":"refs/heads/main","expected_commit_sha":"a975c10d68a2d7461634f13b15c52a2efba72d16","idempotency_key":"manual-test-1"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "list builds", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/builds",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get build", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/builds/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "read build logs", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/builds/test-id/logs?limit=100",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "retry failed build", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/builds/failed-build:retry",
+			body:    `{"idempotency_key":"retry-test-1"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "cancel queued build", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/builds/test-id:cancel",
+			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "list artifacts", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get artifact", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create release from artifact", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/artifacts/test-id:create-release",
+			body:    `{"runtime_spec":{"ports":[],"environment_keys":[],"resources":{"cpu_milli":500,"memory_bytes":268435456}}}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
 			name: "create release", method: http.MethodPost, target: "/api/v1/projects/test-id/applications/test-id/releases",
@@ -223,6 +402,47 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		{
 			name: "cancel project deployment", method: http.MethodPost, target: "/api/v1/projects/test-id/deployments/test-id/cancel",
 			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "get default organization terminal policy", method: http.MethodGet,
+			target: "/api/v1/terminal-policy", headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "save organization terminal policy", method: http.MethodPut,
+			target:  "/api/v1/terminal-policy",
+			body:    `{"enabled":true,"allowed_roles":["owner"],"environment_stages":[],"runtime_target_ids":[],"managed_host_ids":[],"idle_timeout":"5m","maximum_duration":"30m","maximum_per_user":1,"maximum_per_target":2,"revocation_grace_period":"30s","expected_version":0}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get default project terminal policy", method: http.MethodGet,
+			target: "/api/v1/projects/test-id/terminal-policy", headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "save project terminal policy", method: http.MethodPut,
+			target:  "/api/v1/projects/test-id/terminal-policy",
+			body:    `{"enabled":true,"allowed_roles":["owner","maintainer"],"environment_stages":["development","staging","production"],"runtime_target_ids":[],"managed_host_ids":[],"idle_timeout":"10m","maximum_duration":"1h","maximum_per_user":2,"maximum_per_target":5,"revocation_grace_period":"30s","expected_version":0}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create host terminal session", method: http.MethodPost,
+			target:  "/api/v1/managed-hosts/test-id/terminal-sessions",
+			headers: terminalHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "get terminal session", method: http.MethodGet,
+			target:  "/api/v1/terminal-sessions/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "terminate terminal session", method: http.MethodPost,
+			target:  "/api/v1/terminal-sessions/test-id:terminate",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create container terminal session", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/terminal-sessions/container",
+			body:    `{"deployment_id":"test-id"}`,
+			headers: terminalHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
 			name: "list audit events", method: http.MethodGet, target: "/api/v1/audit-events?project_id=test-id&limit=100",
@@ -332,4 +552,10 @@ func assertOpenAPIExchange(
 
 func bearerHeaders() map[string]string {
 	return map[string]string{"Authorization": "Bearer " + contractAccessToken}
+}
+
+func terminalHeaders() map[string]string {
+	headers := bearerHeaders()
+	headers["User-Agent"] = "OwnDock-Contract/1.0"
+	return headers
 }

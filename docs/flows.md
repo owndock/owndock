@@ -2,6 +2,8 @@
 
 本文用时序图说明 OwnDock 当前已实现的关键链路，以及首个端到端部署用例的目标链路。标题中的“已实现”表示代码、契约和测试已经存在；“目标”表示产品语义已经确定，但执行能力尚未接入，不能据此判断当前版本可以执行生产部署。
 
+TerminalSession 创建、一次性 Cookie、会话状态机和后续 WSS/执行网关的分层时序见[安全终端会话](terminal-sessions.md)。其中控制面已经实现，交互字节流仍是目标链路。
+
 ## 已实现：启动、Migration 与就绪
 
 产品 API 依赖 MongoDB。进程先连接数据库并运行版本化 migration，全部成功后才创建产品模块和开始监听；任一步失败都会终止启动并清理已经创建的资源。
@@ -92,9 +94,11 @@ sequenceDiagram
     end
 ```
 
-登录尝试限制保存在 MongoDB，而不是单个 Server 进程内存中，因此多实例共享同一阈值。默认同一 normalized email 在 15 分钟窗口内允许 5 次尝试，第 6 次开始返回 `429 login_rate_limited`；正确登录会清理计数。记录只保存邮箱的 SHA-256 键、计数、窗口和过期时间，TTL 自动清理。它解决账号维度的密码猜测，不替代反向代理/WAF 的来源 IP 限流和全局连接保护。
+登录尝试限制保存在 MongoDB，而不是单个 Server 进程内存中，因此多实例共享同一阈值。默认同一 normalized email 在 15 分钟窗口内允许 5 次尝试，第 6 次开始返回 `429 login_rate_limited`；正确登录会清理计数。记录只保存邮箱的 SHA-256 键、计数、窗口和过期时间，TTL 自动清理。它解决账号维度的密码猜测；正式产品路由另有应用级来源/实例两级共享限流，但仍不能替代反向代理/WAF 的连接层保护。代理信任和失败关闭时序见[产品 API 入口保护](ingress-protection.md)。
 
 每次成功登录在创建新 Session 的同一事务中保留该用户最新的 `security.max_active_sessions` 个活跃 Session，默认 10 个；更早的 Session 会被撤销。用户可以通过 `GET /api/v1/auth/sessions` 查看不含 Token/hash 的 Session ID、创建/过期时间和当前会话标记，再通过 `DELETE /api/v1/auth/sessions/{session_id}` 撤销自己的任意 Session。删除条件同时固定 Session ID 与当前 User ID，不能用猜测到的 ID 撤销其他用户会话。
+
+Owner 还可以使用 `/api/v1/auth/users/{user_id}/sessions` 查看和紧急撤销同一 Organization 成员的会话；列表同样不含 Token/hash，撤销和管理员审计在同一事务中提交。完整时序见[本地用户邀请与会话治理](users-and-invitations.md)。
 
 ```mermaid
 sequenceDiagram
@@ -123,7 +127,7 @@ sequenceDiagram
 
 ## 已实现：认证、授权、资源写入与审计
 
-Project、Project 下的 Application、Registry Credential、Environment、不可变 Release 和 Runtime Target 共用相同的写入骨架。Environment 承载普通配置值或外部秘密引用，但不保存秘密正文；Release 只声明需要的配置键。身份来自 Bearer session，Organization 所有权和角色权限由 UseCase 强制执行。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
+Project、Project Member、Project 下的 Application、Registry Credential、Environment、不可变 Release 和 Runtime Target 共用相同的写入骨架。Environment 承载普通配置值或外部秘密引用，但不保存秘密正文；Release 只声明需要的配置键。身份来自 Bearer Session；Owner 使用 Organization 全局角色，其他用户在每次 Project 请求中实时解析成员角色。资源与审计事件处于同一 MongoDB 事务，因此审计失败不会留下无审计的资源。
 
 ```mermaid
 sequenceDiagram
@@ -138,7 +142,8 @@ sequenceDiagram
 
     D->>API: POST /api/v1/projects/{project_id}/...<br/>Authorization: Bearer token
     API->>I: hash(token) 并查询未过期 Session
-    I-->>API: Principal(user, organization, role, session)
+    I-->>API: Principal(user, organization, organization role, session)
+    API->>R: Owner 直通；其他用户实时读取 Project Member 角色
     API->>U: 创建资源 + Principal + request ID
     U->>R: 校验角色权限
     U->>M: 校验 Project/Application 属于当前范围
@@ -329,6 +334,162 @@ sequenceDiagram
 
 完整 wire frame 与错误边界见 [Agent Control Protocol v1](../api/agent-control.md)。
 
+## 已实现：手动触发与隔离源码检出
+
+手动触发在 API Server 内只完成安全控制面步骤：精确 ref 解析、完整 Commit SHA、配置快照、幂等和审计。随后独立 Build Worker 按 Mongo lease 领取任务，在受限临时目录用固定 Git 检出并二次验证 Commit，再通过受认证的 rootless BuildKit 构建和推送镜像；API Server 始终不执行客户代码。真实 OCI digest 在 generation fence 下形成 Artifact，并幂等衔接不可变 Release。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor D as Developer
+    participant API as Build API
+    participant U as Build UseCase
+    participant G as Git Ref Resolver
+    participant M as MongoDB
+    participant A as Audit Store
+
+    D->>API: POST /projects/{id}/builds<br/>config + ref + expected SHA + idempotency key
+    API->>U: TriggerManualBuild
+    U->>M: 查询 Project + idempotency key
+    alt 相同意图已经存在
+        M-->>U: 原 queued Build
+        U-->>D: 202 原 Build，不重新访问 Git
+    else 同键不同意图
+        U-->>D: 409 idempotency_key_mismatch
+    else 首次触发
+        U->>M: 校验 Project/Application/Configuration<br/>Source/Registry 引用和 allowed ref
+        U->>G: 只读解析完整 ref，可选核对 expected SHA
+        G-->>U: 完整 Commit SHA
+        U->>U: 复制非秘密 Configuration snapshot
+        U->>M: 开始事务
+        U->>M: 写 queued Build
+        U->>A: 写 build.trigger_manual
+        alt 任一写入失败
+            M-->>U: 回滚 Build 和审计
+        else 提交
+            U-->>D: 202 queued Build
+        end
+    end
+```
+
+## 已实现：通用 Trigger Token 自动触发 queued Build
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CI as 任意 Git 平台流水线
+    participant API as Public Trigger API
+    participant M as MongoDB
+    participant G as Git Ref Resolver
+    participant A as Audit Store
+
+    CI->>API: Bearer Trigger Token<br/>ref + commit SHA + Idempotency-Key
+    API->>M: 读取 Trigger 并常量时间核对 Token hash
+    API->>M: 原子占用 Trigger 共享限流窗口
+    API->>API: 校验 active、Trigger allowed_refs<br/>与当前 Configuration allowed_refs
+    API->>M: 查询 Project + idempotency key
+    alt 同一 Trigger 和意图已存在
+        M-->>CI: 202 原 queued Build
+    else 同键但 Trigger 或意图不同
+        API-->>CI: 409 idempotency_key_mismatch
+    else 首次触发
+        API->>G: 用已绑定 Source 解析 ref<br/>必须等于请求 commit SHA
+        G-->>API: 已验证 Source Revision
+        API->>M: 事务写 Build + immutable snapshot
+        API->>A: 写 build.trigger_api
+        API-->>CI: 202 queued Build
+    end
+```
+
+## 已实现：平台签名 Webhook 自动触发 queued Build
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant G as GitHub/GitLab/Gitea/Forgejo
+    participant H as Webhook Adapter
+    participant M as MongoDB
+    participant R as Git Ref Resolver
+
+    G->>H: delivery ID + event + signature + raw body
+    H->>H: 限制 body，先验签后解析
+    alt 签名无效
+        H-->>G: 401
+    else delivery 已处理
+        H->>M: 查询 provider + hook + delivery
+        M-->>G: 202 原 accepted/ignored 结果
+    else Push/ref 不适用
+        H->>M: 事务写 ignored delivery + 审计
+        H-->>G: 202 ignored
+    else 允许的 Push
+        H->>R: 验证 ref 当前解析为通知中的 Commit SHA
+        R-->>H: 固定 Source Revision
+        H->>M: 事务写 queued Build + delivery + 审计
+        H-->>G: 202 accepted + build_id
+    end
+```
+
+原始 body、签名和 Secret 不写入 MongoDB。Handler 不执行 checkout 或 BuildKit，详细平台配置见 [Git 平台 Webhook](webhooks.md)。
+
+## 已实现：Build 领取、失联接管与 fence
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W1 as Build Worker A
+    participant W2 as Build Worker B
+    participant M as MongoDB
+    participant A as Audit Store
+
+    W1->>M: 原子 claim 最早 queued Build
+    M-->>W1: lease(owner=A, generation=1, expiry)
+    W1->>M: checking_out + Audit（同一事务）
+    loop 正常执行
+        W1->>M: heartbeat(owner=A, generation=1, version)
+        M-->>W1: 延长 lease
+    end
+    Note over W1,M: Worker A 失联，lease 过期
+    W2->>M: 原子 reclaim 原执行阶段
+    M-->>W2: lease(owner=B, generation=2, expiry)
+    W1->>M: 尝试以 generation=1 写状态或后续资源
+    M-->>W1: 拒绝：build_lease_expired
+    W2->>M: 继续状态转换 + Audit（同一事务）
+```
+
+取消请求只把 Build 转为 `canceling`；持有或接管 lease 的 Worker 完成清理后才能写 `canceled`。失败重试复制来源 Build 的固定 Commit 与配置快照，创建带 `source_build_id` 的新 queued Build，不修改原记录。启用独立 Build Worker 后，queued/canceling 记录会被领取；Worker 会执行 checkout、BuildKit solve、Registry push 与清理。推送完成后以事务创建 Artifact 并把 Build 改为 `succeeded`；Release 或自动 Deployment 协调失败时只重试 `release_pending` Artifact。
+
+## 已实现：Artifact 与 Release 幂等交接
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant W as Build Worker
+    participant M as MongoDB
+    participant C as Release Coordinator
+    participant D as Deployment UseCase
+
+    W->>M: generation fence 发布 image digest
+    M->>M: 创建唯一 Artifact<br/>Build → succeeded + Audit
+    alt auto_create_release=true
+        W->>C: source_artifact_id + digest + runtime spec
+        C->>M: 创建或返回同一 Release + Audit
+        opt 快照含 development 自动部署目标
+            C->>D: Artifact + Build 链路 + Environment/Target
+            D->>M: 校验 ready，幂等创建 queued Deployment + Audit
+        end
+        W->>M: CAS Artifact → release_created + Audit
+    else auto_create_release=false
+        Note over M: Artifact=available
+    end
+    opt 协调响应失败或 Worker 重启
+        W->>M: 读取最早 release_pending Artifact
+        W->>C: 使用同一 source_artifact_id 重试
+        Note over W,C: 不 checkout、不重建、不重新 push
+    end
+```
+
+运行规格和自动部署规则都来自触发时的 Build Configuration 快照，包括端口、Environment 配置键、CPU/内存、健康检查，以及最多 8 个 development Environment/Runtime Target 组合。自动路径复用普通 Deployment 用例；staging/production 仍强制人工触发。详细状态与手动 API 见 [Artifact 与 Release 交接](artifacts.md)，权限与重试见[自动部署规则](automatic-deployments.md)。
+
 ## 部分实现：从 Release 到 Docker Deployment
 
 下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换和 Agent 两阶段部署/取消，单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令；远程 mTLS Engine、双主机断线/过期 fence、网络层延迟、实际入口流量和故障注入系统测试尚未完成，因此仍不是生产闭环。
@@ -413,7 +574,7 @@ stateDiagram-v2
 
 ## 阅读边界
 
-- 当前正式持久化资源：Organization、User、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Application、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event。
+- 当前正式持久化资源：Organization、User、User Invitation、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Member、Project Application、Repository Credential、Source Repository、Build Configuration、Build Trigger、Build Hook、Webhook Delivery、Build（含状态/lease/fence）、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event。
 - Runtime Target 只保存连接元数据和 `credential_ref`，不保存凭据正文；显式探测会更新 `ready`、`unreachable` 或 `credential_error` 及探测时间。
-- Template、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；基础 Worker 与 Docker 执行默认关闭。
+- Git 自建 CA/代理矩阵、Template、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
 - 顶层 Application、Environment、Deployment 路由是默认关闭的工程样例，与正式 Project 范围 API 相互隔离。

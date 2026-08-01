@@ -18,11 +18,38 @@ type ScopedReferenceStore interface {
 }
 
 type FormalReferenceLookup struct {
-	store ScopedReferenceStore
+	store  ScopedReferenceStore
+	stages interface {
+		EnvironmentStage(context.Context, string, string) (string, error)
+	}
 }
 
 func NewFormalReferenceLookup(store ScopedReferenceStore) *FormalReferenceLookup {
-	return &FormalReferenceLookup{store: store}
+	lookup := &FormalReferenceLookup{store: store}
+	lookup.stages, _ = store.(interface {
+		EnvironmentStage(context.Context, string, string) (string, error)
+	})
+	return lookup
+}
+
+func (l *FormalReferenceLookup) ValidateAutomatic(
+	ctx context.Context,
+	projectID, releaseID, applicationID, environmentID, targetID string,
+) error {
+	if err := l.Validate(ctx, projectID, releaseID, applicationID, environmentID, targetID); err != nil {
+		return err
+	}
+	if l.stages == nil {
+		return biz.ErrAutomaticDeploymentUnavailable
+	}
+	stage, err := l.stages.EnvironmentStage(ctx, projectID, environmentID)
+	if err != nil {
+		return err
+	}
+	if stage != "development" {
+		return biz.ErrAutomaticDeploymentNotAllowed
+	}
+	return nil
 }
 
 func (l *FormalReferenceLookup) ValidateProject(ctx context.Context, organizationID, projectID string) error {

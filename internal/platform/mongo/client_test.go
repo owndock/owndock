@@ -1,6 +1,7 @@
 package mongo
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
+	buildworker "github.com/owndock/owndock/internal/modules/build/worker"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
 	controlplaneservice "github.com/owndock/owndock/internal/modules/controlplane/service"
@@ -29,9 +32,12 @@ import (
 	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
+	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
+	terminaldata "github.com/owndock/owndock/internal/modules/terminal/data"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	"github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/id"
+	platformingress "github.com/owndock/owndock/internal/platform/ingress"
 	"github.com/owndock/owndock/internal/platform/migration"
 	"github.com/owndock/owndock/internal/server"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
@@ -42,6 +48,7 @@ import (
 	testmongo "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	drivermongo "go.mongodb.org/mongo-driver/v2/mongo"
+	"go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 const integrationImage = "mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3"
@@ -57,12 +64,31 @@ func (readyRuntimeTargetProber) ProbeRuntimeTarget(
 
 type readySourceRepositoryProber struct{}
 
+type readyWebhookVerifier struct{ event buildbiz.WebhookEvent }
+
+func (v *readyWebhookVerifier) VerifyAndParse(context.Context, buildbiz.BuildHook, buildbiz.WebhookEnvelope) (buildbiz.WebhookEvent, error) {
+	return v.event, nil
+}
+
 func (readySourceRepositoryProber) ProbeSource(
 	context.Context,
 	buildbiz.SourceRepository,
 	*buildbiz.RepositoryCredential,
 ) (buildbiz.SourceRepositoryStatus, error) {
 	return buildbiz.SourceRepositoryStatusReady, nil
+}
+
+func (readySourceRepositoryProber) ResolveSourceRevision(
+	_ context.Context,
+	source buildbiz.SourceRepository,
+	_ *buildbiz.RepositoryCredential,
+	ref, expectedCommitSHA string,
+) (buildbiz.SourceRevision, error) {
+	commitSHA := "a975c10d68a2d7461634f13b15c52a2efba72d16"
+	if expectedCommitSHA != "" && expectedCommitSHA != commitSHA {
+		return buildbiz.SourceRevision{}, buildbiz.ErrRevisionMismatch
+	}
+	return buildbiz.NewSourceRevision(source.ID, ref, commitSHA)
 }
 
 func TestOpenRejectsDisabledConfig(t *testing.T) {
@@ -224,6 +250,15 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("rerun migrations: %v", err)
 	}
 	assertRuntimeInventoryViewIndexes(t, ctx, client.Database())
+	assertBuildLogIndexes(t, ctx, client.Database())
+	assertAutomaticDeploymentIndex(t, ctx, client.Database())
+	assertUserInvitationIndexes(t, ctx, client.Database())
+	assertProjectMemberIndexes(t, ctx, client.Database())
+	assertIngressRateLimitIndex(t, ctx, client.Database())
+	assertTerminalIndexes(t, ctx, client.Database())
+	verifyIngressRateLimitIntegration(t, ctx, client.Database())
+	verifyTerminalPersistenceIntegration(t, ctx, client.Database())
+	verifyBuildWorkerSIGKILLRecovery(t, ctx, uri, client)
 	verifyBuildSourceRepositoryIntegration(t, ctx, client)
 	var backfilledInventory bson.M
 	if err := client.Database().Collection("runtime_inventory_current").FindOne(ctx, bson.D{
@@ -252,6 +287,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	var migratedDeployment struct {
 		OrganizationID  string `bson:"organization_id"`
 		Status          string `bson:"status"`
+		TriggerSource   string `bson:"trigger_source"`
 		CutoverSequence uint64 `bson:"cutover_sequence"`
 	}
 	if err := client.Database().Collection("deployments").FindOne(
@@ -261,6 +297,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	if migratedDeployment.OrganizationID != "legacy-organization" ||
 		migratedDeployment.Status != "preparing" ||
+		migratedDeployment.TriggerSource != "manual" ||
 		migratedDeployment.CutoverSequence == 0 {
 		t.Fatalf("migrated deployment = %+v", migratedDeployment)
 	}
@@ -333,7 +370,9 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		identityRepository,
 		3,
 		time.Minute,
-	).WithSessionPolicy(3)
+	).WithSessionPolicy(3).
+		WithInvitationPolicy(identityRepository, 24*time.Hour).
+		WithAdministrativeSessions(identityRepository)
 	bootstrap, err := identityUseCase.Bootstrap(
 		ctx, "Integration Company", "owner@example.com", "integration-password", "bootstrap-request",
 	)
@@ -343,6 +382,46 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	principal, err := identityUseCase.Authenticate(ctx, bootstrap.AccessToken)
 	if err != nil {
 		t.Fatalf("authenticate bootstrap token: %v", err)
+	}
+	invitation, err := identityUseCase.CreateInvitation(ctx, principal,
+		"member@example.com", "invitation-create-request")
+	if err != nil || invitation.Token == "" || invitation.Invitation.TokenHash != "" {
+		t.Fatalf("create user invitation = %+v/%v", invitation, err)
+	}
+	var invitationDocument bson.M
+	if err := client.Database().Collection("user_invitations").FindOne(ctx,
+		bson.D{{Key: "_id", Value: invitation.Invitation.ID}}).Decode(&invitationDocument); err != nil {
+		t.Fatalf("read user invitation: %v", err)
+	}
+	if invitationDocument["token_hash"] == invitation.Token || invitationDocument["token_hash"] == "" {
+		t.Fatalf("invitation token was not one-way stored: %#v", invitationDocument)
+	}
+	memberCredentials, err := identityUseCase.AcceptInvitation(ctx, invitation.Token,
+		"member-integration-password", "invitation-accept-request")
+	if err != nil || memberCredentials.User.Role != security.RoleViewer || memberCredentials.AccessToken == "" {
+		t.Fatalf("accept user invitation = %+v/%v", memberCredentials, err)
+	}
+	if _, err := identityUseCase.AcceptInvitation(ctx, invitation.Token,
+		"member-integration-password", "invitation-replay-request"); !errors.Is(err, identitybiz.ErrInvalidInvitation) {
+		t.Fatalf("replay user invitation error = %v", err)
+	}
+	memberPrincipal, err := identityUseCase.Authenticate(ctx, memberCredentials.AccessToken)
+	if err != nil {
+		t.Fatalf("authenticate invited user: %v", err)
+	}
+	storedInvitations, err := identityUseCase.ListInvitations(ctx, principal)
+	if err != nil || len(storedInvitations) != 1 || storedInvitations[0].TokenHash != "" ||
+		storedInvitations[0].Status != identitybiz.InvitationStatusAccepted {
+		t.Fatalf("safe invitation list = %+v/%v", storedInvitations, err)
+	}
+	storedUsers, err := identityUseCase.ListUsers(ctx, principal)
+	if err != nil || len(storedUsers) != 2 {
+		t.Fatalf("organization users = %+v/%v", storedUsers, err)
+	}
+	for _, user := range storedUsers {
+		if user.PasswordHash != "" {
+			t.Fatalf("user list exposed password hash: %+v", user)
+		}
 	}
 	for attempt := 1; attempt <= 3; attempt++ {
 		if _, err := identityUseCase.Login(
@@ -525,6 +604,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore, controlPlaneStore,
 		client, auditStore, auditStore, id.New, time.Now,
 	).WithManagedHosts(managedHostStore).
+		WithProjectMembers(controlPlaneStore).
 		WithRuntimeTargetProbe(controlPlaneStore, readyRuntimeTargetProber{})
 	host, err := managedHostUseCase.Create(
 		ctx, principal, "Production Host", runtimeaccess.ModeDirectDocker,
@@ -729,6 +809,34 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	project, err := controlPlaneUseCase.CreateProject(ctx, principal, "Delivery", "project-request")
 	if err != nil {
 		t.Fatalf("create project: %v", err)
+	}
+	memberProjects, err := controlPlaneUseCase.ListProjects(ctx, memberPrincipal)
+	if err != nil || len(memberProjects) != 0 {
+		t.Fatalf("unbound member projects = %+v/%v", memberProjects, err)
+	}
+	projectMember, err := controlPlaneUseCase.CreateProjectMember(
+		ctx, principal, project.ID, memberCredentials.User.Email,
+		security.RoleDeveloper, "project-member-create-request",
+	)
+	if err != nil || projectMember.Version != 1 || projectMember.Role != security.RoleDeveloper {
+		t.Fatalf("create project member = %+v/%v", projectMember, err)
+	}
+	projectMember, err = controlPlaneUseCase.UpdateProjectMember(
+		ctx, principal, project.ID, projectMember.UserID,
+		security.RoleMaintainer, projectMember.Version, "project-member-update-request",
+	)
+	if err != nil || projectMember.Version != 2 || projectMember.Role != security.RoleMaintainer {
+		t.Fatalf("update project member = %+v/%v", projectMember, err)
+	}
+	if _, err := controlPlaneUseCase.UpdateProjectMember(
+		ctx, principal, project.ID, projectMember.UserID,
+		security.RoleViewer, 1, "project-member-stale-request",
+	); !errors.Is(err, controlplanebiz.ErrProjectMemberConflict) {
+		t.Fatalf("stale project member update error = %v", err)
+	}
+	memberProjects, err = controlPlaneUseCase.ListProjects(ctx, memberPrincipal)
+	if err != nil || len(memberProjects) != 1 || memberProjects[0].ID != project.ID {
+		t.Fatalf("bound member projects = %+v/%v", memberProjects, err)
 	}
 	application, err := controlPlaneUseCase.CreateApplication(ctx, principal, project.ID, "API", "application-request")
 	if err != nil {
@@ -1003,7 +1111,11 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		return "integration-bootstrap-token", nil
 	})
 	controlPlaneHTTP := controlplaneservice.NewHTTP(controlPlaneUseCase)
-	productAPI, err := server.NewProductAPI(identityHTTP, controlPlaneHTTP, identityHTTP.Authenticate)
+	projectAccess := controlplaneservice.NewProjectAccess(controlPlaneStore)
+	authenticateProject := func(next http.Handler) http.Handler {
+		return identityHTTP.Authenticate(projectAccess.Authorize(next))
+	}
+	productAPI, err := server.NewProductAPI(identityHTTP, controlPlaneHTTP, authenticateProject)
 	if err != nil {
 		t.Fatalf("create product API: %v", err)
 	}
@@ -1019,6 +1131,41 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	productAPI.ServeHTTP(authenticatedResponse, authenticatedRequest)
 	if authenticatedResponse.Code != http.StatusOK || !strings.Contains(authenticatedResponse.Body.String(), `"name":"Delivery"`) {
 		t.Fatalf("authenticated product API status=%d body=%s", authenticatedResponse.Code, authenticatedResponse.Body.String())
+	}
+	memberRequest := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/applications", nil)
+	memberRequest.Header.Set("Authorization", "Bearer "+memberCredentials.AccessToken)
+	memberResponse := httptest.NewRecorder()
+	productAPI.ServeHTTP(memberResponse, memberRequest)
+	if memberResponse.Code != http.StatusOK {
+		t.Fatalf("project member API status=%d body=%s", memberResponse.Code, memberResponse.Body.String())
+	}
+	if err := controlPlaneUseCase.DeleteProjectMember(
+		ctx, principal, project.ID, projectMember.UserID,
+		projectMember.Version, "project-member-delete-request",
+	); err != nil {
+		t.Fatalf("delete project member: %v", err)
+	}
+	removedMemberRequest := httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/"+project.ID+"/applications", nil)
+	removedMemberRequest.Header.Set("Authorization", "Bearer "+memberCredentials.AccessToken)
+	removedMemberResponse := httptest.NewRecorder()
+	productAPI.ServeHTTP(removedMemberResponse, removedMemberRequest)
+	if removedMemberResponse.Code != http.StatusNotFound {
+		t.Fatalf("removed member API status=%d body=%s", removedMemberResponse.Code, removedMemberResponse.Body.String())
+	}
+	memberSessions, err := identityUseCase.ListUserSessions(ctx, principal, memberCredentials.User.ID)
+	if err != nil || len(memberSessions) != 1 || memberSessions[0].TokenHash != "" {
+		t.Fatalf("administrative member sessions = %+v/%v", memberSessions, err)
+	}
+	revokedMemberSessions, err := identityUseCase.RevokeAllUserSessions(
+		ctx, principal, memberCredentials.User.ID, "member-session-revoke-all-request",
+	)
+	if err != nil || revokedMemberSessions != 1 {
+		t.Fatalf("administrative member session revocation = %d/%v", revokedMemberSessions, err)
+	}
+	if _, err := identityUseCase.Authenticate(ctx, memberCredentials.AccessToken); !errors.Is(err, security.ErrUnauthenticated) {
+		t.Fatalf("revoked member session authentication error = %v", err)
 	}
 	const concurrentSessionCreates = 8
 	var sessionCreateWait sync.WaitGroup
@@ -1110,6 +1257,142 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	if err := client.Close(closeContext); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+func TestBuildWorkerSIGKILLHelper(t *testing.T) {
+	if os.Getenv("OWNDOCK_BUILD_SIGKILL_HELPER") != "1" {
+		t.Skip("helper process only")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	client, err := Open(ctx, config.Mongo{
+		Enabled: true, URIEnv: "OWNDOCK_BUILD_SIGKILL_MONGODB_URI", Database: "owndock_integration",
+		ConnectTimeout: "10s", OperationTimeout: "5s", MaxIdleTime: "1m", MaxPoolSize: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = client.Close(context.Background()) }()
+	repository := builddata.NewMongoRepository(client.Database())
+	controller, err := buildworker.NewController(
+		repository, client, platformaudit.NewMongoStore(client.Database()),
+		func() (string, error) { return "build-sigkill-helper-audit", nil }, time.Now, 2*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.WithClaimStatuses(buildbiz.BuildStatusQueued, buildbiz.BuildStatusCheckingOut)
+	item, claimed, err := controller.Claim(ctx, "build-sigkill-worker-old")
+	if err != nil || !claimed {
+		t.Fatalf("helper Claim() = %+v/%t/%v", item, claimed, err)
+	}
+	if _, err := controller.Advance(ctx, item, "build-sigkill-worker-old", buildbiz.BuildStatusCheckingOut); err != nil {
+		t.Fatal(err)
+	}
+	select {}
+}
+
+func verifyBuildWorkerSIGKILLRecovery(t *testing.T, ctx context.Context, uri string, client *Client) {
+	t.Helper()
+	repository := builddata.NewMongoRepository(client.Database())
+	configuration, err := buildbiz.NewBuildConfiguration(
+		"build-sigkill-configuration", "build-sigkill-project", "build-sigkill-application",
+		"SIGKILL recovery", "build-sigkill-source", "Dockerfile", ".", []string{"refs/heads/main"},
+		"build-sigkill-registry", "registry.example.com/team/recovery", buildbiz.BuildPlatformLinuxAMD64,
+		buildbiz.BuildResources{}, 60, 1, false, "build-sigkill-user", time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := buildbiz.NewSourceRevision(
+		"build-sigkill-source", "refs/heads/main", "a975c10d68a2d7461634f13b15c52a2efba72d16",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := buildbiz.NewBuild(
+		"build-sigkill-build", "build-sigkill-organization", "build-sigkill-project",
+		"build-sigkill-application", configuration, revision, buildbiz.BuildTriggerSourceManual,
+		"", "build-sigkill-request", "build-sigkill-user", time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateBuild(ctx, item); err != nil {
+		t.Fatalf("seed SIGKILL Build: %v", err)
+	}
+	t.Cleanup(func() {
+		cleanupContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = client.Database().Collection("builds").DeleteOne(cleanupContext,
+			bson.D{{Key: "_id", Value: item.ID}})
+		_, _ = client.Database().Collection("audit_events").DeleteMany(cleanupContext,
+			bson.D{{Key: "project_id", Value: item.ProjectID}})
+	})
+	command := exec.Command(os.Args[0], "-test.run=^TestBuildWorkerSIGKILLHelper$", "-test.v")
+	command.Env = append(os.Environ(),
+		"OWNDOCK_BUILD_SIGKILL_HELPER=1",
+		"OWNDOCK_BUILD_SIGKILL_MONGODB_URI="+uri,
+	)
+	var output bytes.Buffer
+	command.Stdout, command.Stderr = &output, &output
+	if err := command.Start(); err != nil {
+		t.Fatalf("start Build Worker SIGKILL helper: %v", err)
+	}
+	killed := false
+	defer func() {
+		if !killed && command.Process != nil {
+			_ = command.Process.Kill()
+			_, _ = command.Process.Wait()
+		}
+	}()
+	deadline := time.Now().Add(15 * time.Second)
+	var claimed buildbiz.Build
+	for time.Now().Before(deadline) {
+		stored, getErr := repository.GetBuild(ctx, item.ProjectID, item.ID)
+		if getErr == nil && stored.Status == buildbiz.BuildStatusCheckingOut &&
+			stored.Lease.Owner == "build-sigkill-worker-old" {
+			claimed = stored
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if claimed.Lease.Owner == "" {
+		_ = command.Process.Kill()
+		_, _ = command.Process.Wait()
+		killed = true
+		t.Fatalf("Build Worker helper did not claim Build: %s", output.String())
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatalf("SIGKILL Build Worker helper: %v", err)
+	}
+	_, _ = command.Process.Wait()
+	killed = true
+	for time.Now().Before(claimed.Lease.ExpiresAt.Add(100 * time.Millisecond)) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	recovery, err := buildworker.NewController(
+		repository, client, platformaudit.NewMongoStore(client.Database()),
+		func() (string, error) { return "build-sigkill-recovery-audit", nil }, time.Now, 2*time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery.WithClaimStatuses(buildbiz.BuildStatusCheckingOut)
+	recovered, found, err := recovery.Claim(ctx, "build-sigkill-worker-new")
+	if err != nil || !found || recovered.ID != item.ID ||
+		recovered.Lease.Owner != "build-sigkill-worker-new" ||
+		recovered.Lease.Generation != claimed.Lease.Generation+1 {
+		t.Fatalf("recover SIGKILL Build = %+v/%t/%v, old=%+v", recovered, found, err, claimed.Lease)
+	}
+	if _, err := client.Database().Collection("builds").DeleteOne(ctx,
+		bson.D{{Key: "_id", Value: item.ID}}); err != nil {
+		t.Fatalf("clean recovered SIGKILL Build: %v", err)
+	}
+	if _, err := client.Database().Collection("audit_events").DeleteMany(ctx,
+		bson.D{{Key: "project_id", Value: item.ProjectID}}); err != nil {
+		t.Fatalf("clean recovered SIGKILL audit: %v", err)
 	}
 }
 
@@ -1422,6 +1705,11 @@ func verifyBuildSourceRepositoryIntegration(
 	const (
 		organizationID  = "build-integration-organization"
 		projectID       = "build-integration-project"
+		applicationID   = "build-integration-application"
+		registryID      = "build-integration-registry"
+		developmentID   = "build-integration-development"
+		stagingID       = "build-integration-staging"
+		runtimeTargetID = "build-integration-target"
 		secretReference = "secret://build-integration-token"
 	)
 	if _, err := database.Collection("projects").InsertOne(ctx, bson.D{
@@ -1434,31 +1722,99 @@ func verifyBuildSourceRepositoryIntegration(
 	}); err != nil {
 		t.Fatalf("seed build integration project: %v", err)
 	}
+	if _, err := database.Collection("product_applications").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: applicationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "name", Value: "Build application"},
+		{Key: "name_normalized", Value: "build application"},
+		{Key: "created_by", Value: "build-user"},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed build application: %v", err)
+	}
+	if _, err := database.Collection("registry_credentials").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: registryID},
+		{Key: "project_id", Value: projectID},
+		{Key: "name", Value: "Build registry"},
+		{Key: "name_normalized", Value: "build registry"},
+		{Key: "server", Value: "registry.example.com"},
+		{Key: "username", Value: "builder"},
+		{Key: "password_ref", Value: "secret://build-registry"},
+		{Key: "created_by", Value: "build-user"},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed build registry: %v", err)
+	}
+	for _, environment := range []bson.D{
+		{{Key: "_id", Value: developmentID}, {Key: "project_id", Value: projectID},
+			{Key: "name", Value: "Development"}, {Key: "name_normalized", Value: "development"},
+			{Key: "stage", Value: "development"}, {Key: "variables", Value: bson.D{}},
+			{Key: "created_by", Value: "build-user"}, {Key: "created_at", Value: time.Now().UTC()}},
+		{{Key: "_id", Value: stagingID}, {Key: "project_id", Value: projectID},
+			{Key: "name", Value: "Staging"}, {Key: "name_normalized", Value: "staging"},
+			{Key: "stage", Value: "staging"}, {Key: "variables", Value: bson.D{}},
+			{Key: "created_by", Value: "build-user"}, {Key: "created_at", Value: time.Now().UTC()}},
+	} {
+		if _, err := database.Collection("environments").InsertOne(ctx, environment); err != nil {
+			t.Fatalf("seed build environment: %v", err)
+		}
+	}
+	if _, err := database.Collection("runtime_targets").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: runtimeTargetID}, {Key: "project_id", Value: projectID},
+		{Key: "name", Value: "Build target"}, {Key: "name_normalized", Value: "build target"},
+		{Key: "managed_host_id", Value: "build-integration-host"},
+		{Key: "connection_mode", Value: "agent"}, {Key: "status", Value: "ready"},
+		{Key: "created_by", Value: "build-user"}, {Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed build Runtime Target: %v", err)
+	}
 	t.Cleanup(func() {
 		cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		for _, collection := range []string{
-			"repository_credentials", "source_repositories", "audit_events",
+			"repository_credentials", "source_repositories", "build_configurations", "build_triggers", "build_hooks", "webhook_deliveries", "builds", "build_log_streams", "build_log_chunks", "artifacts", "releases", "deployments", "deployment_cutover_sequences", "audit_events",
 		} {
 			_, _ = database.Collection(collection).DeleteMany(cleanupContext, bson.D{
 				{Key: "project_id", Value: projectID},
 			})
 		}
+		_, _ = database.Collection("build_trigger_rate_limits").DeleteMany(cleanupContext, bson.D{
+			{Key: "_id", Value: bson.D{{Key: "$regex", Value: "^build-integration-"}}},
+		})
 		_, _ = database.Collection("projects").DeleteOne(
 			cleanupContext, bson.D{{Key: "_id", Value: projectID}},
 		)
+		_, _ = database.Collection("product_applications").DeleteOne(
+			cleanupContext, bson.D{{Key: "_id", Value: applicationID}},
+		)
+		_, _ = database.Collection("registry_credentials").DeleteOne(
+			cleanupContext, bson.D{{Key: "_id", Value: registryID}},
+		)
+		_, _ = database.Collection("environments").DeleteMany(cleanupContext, bson.D{{Key: "project_id", Value: projectID}})
+		_, _ = database.Collection("runtime_targets").DeleteMany(cleanupContext, bson.D{{Key: "project_id", Value: projectID}})
 	})
 	repository := builddata.NewMongoRepository(database)
+	controlStore := controlplanedata.NewMongoStore(database)
+	references := builddata.NewConfigurationReferenceLookup(controlStore)
+	webhookVerifier := &readyWebhookVerifier{event: buildbiz.WebhookEvent{
+		Supported: true, Ref: "refs/heads/main", CommitSHA: "a975c10d68a2d7461634f13b15c52a2efba72d16",
+	}}
 	sequence := 0
 	useCase := buildbiz.NewUseCase(
-		controlplanedata.NewMongoStore(database), repository, client,
+		controlStore, repository, client,
 		platformaudit.NewMongoStore(database),
 		func() (string, error) {
 			sequence++
 			return fmt.Sprintf("build-integration-%d", sequence), nil
 		},
 		time.Now,
-	).WithSourceProber(readySourceRepositoryProber{})
+	).WithSourceProber(readySourceRepositoryProber{}).
+		WithSourceRevisionResolver(readySourceRepositoryProber{}).
+		WithWebhookVerifier(webhookVerifier).
+		WithWebhookAdmission(repository, 2, time.Minute).
+		WithBuildTriggerAutomation(builddata.BuildTriggerTokens{}, repository, 60, time.Minute).
+		WithConfigurationReferences(references, references).
+		WithAutomaticDeploymentReferences(references)
 	principal := security.Principal{
 		UserID: "build-user", OrganizationID: organizationID,
 		SessionID: "build-session", Role: security.RoleMaintainer,
@@ -1511,6 +1867,575 @@ func verifyBuildSourceRepositoryIntegration(
 	}).Decode(&probeAudit); err != nil {
 		t.Fatalf("source repository probe audit = %#v/%v", probeAudit, err)
 	}
+	configuration, err := useCase.CreateBuildConfigurationWithDeliverySpec(
+		ctx, principal, projectID, applicationID, "API build", source.ID,
+		"", "", nil, registryID, "registry.example.com/team/api", "",
+		buildbiz.BuildResources{}, 0, 0, true, runtimespec.Spec{},
+		[]buildbiz.AutomaticDeploymentRule{{
+			EnvironmentID: developmentID, RuntimeTargetID: runtimeTargetID,
+		}}, "build-request-4",
+	)
+	if err != nil || configuration.Version != 1 ||
+		configuration.DockerfilePath != "Dockerfile" ||
+		len(configuration.AllowedRefs) != 1 || configuration.AllowedRefs[0] != "refs/heads/main" ||
+		len(configuration.AutomaticDeployments) != 1 {
+		t.Fatalf("create build configuration = %+v/%v", configuration, err)
+	}
+	if _, err := useCase.CreateBuildConfigurationWithDeliverySpec(
+		ctx, principal, projectID, applicationID, "Staging auto build", source.ID,
+		"", "", nil, registryID, "registry.example.com/team/staging", "",
+		buildbiz.BuildResources{}, 0, 0, true, runtimespec.Spec{},
+		[]buildbiz.AutomaticDeploymentRule{{EnvironmentID: stagingID, RuntimeTargetID: runtimeTargetID}},
+		"build-request-staging-auto",
+	); !errors.Is(err, buildbiz.ErrAutomaticDeploymentDenied) {
+		t.Fatalf("staging automatic deployment configuration error = %v", err)
+	}
+	if _, err := useCase.CreateBuildConfiguration(
+		ctx, principal, projectID, applicationID, "api BUILD", source.ID,
+		"Dockerfile", ".", []string{"refs/heads/main"},
+		registryID, "registry.example.com/team/api", buildbiz.BuildPlatformLinuxAMD64,
+		buildbiz.BuildResources{}, 0, 0, false, "build-request-duplicate-configuration",
+	); !errors.Is(err, buildbiz.ErrDuplicateName) {
+		t.Fatalf("duplicate build configuration error = %v", err)
+	}
+	timeout := int64(900)
+	updatedConfiguration, err := useCase.UpdateBuildConfiguration(
+		ctx, principal, projectID, applicationID, configuration.ID, configuration.Version,
+		buildbiz.BuildConfigurationPatch{TimeoutSeconds: &timeout}, "build-request-5",
+	)
+	if err != nil || updatedConfiguration.Version != 2 || updatedConfiguration.TimeoutSeconds != timeout {
+		t.Fatalf("update build configuration = %+v/%v", updatedConfiguration, err)
+	}
+	if _, err := useCase.UpdateBuildConfiguration(
+		ctx, principal, projectID, applicationID, configuration.ID, configuration.Version,
+		buildbiz.BuildConfigurationPatch{TimeoutSeconds: &timeout}, "build-request-stale",
+	); !errors.Is(err, buildbiz.ErrVersionConflict) {
+		t.Fatalf("stale build configuration update error = %v", err)
+	}
+	if _, err := repository.GetBuildConfiguration(
+		ctx, projectID, "other-application", configuration.ID,
+	); !errors.Is(err, buildbiz.ErrNotFound) {
+		t.Fatalf("cross-application build configuration error = %v", err)
+	}
+	triggerCredential, err := useCase.CreateBuildTrigger(
+		ctx, principal, projectID, applicationID, configuration.ID, "Git automation",
+		[]string{"refs/heads/main"}, "build-request-trigger-create",
+	)
+	if err != nil || triggerCredential.Token == "" || triggerCredential.Trigger.TokenHash != "" {
+		t.Fatalf("create build trigger = %+v/%v", triggerCredential, err)
+	}
+	if _, err := useCase.CreateBuildTrigger(
+		ctx, principal, projectID, applicationID, configuration.ID, "git AUTOMATION",
+		[]string{"refs/heads/main"}, "build-request-trigger-duplicate",
+	); !errors.Is(err, buildbiz.ErrDuplicateName) {
+		t.Fatalf("duplicate build trigger name error = %v", err)
+	}
+	var rawTrigger bson.M
+	if err := database.Collection("build_triggers").FindOne(ctx, bson.D{
+		{Key: "_id", Value: triggerCredential.Trigger.ID},
+	}).Decode(&rawTrigger); err != nil || rawTrigger["token_hash"] == triggerCredential.Token ||
+		len(fmt.Sprint(rawTrigger["token_hash"])) != 64 {
+		t.Fatalf("stored build trigger token = %#v/%v", rawTrigger, err)
+	}
+	listedTriggers, err := useCase.ListBuildTriggers(ctx, principal, projectID, applicationID, configuration.ID)
+	if err != nil || len(listedTriggers) != 1 || listedTriggers[0].TokenHash != "" {
+		t.Fatalf("safe build trigger list = %+v/%v", listedTriggers, err)
+	}
+	hook, err := useCase.CreateBuildHook(
+		ctx, principal, projectID, applicationID, configuration.ID, "GitHub webhook",
+		buildbiz.WebhookProviderGitHub, []string{"refs/heads/main"},
+		"secret://build-webhook", "build-request-hook-create",
+	)
+	if err != nil || !hook.SecretConfigured || hook.Status != buildbiz.BuildHookStatusActive {
+		t.Fatalf("create build hook = %+v/%v", hook, err)
+	}
+	if _, err := useCase.CreateBuildHook(
+		ctx, principal, projectID, applicationID, configuration.ID, "github WEBHOOK",
+		buildbiz.WebhookProviderGitHub, []string{"refs/heads/main"},
+		"secret://another-webhook", "build-request-hook-duplicate",
+	); !errors.Is(err, buildbiz.ErrDuplicateName) {
+		t.Fatalf("duplicate build hook name error = %v", err)
+	}
+	var rawHook bson.M
+	if err := database.Collection("build_hooks").FindOne(ctx, bson.D{{Key: "_id", Value: hook.ID}}).Decode(&rawHook); err != nil || rawHook["secret_ref"] != "secret://build-webhook" {
+		t.Fatalf("stored build hook = %#v/%v", rawHook, err)
+	}
+	listedHooks, err := useCase.ListBuildHooks(ctx, principal, projectID, applicationID, configuration.ID)
+	if err != nil || len(listedHooks) != 1 || !listedHooks[0].SecretConfigured {
+		t.Fatalf("safe build hook list = %+v/%v", listedHooks, err)
+	}
+	webhookEnvelope := buildbiz.WebhookEnvelope{DeliveryID: "integration-delivery-1", Event: "push", Body: []byte("signed")}
+	webhookBuild, err := useCase.HandleWebhook(ctx, buildbiz.WebhookProviderGitHub, hook.ID, webhookEnvelope, "build-request-webhook")
+	if err != nil || webhookBuild.Status != buildbiz.WebhookDeliveryStatusAccepted || webhookBuild.BuildID == "" {
+		t.Fatalf("handle webhook = %+v/%v", webhookBuild, err)
+	}
+	webhookReplay, err := useCase.HandleWebhook(ctx, buildbiz.WebhookProviderGitHub, hook.ID, webhookEnvelope, "build-request-webhook-replay")
+	if err != nil || webhookReplay != webhookBuild {
+		t.Fatalf("replay webhook = %+v/%v", webhookReplay, err)
+	}
+	webhookVerifier.event = buildbiz.WebhookEvent{Supported: false}
+	ignoredWebhook, err := useCase.HandleWebhook(ctx, buildbiz.WebhookProviderGitHub, hook.ID,
+		buildbiz.WebhookEnvelope{DeliveryID: "integration-delivery-2", Event: "issues", Body: []byte("signed")}, "build-request-webhook-ignored")
+	if err != nil || ignoredWebhook.Status != buildbiz.WebhookDeliveryStatusIgnored || ignoredWebhook.BuildID != "" {
+		t.Fatalf("ignored webhook = %+v/%v", ignoredWebhook, err)
+	}
+	if _, err := useCase.HandleWebhook(ctx, buildbiz.WebhookProviderGitHub, hook.ID,
+		buildbiz.WebhookEnvelope{DeliveryID: "integration-delivery-3", Event: "issues", Body: []byte("signed")},
+		"build-request-webhook-limited"); !errors.Is(err, buildbiz.ErrWebhookRateLimited) {
+		t.Fatalf("third unique webhook error = %v", err)
+	}
+	deliveryCount, err := database.Collection("webhook_deliveries").CountDocuments(ctx, bson.D{{Key: "hook_id", Value: hook.ID}})
+	if err != nil || deliveryCount != 2 {
+		t.Fatalf("webhook delivery count = %d/%v", deliveryCount, err)
+	}
+	const webhookFloodRequests = 64
+	const webhookFloodLimit = 10
+	floodResults := make(chan bool, webhookFloodRequests)
+	floodErrors := make(chan error, webhookFloodRequests)
+	var floodWait sync.WaitGroup
+	floodNow := time.Now().UTC()
+	for range webhookFloodRequests {
+		floodWait.Add(1)
+		go func() {
+			defer floodWait.Done()
+			allowed, _, reserveErr := repository.ReserveBuildWebhook(
+				ctx, "integration-flood-hook", floodNow, webhookFloodLimit, time.Minute,
+			)
+			if reserveErr != nil {
+				floodErrors <- reserveErr
+				return
+			}
+			floodResults <- allowed
+		}()
+	}
+	floodWait.Wait()
+	close(floodResults)
+	close(floodErrors)
+	for reserveErr := range floodErrors {
+		t.Fatalf("concurrent webhook admission: %v", reserveErr)
+	}
+	admitted := 0
+	for allowed := range floodResults {
+		if allowed {
+			admitted++
+		}
+	}
+	if admitted != webhookFloodLimit {
+		t.Fatalf("concurrent webhook admissions = %d, want %d", admitted, webhookFloodLimit)
+	}
+	if allowed, _, err := repository.ReserveBuildTrigger(ctx, "integration-shared-id", floodNow, 1, time.Minute); err != nil || !allowed {
+		t.Fatalf("trigger namespace admission = %t/%v", allowed, err)
+	}
+	if allowed, _, err := repository.ReserveBuildWebhook(ctx, "integration-shared-id", floodNow, 1, time.Minute); err != nil || !allowed {
+		t.Fatalf("webhook namespace admission = %t/%v", allowed, err)
+	}
+	externalBuild, err := useCase.TriggerExternalBuild(
+		ctx, triggerCredential.Trigger.ID, triggerCredential.Token, "refs/heads/main",
+		"a975c10d68a2d7461634f13b15c52a2efba72d16", "integration-external-build",
+		"build-request-external",
+	)
+	if err != nil || externalBuild.TriggerSource != buildbiz.BuildTriggerSourceTriggerAPI ||
+		externalBuild.TriggerID != triggerCredential.Trigger.ID {
+		t.Fatalf("trigger external build = %+v/%v", externalBuild, err)
+	}
+	rateNow := time.Now().UTC()
+	allowed, _, err := repository.ReserveBuildTrigger(
+		ctx, triggerCredential.Trigger.ID, rateNow, 2, time.Minute,
+	)
+	if err != nil || !allowed {
+		t.Fatalf("second shared trigger admission = %t/%v", allowed, err)
+	}
+	allowed, retryAt, err := repository.ReserveBuildTrigger(
+		ctx, triggerCredential.Trigger.ID, rateNow, 2, time.Minute,
+	)
+	if err != nil || allowed || !retryAt.After(rateNow) {
+		t.Fatalf("limited shared trigger admission = %t/%s/%v", allowed, retryAt, err)
+	}
+	build, err := useCase.TriggerManualBuild(
+		ctx, principal, projectID, applicationID, configuration.ID,
+		"refs/heads/main", "a975c10d68a2d7461634f13b15c52a2efba72d16",
+		"integration-manual-build", "build-request-6",
+	)
+	if err != nil || build.Status != buildbiz.BuildStatusQueued ||
+		build.Configuration.ConfigurationVersion != updatedConfiguration.Version ||
+		build.Configuration.TimeoutSeconds != timeout ||
+		build.Revision.CommitSHA != "a975c10d68a2d7461634f13b15c52a2efba72d16" {
+		t.Fatalf("trigger manual build = %+v/%v", build, err)
+	}
+	replayedBuild, err := useCase.TriggerManualBuild(
+		ctx, principal, projectID, applicationID, configuration.ID,
+		"refs/heads/main", "a975c10d68a2d7461634f13b15c52a2efba72d16",
+		"integration-manual-build", "build-request-replay",
+	)
+	if err != nil || replayedBuild.ID != build.ID {
+		t.Fatalf("replay manual build = %+v/%v", replayedBuild, err)
+	}
+	if _, err := useCase.TriggerManualBuild(
+		ctx, principal, projectID, applicationID, configuration.ID,
+		"refs/heads/main", "b975c10d68a2d7461634f13b15c52a2efba72d16",
+		"integration-manual-build", "build-request-mismatch",
+	); !errors.Is(err, buildbiz.ErrIdempotencyMismatch) {
+		t.Fatalf("build idempotency mismatch error = %v", err)
+	}
+	listedBuilds, err := useCase.ListBuilds(ctx, principal, projectID)
+	if err != nil || len(listedBuilds) != 3 {
+		t.Fatalf("list builds = %+v/%v", listedBuilds, err)
+	}
+	queueNow := time.Now().UTC()
+	workerClock := func() time.Time { return queueNow }
+	queueController, err := buildworker.NewController(
+		repository, client, platformaudit.NewMongoStore(database),
+		func() (string, error) {
+			sequence++
+			return fmt.Sprintf("build-integration-%d", sequence), nil
+		},
+		workerClock, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("create build queue controller: %v", err)
+	}
+	queueController.WithArtifacts(repository)
+
+	// Cancellation remains cooperative: the API records canceling and the
+	// current (or reclaiming) worker fences its generation before recording
+	// the terminal canceled state.
+	cancelingExternal, err := useCase.CancelBuild(
+		ctx, principal, projectID, externalBuild.ID, "build-request-cancel-external",
+	)
+	if err != nil || cancelingExternal.Status != buildbiz.BuildStatusCanceling {
+		t.Fatalf("cancel external build = %+v/%v", cancelingExternal, err)
+	}
+	claimedCancel, found, err := queueController.Claim(ctx, "build-cancel-worker")
+	if err != nil || !found || claimedCancel.ID != externalBuild.ID {
+		t.Fatalf("claim canceled build = %+v/%t/%v", claimedCancel, found, err)
+	}
+	queueNow = queueNow.Add(time.Second)
+	canceledExternal, err := queueController.Advance(
+		ctx, claimedCancel, "build-cancel-worker", buildbiz.BuildStatusCanceled,
+	)
+	if err != nil || canceledExternal.Status != buildbiz.BuildStatusCanceled {
+		t.Fatalf("finish canceled build = %+v/%v", canceledExternal, err)
+	}
+
+	if _, err := useCase.CancelBuild(
+		ctx, principal, projectID, build.ID, "build-request-cancel-manual",
+	); err != nil {
+		t.Fatalf("cancel manual build: %v", err)
+	}
+	claimedCancel, found, err = queueController.Claim(ctx, "build-cancel-worker")
+	if err != nil || !found || claimedCancel.ID != build.ID {
+		t.Fatalf("claim second canceled build = %+v/%t/%v", claimedCancel, found, err)
+	}
+	queueNow = queueNow.Add(time.Second)
+	if _, err := queueController.Advance(
+		ctx, claimedCancel, "build-cancel-worker", buildbiz.BuildStatusCanceled,
+	); err != nil {
+		t.Fatalf("finish second canceled build: %v", err)
+	}
+
+	// Only the Webhook build remains queued. Concurrent Mongo claims must
+	// produce exactly one owner for it.
+	claimNow := queueNow.Add(time.Second)
+	const claimers = 8
+	type claimResult struct {
+		item  buildbiz.Build
+		found bool
+		err   error
+	}
+	claimResults := make(chan claimResult, claimers)
+	var claimWait sync.WaitGroup
+	for index := 0; index < claimers; index++ {
+		workerID := fmt.Sprintf("build-worker-%d", index)
+		claimWait.Add(1)
+		go func() {
+			defer claimWait.Done()
+			item, claimed, claimErr := repository.ClaimNextBuild(ctx, buildbiz.BuildClaim{
+				WorkerID: workerID, Now: claimNow, ExpiresAt: claimNow.Add(10 * time.Second),
+			})
+			claimResults <- claimResult{item: item, found: claimed, err: claimErr}
+		}()
+	}
+	claimWait.Wait()
+	close(claimResults)
+	var activeClaim buildbiz.Build
+	claimedCount := 0
+	for result := range claimResults {
+		if result.err != nil {
+			t.Fatalf("concurrent build claim: %v", result.err)
+		}
+		if result.found {
+			claimedCount++
+			activeClaim = result.item
+		}
+	}
+	if claimedCount != 1 || activeClaim.ID != webhookBuild.BuildID || activeClaim.Lease.Generation != 1 {
+		t.Fatalf("concurrent claims = %d, active = %+v", claimedCount, activeClaim)
+	}
+
+	heartbeatAt := claimNow.Add(time.Second)
+	heartbeated, err := repository.RenewBuildLease(
+		ctx, activeClaim.ID, activeClaim.Lease.Owner, activeClaim.Lease.Generation,
+		activeClaim.Version, heartbeatAt, heartbeatAt.Add(10*time.Second),
+	)
+	if err != nil || heartbeated.Version != activeClaim.Version+1 {
+		t.Fatalf("heartbeat build lease = %+v/%v", heartbeated, err)
+	}
+	if err := repository.ValidateBuildFence(
+		ctx, heartbeated.ID, heartbeated.Lease.Owner, heartbeated.Lease.Generation,
+		heartbeatAt.Add(time.Second),
+	); err != nil {
+		t.Fatalf("validate live build fence: %v", err)
+	}
+
+	reclaimAt := heartbeated.Lease.ExpiresAt.Add(time.Millisecond)
+	reclaimed, found, err := repository.ClaimNextBuild(ctx, buildbiz.BuildClaim{
+		WorkerID: "build-recovery-worker", Now: reclaimAt, ExpiresAt: reclaimAt.Add(10 * time.Second),
+	})
+	if err != nil || !found || reclaimed.ID != activeClaim.ID ||
+		reclaimed.Lease.Generation != activeClaim.Lease.Generation+1 {
+		t.Fatalf("reclaim expired build = %+v/%t/%v", reclaimed, found, err)
+	}
+	if err := repository.ValidateBuildFence(
+		ctx, activeClaim.ID, activeClaim.Lease.Owner, activeClaim.Lease.Generation, reclaimAt,
+	); !errors.Is(err, buildbiz.ErrBuildLeaseExpired) {
+		t.Fatalf("stale build fence error = %v", err)
+	}
+
+	queueNow = reclaimAt.Add(time.Second)
+	reclaimed, err = queueController.Advance(
+		ctx, reclaimed, "build-recovery-worker", buildbiz.BuildStatusCheckingOut,
+	)
+	if err != nil || reclaimed.Status != buildbiz.BuildStatusCheckingOut {
+		t.Fatalf("advance reclaimed build = %+v/%v", reclaimed, err)
+	}
+	queueNow = queueNow.Add(time.Second)
+	failedBuild, err := queueController.Fail(
+		ctx, reclaimed, "build-recovery-worker", buildbiz.BuildFailureCheckout,
+	)
+	if err != nil || failedBuild.Status != buildbiz.BuildStatusFailed ||
+		failedBuild.FailureCategory != buildbiz.BuildFailureCheckout {
+		t.Fatalf("fail reclaimed build = %+v/%v", failedBuild, err)
+	}
+	retriedBuild, err := useCase.RetryBuild(
+		ctx, principal, projectID, failedBuild.ID, "integration-build-retry", "build-request-retry",
+	)
+	if err != nil || retriedBuild.Status != buildbiz.BuildStatusQueued ||
+		retriedBuild.SourceBuildID != failedBuild.ID || retriedBuild.Revision != failedBuild.Revision {
+		t.Fatalf("retry failed build = %+v/%v", retriedBuild, err)
+	}
+	retriedReplay, err := useCase.RetryBuild(
+		ctx, principal, projectID, failedBuild.ID, "integration-build-retry", "build-request-retry-replay",
+	)
+	if err != nil || retriedReplay.ID != retriedBuild.ID {
+		t.Fatalf("replay build retry = %+v/%v", retriedReplay, err)
+	}
+
+	// A failed audit must roll the state transition back with it.
+	rollbackClaimAt := queueNow.Add(time.Second)
+	rollbackClaim, found, err := repository.ClaimNextBuild(ctx, buildbiz.BuildClaim{
+		WorkerID: "build-audit-worker", Now: rollbackClaimAt, ExpiresAt: rollbackClaimAt.Add(10 * time.Second),
+	})
+	if err != nil || !found || rollbackClaim.ID != retriedBuild.ID {
+		t.Fatalf("claim audit rollback build = %+v/%t/%v", rollbackClaim, found, err)
+	}
+	queueNow = rollbackClaimAt.Add(time.Second)
+	rollbackController, err := buildworker.NewController(
+		repository, client, failingAudit{}, id.New, workerClock, 10*time.Second,
+	)
+	if err != nil {
+		t.Fatalf("create rollback build controller: %v", err)
+	}
+	if _, err := rollbackController.Advance(
+		ctx, rollbackClaim, "build-audit-worker", buildbiz.BuildStatusCheckingOut,
+	); !errors.Is(err, errAuditProbe) {
+		t.Fatalf("failed build audit transaction error = %v", err)
+	}
+	storedRollbackBuild, err := repository.GetBuild(ctx, projectID, rollbackClaim.ID)
+	if err != nil || storedRollbackBuild.Status != buildbiz.BuildStatusQueued ||
+		storedRollbackBuild.Version != rollbackClaim.Version {
+		t.Fatalf("build after audit rollback = %+v/%v", storedRollbackBuild, err)
+	}
+
+	// A pushed digest is published exactly once as an Artifact under the live
+	// Build generation. Release creation is separately idempotent by Artifact,
+	// so coordinator retry never rebuilds or pushes the image again.
+	artifactBuild := retriedBuild
+	artifactBuild.ID = "build-artifact-integration"
+	artifactBuild.IdempotencyKey = "artifact-integration"
+	artifactBuild.Status = buildbiz.BuildStatusPushing
+	artifactBuild.Version = 1
+	artifactBuild.SourceBuildID = ""
+	artifactBuild.Configuration.ReleaseRuntimeSpec = runtimespec.Spec{
+		Ports:           []runtimespec.Port{{Name: "http", ContainerPort: 8080, Protocol: "tcp"}},
+		EnvironmentKeys: []string{"DATABASE_URL"},
+		Resources:       runtimespec.Resources{CPUMilli: 750, MemoryBytes: 384 * 1024 * 1024},
+	}
+	artifactBuild.ImageDigest = "registry.example.com/team/api@sha256:" + strings.Repeat("e", 64)
+	artifactBuild.ArtifactID = ""
+	artifactBuild.Lease = buildbiz.BuildLease{}
+	artifactBuild.CreatedAt, artifactBuild.UpdatedAt = queueNow, queueNow
+	if _, err := repository.CreateBuild(ctx, artifactBuild); err != nil {
+		t.Fatalf("create pushed Build fixture: %v", err)
+	}
+	queueController.WithClaimStatuses(buildbiz.BuildStatusPushing)
+	artifactClaim, found, err := queueController.Claim(ctx, "artifact-worker")
+	if err != nil || !found || artifactClaim.ID != artifactBuild.ID {
+		t.Fatalf("claim pushed Build = %+v/%t/%v", artifactClaim, found, err)
+	}
+	queueNow = queueNow.Add(time.Second)
+	succeededBuild, artifact, err := queueController.PublishArtifact(ctx, artifactClaim, "artifact-worker")
+	if err != nil || succeededBuild.Status != buildbiz.BuildStatusSucceeded ||
+		artifact.ReleaseStatus != buildbiz.ArtifactReleasePending || succeededBuild.ArtifactID != artifact.ID {
+		t.Fatalf("publish Artifact = %+v/%+v/%v", succeededBuild, artifact, err)
+	}
+	storedArtifact, err := repository.GetArtifactByBuild(ctx, artifactBuild.ID)
+	if err != nil || storedArtifact.ImageDigest != artifactBuild.ImageDigest ||
+		len(storedArtifact.ReleaseRuntimeSpec.Ports) != 1 ||
+		storedArtifact.ReleaseRuntimeSpec.Resources.CPUMilli != 750 ||
+		len(storedArtifact.AutomaticDeployments) != 1 ||
+		storedArtifact.AutomaticDeployments[0].EnvironmentID != developmentID {
+		t.Fatalf("stored Artifact = %+v/%v", storedArtifact, err)
+	}
+	if _, err := repository.CreateArtifact(ctx, artifact); !errors.Is(err, buildbiz.ErrDuplicateArtifact) {
+		t.Fatalf("duplicate Build Artifact error = %v", err)
+	}
+	artifactControlPlane := controlplanebiz.NewUseCaseWithResources(
+		controlStore, controlStore, controlStore, controlStore, controlStore, controlStore,
+		client, platformaudit.NewMongoStore(database), platformaudit.NewMongoStore(database),
+		id.New, time.Now,
+	).WithArtifactReleases(controlStore)
+	deploymentStore := deploymentdata.NewMongoRepository(database)
+	deploymentReferences := deploymentdata.NewFormalReferenceLookup(controlStore)
+	automaticDeployments := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+		WithFormalReferences(deploymentReferences).
+		WithAutomaticReferences(deploymentReferences).
+		WithFormalSecurity(client, platformaudit.NewMongoStore(database))
+	releaseAdapter := builddata.NewArtifactReleaseAdapter(artifactControlPlane).
+		WithAutomaticDeployments(automaticDeployments)
+	releaseID, err := releaseAdapter.CreateArtifactRelease(ctx, buildbiz.ArtifactReleaseRequest{
+		ArtifactID: artifact.ID, OrganizationID: artifact.OrganizationID,
+		ProjectID: artifact.ProjectID, ApplicationID: artifact.ApplicationID,
+		RegistryCredentialID: artifact.RegistryCredentialID,
+		ImageDigest:          artifact.ImageDigest, RuntimeSpec: artifact.ReleaseRuntimeSpec,
+		AutomaticDeployments: artifact.AutomaticDeployments, BuildID: artifact.BuildID,
+		BuildConfigurationID: artifact.BuildConfigurationID,
+		ActorID:              "system:artifact-worker",
+	})
+	if err != nil {
+		t.Fatalf("create Artifact Release: %v", err)
+	}
+	replayedReleaseID, err := releaseAdapter.CreateArtifactRelease(ctx, buildbiz.ArtifactReleaseRequest{
+		ArtifactID: artifact.ID, OrganizationID: artifact.OrganizationID,
+		ProjectID: artifact.ProjectID, ApplicationID: artifact.ApplicationID,
+		RegistryCredentialID: artifact.RegistryCredentialID,
+		ImageDigest:          artifact.ImageDigest, RuntimeSpec: artifact.ReleaseRuntimeSpec,
+		AutomaticDeployments: artifact.AutomaticDeployments, BuildID: artifact.BuildID,
+		BuildConfigurationID: artifact.BuildConfigurationID,
+		ActorID:              "system:artifact-worker",
+	})
+	if err != nil || replayedReleaseID != releaseID {
+		t.Fatalf("replay Artifact Release = %q/%v", replayedReleaseID, err)
+	}
+	queueNow = queueNow.Add(time.Second)
+	releasedArtifact, err := queueController.RecordArtifactRelease(ctx, artifact, "artifact-worker", releaseID)
+	if err != nil || releasedArtifact.ReleaseStatus != buildbiz.ArtifactReleaseCreated || releasedArtifact.ReleaseID != releaseID {
+		t.Fatalf("record Artifact Release = %+v/%v", releasedArtifact, err)
+	}
+	storedRelease, err := controlStore.GetReleaseByArtifact(ctx, projectID, artifact.ID)
+	if err != nil || storedRelease.ID != releaseID || storedRelease.SourceArtifactID != artifact.ID ||
+		storedRelease.ImageDigest != artifact.ImageDigest ||
+		len(storedRelease.RuntimeSpec.Ports) != 1 || storedRelease.RuntimeSpec.Ports[0].ContainerPort != 8080 ||
+		storedRelease.RuntimeSpec.Resources.CPUMilli != 750 {
+		t.Fatalf("stored Artifact Release = %+v/%v", storedRelease, err)
+	}
+	automaticItems, err := deploymentStore.List(ctx, projectID, applicationID, developmentID)
+	if err != nil || len(automaticItems) != 1 ||
+		automaticItems[0].TriggerSource != deploymentbiz.TriggerSourceAutomatic ||
+		automaticItems[0].SourceArtifactID != artifact.ID ||
+		automaticItems[0].SourceBuildID != artifact.BuildID ||
+		automaticItems[0].BuildConfigurationID != artifact.BuildConfigurationID ||
+		automaticItems[0].ReleaseID != releaseID || automaticItems[0].RuntimeTargetID != runtimeTargetID {
+		t.Fatalf("automatic Deployment = %+v/%v", automaticItems, err)
+	}
+	var automaticAudit bson.M
+	if err := database.Collection("audit_events").FindOne(ctx, bson.D{
+		{Key: "project_id", Value: projectID},
+		{Key: "action", Value: deploymentbiz.AuditActionAutomatic},
+		{Key: "resource_id", Value: automaticItems[0].ID},
+	}).Decode(&automaticAudit); err != nil || automaticAudit["actor_id"] != "system:auto-deployment" {
+		t.Fatalf("automatic Deployment audit = %#v/%v", automaticAudit, err)
+	}
+	if _, err := database.Collection("deployments").DeleteMany(ctx, bson.D{
+		{Key: "project_id", Value: projectID}, {Key: "trigger_source", Value: "automatic"},
+	}); err != nil {
+		t.Fatalf("clean automatic Deployment fixture: %v", err)
+	}
+	if _, err := database.Collection("deployment_cutover_sequences").DeleteMany(ctx,
+		bson.D{{Key: "project_id", Value: projectID}}); err != nil {
+		t.Fatalf("clean automatic Deployment sequence fixture: %v", err)
+	}
+
+	// Build logs are ordered, cursor-readable, byte bounded, explicitly
+	// truncated and assigned a shared TTL without exposing another Project.
+	repository.WithBuildLogLimits(time.Hour, 32, 8)
+	logTime := queueNow.Add(time.Second)
+	for _, message := range []string{"alpha-123456", "beta-1234567890", "discarded"} {
+		if err := repository.AppendBuildLog(ctx, buildbiz.BuildLogAppend{
+			BuildID: artifactBuild.ID, ProjectID: projectID, Stage: buildbiz.BuildLogStageBuild,
+			Message: message, CreatedAt: logTime,
+		}); err != nil {
+			t.Fatalf("append bounded Build log: %v", err)
+		}
+		logTime = logTime.Add(time.Second)
+	}
+	firstLogPage, err := repository.ReadBuildLogs(ctx, projectID, artifactBuild.ID,
+		buildbiz.BuildLogQuery{Limit: 1})
+	if err != nil || len(firstLogPage.Entries) != 1 || firstLogPage.NextSequence != 1 ||
+		!firstLogPage.Truncated || firstLogPage.ExpiresAt.IsZero() {
+		t.Fatalf("first Build log page = %+v/%v", firstLogPage, err)
+	}
+	nextLogPage, err := repository.ReadBuildLogs(ctx, projectID, artifactBuild.ID,
+		buildbiz.BuildLogQuery{AfterSequence: firstLogPage.NextSequence, Limit: 10})
+	if err != nil || len(nextLogPage.Entries) != 3 || nextLogPage.NextSequence != 4 ||
+		!nextLogPage.Truncated {
+		t.Fatalf("next Build log page = %+v/%v", nextLogPage, err)
+	}
+	logExpiryCursor, err := database.Collection("build_log_chunks").Find(ctx,
+		bson.D{{Key: "build_id", Value: artifactBuild.ID}},
+		options.Find().SetProjection(bson.D{{Key: "expires_at", Value: 1}}),
+	)
+	if err != nil {
+		t.Fatalf("find Build log expirations: %v", err)
+	}
+	var logExpirations []struct {
+		ExpiresAt time.Time `bson:"expires_at"`
+	}
+	if err := logExpiryCursor.All(ctx, &logExpirations); err != nil {
+		_ = logExpiryCursor.Close(ctx)
+		t.Fatalf("decode Build log expirations: %v", err)
+	}
+	_ = logExpiryCursor.Close(ctx)
+	if len(logExpirations) != 4 {
+		t.Fatalf("Build log expiration count = %d, want 4", len(logExpirations))
+	}
+	for _, document := range logExpirations {
+		if !document.ExpiresAt.Equal(firstLogPage.ExpiresAt) {
+			t.Fatalf("Build log chunk expiration = %s, stream = %s", document.ExpiresAt, firstLogPage.ExpiresAt)
+		}
+	}
+	foreignLogPage, err := repository.ReadBuildLogs(ctx, "project-foreign", artifactBuild.ID,
+		buildbiz.BuildLogQuery{})
+	if err != nil || len(foreignLogPage.Entries) != 0 {
+		t.Fatalf("foreign Build log page = %+v/%v", foreignLogPage, err)
+	}
+	var buildAudit bson.M
+	if err := database.Collection("audit_events").FindOne(ctx, bson.D{
+		{Key: "project_id", Value: projectID},
+		{Key: "action", Value: "build.trigger_manual"},
+		{Key: "resource_id", Value: build.ID},
+	}).Decode(&buildAudit); err != nil {
+		t.Fatalf("manual build audit = %#v/%v", buildAudit, err)
+	}
 	failedProbeUseCase := buildbiz.NewUseCase(
 		controlplanedata.NewMongoStore(database), repository, client,
 		failingAudit{},
@@ -1534,14 +2459,15 @@ func verifyBuildSourceRepositoryIntegration(
 		t.Fatalf("cross-project source lookup error = %v", err)
 	}
 	failedUseCase := buildbiz.NewUseCase(
-		controlplanedata.NewMongoStore(database), repository, client,
+		controlStore, repository, client,
 		failingAudit{},
 		func() (string, error) {
 			sequence++
 			return fmt.Sprintf("build-integration-%d", sequence), nil
 		},
 		time.Now,
-	)
+	).WithConfigurationReferences(references, references).
+		WithSourceRevisionResolver(readySourceRepositoryProber{})
 	failed, err := failedUseCase.CreateCredential(
 		ctx, principal, projectID, "Rolled back token",
 		buildbiz.CredentialTypeHTTPSAccessToken,
@@ -1555,6 +2481,73 @@ func verifyBuildSourceRepositoryIntegration(
 	)
 	if err != nil || count != 1 {
 		t.Fatalf("repository credentials after rollback = %d/%v", count, err)
+	}
+	rolledBackConfiguration, err := failedUseCase.CreateBuildConfiguration(
+		ctx, principal, projectID, applicationID, "Rolled back build", source.ID,
+		"Dockerfile", ".", []string{"refs/heads/main"},
+		registryID, "registry.example.com/team/rollback", buildbiz.BuildPlatformLinuxAMD64,
+		buildbiz.BuildResources{}, 0, 0, false, "build-request-rollback-configuration",
+	)
+	if !errors.Is(err, errAuditProbe) {
+		t.Fatalf("failed build configuration transaction = %+v/%v", rolledBackConfiguration, err)
+	}
+	configurationCount, err := database.Collection("build_configurations").CountDocuments(
+		ctx, bson.D{{Key: "project_id", Value: projectID}},
+	)
+	if err != nil || configurationCount != 1 {
+		t.Fatalf("build configurations after rollback = %d/%v", configurationCount, err)
+	}
+	rolledBackBuild, err := failedUseCase.TriggerManualBuild(
+		ctx, principal, projectID, applicationID, configuration.ID,
+		"refs/heads/main", "", "integration-rollback-build", "build-request-rollback-build",
+	)
+	if !errors.Is(err, errAuditProbe) {
+		t.Fatalf("failed build transaction = %+v/%v", rolledBackBuild, err)
+	}
+	buildCount, err := database.Collection("builds").CountDocuments(
+		ctx, bson.D{{Key: "project_id", Value: projectID}},
+	)
+	if err != nil || buildCount != 5 {
+		t.Fatalf("builds after rollback = %d/%v", buildCount, err)
+	}
+	assertProjectDocumentsExcludeSecrets(t, ctx, database, projectID, []string{triggerCredential.Token})
+}
+
+func assertProjectDocumentsExcludeSecrets(t *testing.T, ctx context.Context,
+	database *drivermongo.Database, projectID string, forbidden []string) {
+	t.Helper()
+	for _, collection := range []string{
+		"repository_credentials", "source_repositories", "build_configurations", "build_triggers",
+		"build_hooks", "webhook_deliveries", "builds", "build_log_streams", "build_log_chunks",
+		"artifacts", "releases", "deployments", "audit_events",
+	} {
+		cursor, err := database.Collection(collection).Find(ctx, bson.D{{Key: "project_id", Value: projectID}})
+		if err != nil {
+			t.Fatalf("scan %s for plaintext secrets: %v", collection, err)
+		}
+		for cursor.Next(ctx) {
+			var document bson.Raw
+			if err := cursor.Decode(&document); err != nil {
+				_ = cursor.Close(ctx)
+				t.Fatalf("decode %s during secret scan: %v", collection, err)
+			}
+			serialized, err := bson.MarshalExtJSON(document, false, false)
+			if err != nil {
+				_ = cursor.Close(ctx)
+				t.Fatalf("serialize %s during secret scan: %v", collection, err)
+			}
+			for _, secret := range forbidden {
+				if secret != "" && bytes.Contains(serialized, []byte(secret)) {
+					_ = cursor.Close(ctx)
+					t.Fatalf("plaintext secret found in %s document", collection)
+				}
+			}
+		}
+		if err := cursor.Err(); err != nil {
+			_ = cursor.Close(ctx)
+			t.Fatalf("scan %s for plaintext secrets: %v", collection, err)
+		}
+		_ = cursor.Close(ctx)
 	}
 }
 
@@ -2302,6 +3295,376 @@ func assertRuntimeInventoryViewIndexes(
 	if len(expected) != 0 {
 		t.Fatalf("missing runtime inventory view indexes: %v", expected)
 	}
+}
+
+func assertBuildLogIndexes(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	type indexDocument struct {
+		Name               string `bson:"name"`
+		ExpireAfterSeconds *int64 `bson:"expireAfterSeconds,omitempty"`
+	}
+	for collection, expected := range map[string]map[string]bool{
+		"build_log_streams": {
+			"idx_build_log_stream_project": false,
+			"ttl_build_log_stream":         true,
+		},
+		"build_log_chunks": {
+			"uniq_build_log_sequence": false,
+			"idx_build_log_read":      false,
+			"ttl_build_log_chunk":     true,
+		},
+	} {
+		cursor, err := database.Collection(collection).Indexes().List(ctx)
+		if err != nil {
+			t.Fatalf("list %s indexes: %v", collection, err)
+		}
+		var documents []indexDocument
+		if err := cursor.All(ctx, &documents); err != nil {
+			_ = cursor.Close(ctx)
+			t.Fatalf("decode %s indexes: %v", collection, err)
+		}
+		_ = cursor.Close(ctx)
+		for _, document := range documents {
+			wantTTL, found := expected[document.Name]
+			if !found {
+				continue
+			}
+			if wantTTL && (document.ExpireAfterSeconds == nil || *document.ExpireAfterSeconds != 0) {
+				t.Fatalf("%s index %s TTL = %v, want 0", collection, document.Name, document.ExpireAfterSeconds)
+			}
+			delete(expected, document.Name)
+		}
+		if len(expected) != 0 {
+			t.Fatalf("missing %s indexes: %v", collection, expected)
+		}
+	}
+}
+
+func assertUserInvitationIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	type indexDocument struct {
+		Name               string `bson:"name"`
+		Unique             bool   `bson:"unique,omitempty"`
+		ExpireAfterSeconds *int64 `bson:"expireAfterSeconds,omitempty"`
+	}
+	cursor, err := database.Collection("user_invitations").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list user invitation indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []indexDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode user invitation indexes: %v", err)
+	}
+	expected := map[string]string{
+		"uniq_user_invitation_token_hash":          "unique",
+		"idx_user_invitation_organization_created": "ordinary",
+		"ttl_active_user_invitation":               "ttl",
+	}
+	for _, document := range documents {
+		kind, ok := expected[document.Name]
+		if !ok {
+			continue
+		}
+		if kind == "unique" && !document.Unique {
+			t.Fatalf("user invitation token index is not unique")
+		}
+		if kind == "ttl" && (document.ExpireAfterSeconds == nil || *document.ExpireAfterSeconds != 0) {
+			t.Fatalf("user invitation TTL index = %v, want 0", document.ExpireAfterSeconds)
+		}
+		delete(expected, document.Name)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing user invitation indexes: %v", expected)
+	}
+}
+
+func assertProjectMemberIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	type indexDocument struct {
+		Name   string `bson:"name"`
+		Unique bool   `bson:"unique,omitempty"`
+	}
+	cursor, err := database.Collection("project_members").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list project member indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []indexDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode project member indexes: %v", err)
+	}
+	expected := map[string]bool{
+		"uniq_project_member_user":         true,
+		"uniq_project_member_email":        true,
+		"idx_project_member_user_projects": false,
+	}
+	for _, document := range documents {
+		wantUnique, ok := expected[document.Name]
+		if !ok {
+			continue
+		}
+		if document.Unique != wantUnique {
+			t.Fatalf("project member index %s unique = %v, want %v", document.Name, document.Unique, wantUnique)
+		}
+		delete(expected, document.Name)
+	}
+	if len(expected) != 0 {
+		t.Fatalf("missing project member indexes: %v", expected)
+	}
+}
+
+func assertIngressRateLimitIndex(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	type indexDocument struct {
+		Name               string `bson:"name"`
+		ExpireAfterSeconds *int64 `bson:"expireAfterSeconds,omitempty"`
+	}
+	cursor, err := database.Collection("ingress_rate_limits").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list ingress rate limit indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []indexDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode ingress rate limit indexes: %v", err)
+	}
+	for _, document := range documents {
+		if document.Name == "ttl_ingress_rate_limit" {
+			if document.ExpireAfterSeconds == nil || *document.ExpireAfterSeconds != 0 {
+				t.Fatalf("ingress rate limit TTL = %v, want 0", document.ExpireAfterSeconds)
+			}
+			return
+		}
+	}
+	t.Fatal("ingress rate limit TTL index is missing")
+}
+
+func assertTerminalIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	type indexDocument struct {
+		Name   string `bson:"name"`
+		Unique bool   `bson:"unique,omitempty"`
+	}
+	for collection, expected := range map[string]map[string]bool{
+		"terminal_access_policies": {
+			"uniq_terminal_project_policy":      true,
+			"uniq_terminal_organization_policy": true,
+		},
+		"terminal_sessions": {
+			"uniq_terminal_ticket_hash":          true,
+			"uniq_active_terminal_user_slot":     true,
+			"uniq_active_terminal_target_slot":   true,
+			"idx_terminal_project_created":       false,
+			"idx_terminal_actor_created":         false,
+			"idx_terminal_expiry_reconciliation": false,
+		},
+	} {
+		cursor, err := database.Collection(collection).Indexes().List(ctx)
+		if err != nil {
+			t.Fatalf("list %s indexes: %v", collection, err)
+		}
+		var documents []indexDocument
+		if err := cursor.All(ctx, &documents); err != nil {
+			_ = cursor.Close(ctx)
+			t.Fatalf("decode %s indexes: %v", collection, err)
+		}
+		_ = cursor.Close(ctx)
+		for _, document := range documents {
+			wantUnique, ok := expected[document.Name]
+			if !ok {
+				continue
+			}
+			if document.Unique != wantUnique {
+				t.Fatalf("%s index %s unique = %v, want %v", collection, document.Name, document.Unique, wantUnique)
+			}
+			delete(expected, document.Name)
+		}
+		if len(expected) != 0 {
+			t.Fatalf("missing %s indexes: %v", collection, expected)
+		}
+	}
+}
+
+func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	if _, err := database.Collection("terminal_access_policies").DeleteMany(ctx, bson.D{}); err != nil {
+		t.Fatalf("clear terminal policy fixtures: %v", err)
+	}
+	if _, err := database.Collection("terminal_sessions").DeleteMany(ctx, bson.D{}); err != nil {
+		t.Fatalf("clear terminal session fixtures: %v", err)
+	}
+	repository := terminaldata.NewMongoRepository(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	policy, err := terminalbiz.NewProjectPolicy(
+		"terminal-policy-1", "terminal-organization", "terminal-project", "terminal-owner",
+		terminalbiz.PolicyInput{
+			Enabled: true, AllowedRoles: []security.Role{security.RoleOwner, security.RoleMaintainer},
+			EnvironmentStages: []string{"development", "staging"},
+			IdleTimeout:       5 * time.Minute, MaximumDuration: time.Hour,
+			MaximumPerUser: 1, MaximumPerTarget: 1,
+			RevocationGracePeriod: 30 * time.Second,
+		}, now,
+	)
+	if err != nil {
+		t.Fatalf("new terminal policy: %v", err)
+	}
+	if _, err := repository.SavePolicy(ctx, policy, 0); err != nil {
+		t.Fatalf("save terminal policy: %v", err)
+	}
+	loadedPolicy, err := repository.GetProjectPolicy(ctx, policy.OrganizationID, policy.ProjectID)
+	if err != nil || loadedPolicy.Version != 1 || loadedPolicy.MaximumDuration != time.Hour {
+		t.Fatalf("loaded terminal policy = %+v, error = %v", loadedPolicy, err)
+	}
+	if _, err := repository.SavePolicy(ctx, policy, 0); !errors.Is(err, terminalbiz.ErrPolicyConflict) {
+		t.Fatalf("duplicate terminal policy error = %v", err)
+	}
+	target := terminalbiz.Target{
+		Kind: terminalbiz.KindContainer, OrganizationID: policy.OrganizationID, ProjectID: policy.ProjectID,
+		ManagedHostID: "terminal-host", RuntimeTargetID: "terminal-target",
+		DeploymentID: "terminal-deployment", RunningInstanceID: "terminal-deployment:1",
+		InstanceGeneration: 1, EnvironmentStage: "development",
+		ConnectionMode: runtimeaccess.ModeDirectDocker,
+	}
+	first, err := terminalbiz.NewTerminalSession(
+		"terminal-session-1", "terminal-owner", strings.Repeat("a", 64),
+		"192.0.2.10", "OwnDock-Integration/1.0", "terminal-request-1", target, policy, now,
+	)
+	if err != nil {
+		t.Fatalf("new terminal session: %v", err)
+	}
+	first.UserConcurrencySlot, first.TargetConcurrencySlot = 1, 1
+	if _, err := repository.CreateSession(ctx, first); err != nil {
+		t.Fatalf("create terminal session: %v", err)
+	}
+	second := first
+	second.ID, second.ActorID, second.TicketHash, second.RequestID =
+		"terminal-session-2", "terminal-owner-2", strings.Repeat("b", 64), "terminal-request-2"
+	if _, err := repository.CreateSession(ctx, second); !errors.Is(err, terminalbiz.ErrSessionSlotConflict) {
+		t.Fatalf("occupied target slot error = %v", err)
+	}
+	connected, err := repository.ConsumeTicket(
+		ctx, first.OrganizationID, first.ID, first.TicketHash, now.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatalf("consume terminal ticket: %v", err)
+	}
+	if connected.Status != terminalbiz.StatusOpen || connected.TicketHash != "" {
+		t.Fatalf("connected terminal session = %+v", connected)
+	}
+	if _, err := repository.ConsumeTicket(
+		ctx, first.OrganizationID, first.ID, first.TicketHash, now.Add(2*time.Second),
+	); !errors.Is(err, terminalbiz.ErrInvalidTicket) {
+		t.Fatalf("replayed terminal ticket error = %v", err)
+	}
+	closed, err := connected.Close(terminalbiz.CloseReasonUserRequested, "", now.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("close terminal session: %v", err)
+	}
+	if _, err := repository.SaveSession(ctx, closed, connected.Version); err != nil {
+		t.Fatalf("save terminal close: %v", err)
+	}
+	if _, err := repository.CreateSession(ctx, second); err != nil {
+		t.Fatalf("reuse released terminal slot: %v", err)
+	}
+	stored, err := repository.GetSession(ctx, first.OrganizationID, first.ID)
+	if err != nil || stored.Active || stored.TicketHash != "" || stored.CloseReason != terminalbiz.CloseReasonUserRequested {
+		t.Fatalf("stored closed terminal session = %+v, error = %v", stored, err)
+	}
+}
+
+func verifyIngressRateLimitIntegration(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	if _, err := database.Collection("ingress_rate_limits").DeleteMany(ctx, bson.D{}); err != nil {
+		t.Fatalf("clear ingress rate limit fixtures: %v", err)
+	}
+	guard := platformingress.NewMongoGuard(database)
+	const requests, limit = 32, 10
+	results := make(chan bool, requests)
+	errorsFound := make(chan error, requests)
+	var wait sync.WaitGroup
+	now := time.Now().UTC()
+	for range requests {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			allowed, _, reserveErr := guard.Reserve(
+				ctx, strings.Repeat("c", 64), now, limit, time.Minute,
+			)
+			results <- allowed
+			errorsFound <- reserveErr
+		}()
+	}
+	wait.Wait()
+	close(results)
+	close(errorsFound)
+	for reserveErr := range errorsFound {
+		if reserveErr != nil {
+			t.Fatalf("reserve concurrent ingress request: %v", reserveErr)
+		}
+	}
+	allowed := 0
+	for accepted := range results {
+		if accepted {
+			allowed++
+		}
+	}
+	if allowed != limit {
+		t.Fatalf("concurrent ingress admissions = %d, want %d", allowed, limit)
+	}
+	var stored struct {
+		ID       string `bson:"_id"`
+		Requests int    `bson:"requests"`
+	}
+	if err := database.Collection("ingress_rate_limits").FindOne(
+		ctx, bson.D{{Key: "_id", Value: strings.Repeat("c", 64)}},
+	).Decode(&stored); err != nil {
+		t.Fatalf("read ingress admission state: %v", err)
+	}
+	if len(stored.ID) != 64 || stored.Requests != limit {
+		t.Fatalf("stored ingress admission state = %+v", stored)
+	}
+}
+
+func assertAutomaticDeploymentIndex(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	type indexDocument struct {
+		Name string `bson:"name"`
+		Key  bson.D `bson:"key"`
+	}
+	cursor, err := database.Collection("deployments").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list Deployment indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []indexDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode Deployment indexes: %v", err)
+	}
+	for _, document := range documents {
+		if document.Name != "idx_automatic_deployment_artifact" {
+			continue
+		}
+		want := []string{"project_id", "source_artifact_id", "environment_id", "runtime_target_id"}
+		if len(document.Key) != len(want) {
+			t.Fatalf("automatic Deployment index keys = %v", document.Key)
+		}
+		for index, key := range document.Key {
+			if key.Key != want[index] {
+				t.Fatalf("automatic Deployment index keys = %v", document.Key)
+			}
+		}
+		return
+	}
+	t.Fatal("automatic Deployment index is missing")
 }
 
 func assertRuntimeInventoryExpiry(
