@@ -85,6 +85,72 @@ func (r *EventReader) ReadWindow(
 	return batch, nil
 }
 
+// ReadSince consumes a live stream until ctx ends. Context cancellation is a
+// successful bounded poll, not an Engine failure. Since is a Docker-owned
+// timestamp from a previously received event and may be zero for first use.
+func (r *EventReader) ReadSince(
+	ctx context.Context,
+	since time.Time,
+	maximum int,
+) (inventory.EventBatch, error) {
+	if r == nil || r.engine == nil || maximum < 1 ||
+		maximum > inventory.MaxEventsPerWindow {
+		return inventory.EventBatch{}, ErrInvalidEventWindow
+	}
+	filters := make(client.Filters).Add(
+		"type", "container", "image", "network", "volume",
+	)
+	options := client.EventsListOptions{Filters: filters}
+	if !since.IsZero() {
+		options.Since = since.UTC().Format(time.RFC3339Nano)
+	}
+	result := r.engine.Events(ctx, options)
+	batch := inventory.EventBatch{Events: make([]inventory.Event, 0, maximum)}
+	messages := result.Messages
+	errorsChannel := result.Err
+	for messages != nil || errorsChannel != nil {
+		select {
+		case <-ctx.Done():
+			return batch, nil
+		case message, open := <-messages:
+			if !open {
+				messages = nil
+				continue
+			}
+			event, ok := projectDockerEvent(message)
+			if !ok {
+				continue
+			}
+			batch.Events = append(batch.Events, event)
+			if len(batch.Events) == maximum {
+				batch.Truncated = true
+				return batch, nil
+			}
+		case streamErr, open := <-errorsChannel:
+			if !open {
+				errorsChannel = nil
+				continue
+			}
+			if streamErr != nil {
+				if ctx.Err() != nil {
+					return batch, nil
+				}
+				return inventory.EventBatch{}, fmt.Errorf(
+					"read Docker events: %w",
+					streamErr,
+				)
+			}
+			errorsChannel = nil
+		}
+	}
+	if ctx.Err() != nil {
+		return batch, nil
+	}
+	return inventory.EventBatch{}, fmt.Errorf(
+		"read Docker events: live stream closed",
+	)
+}
+
 func projectDockerEvent(message events.Message) (inventory.Event, bool) {
 	if message.TimeNano <= 0 && message.Time <= 0 {
 		return inventory.Event{}, false

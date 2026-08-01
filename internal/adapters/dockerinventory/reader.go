@@ -18,14 +18,16 @@ type Engine interface {
 }
 
 type Reader struct {
-	engine Engine
-	now    func() time.Time
+	engine           Engine
+	now              func() time.Time
+	maximumResources int
 }
 
 func NewReader(engine Engine) *Reader {
 	return &Reader{
-		engine: engine,
-		now:    func() time.Time { return time.Now().UTC() },
+		engine:           engine,
+		now:              func() time.Time { return time.Now().UTC() },
+		maximumResources: inventory.MaxResources,
 	}
 }
 
@@ -44,6 +46,9 @@ func (r *Reader) Collect(ctx context.Context) ([]inventory.Resource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list Docker containers: %w", err)
 	}
+	if exceedsResourceLimit(r.maximumResources, len(containers.Items)) {
+		return nil, inventory.ErrSnapshotTooLarge
+	}
 	images, err := r.engine.ImageList(
 		ctx,
 		client.ImageListOptions{
@@ -56,20 +61,35 @@ func (r *Reader) Collect(ctx context.Context) ([]inventory.Resource, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list Docker images: %w", err)
 	}
+	if exceedsResourceLimit(
+		r.maximumResources, len(containers.Items), len(images.Items),
+	) {
+		return nil, inventory.ErrSnapshotTooLarge
+	}
 	networks, err := r.engine.NetworkList(ctx, client.NetworkListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list Docker networks: %w", err)
+	}
+	if exceedsResourceLimit(
+		r.maximumResources,
+		len(containers.Items), len(images.Items), len(networks.Items),
+	) {
+		return nil, inventory.ErrSnapshotTooLarge
 	}
 	volumes, err := r.engine.VolumeList(ctx, client.VolumeListOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("list Docker volumes: %w", err)
 	}
 
-	total := len(containers.Items) + len(images.Items) +
-		len(networks.Items) + len(volumes.Items)
-	if total > inventory.MaxResources {
+	if exceedsResourceLimit(
+		r.maximumResources,
+		len(containers.Items), len(images.Items),
+		len(networks.Items), len(volumes.Items),
+	) {
 		return nil, inventory.ErrSnapshotTooLarge
 	}
+	total := len(containers.Items) + len(images.Items) +
+		len(networks.Items) + len(volumes.Items)
 	result := make([]inventory.Resource, 0, total)
 	for _, item := range containers.Items {
 		resource, mapErr := Container(item, observedAt)
@@ -109,6 +129,20 @@ func (r *Reader) Collect(ctx context.Context) ([]inventory.Resource, error) {
 		return result[left].RuntimeID < result[right].RuntimeID
 	})
 	return result, nil
+}
+
+func exceedsResourceLimit(maximum int, counts ...int) bool {
+	if maximum < 0 || maximum > inventory.MaxResources {
+		return true
+	}
+	remaining := maximum
+	for _, count := range counts {
+		if count < 0 || count > remaining {
+			return true
+		}
+		remaining -= count
+	}
+	return false
 }
 
 var _ Engine = (*client.Client)(nil)

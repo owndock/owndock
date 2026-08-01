@@ -130,6 +130,188 @@ func (r *MongoScheduleRepository) ListReadyTargets(
 	return targets, nil
 }
 
+func (r *MongoScheduleRepository) ListEventTargets(
+	ctx context.Context,
+	limit int,
+	now time.Time,
+) ([]biz.Target, error) {
+	if limit < 1 || limit > maximumScheduleCandidates || now.IsZero() {
+		return nil, fmt.Errorf("runtime inventory event candidate limit is invalid")
+	}
+	dueFilter := bson.D{{Key: "$and", Value: bson.A{
+		bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: "schedule.event_next_poll_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "schedule.event_next_poll_at", Value: bson.D{{Key: "$lte", Value: now.UTC()}}}},
+		}}},
+		bson.D{{Key: "$or", Value: bson.A{
+			bson.D{{Key: "schedule.event_lease_expires_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "schedule.event_lease_expires_at", Value: bson.D{{Key: "$lte", Value: now.UTC()}}}},
+		}}},
+	}}}
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "status", Value: "ready"}}}},
+		{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: r.leases.Name()}, {Key: "localField", Value: "_id"},
+			{Key: "foreignField", Value: "_id"}, {Key: "as", Value: "schedule"},
+		}}},
+		{{Key: "$unwind", Value: bson.D{
+			{Key: "path", Value: "$schedule"},
+			{Key: "preserveNullAndEmptyArrays", Value: true},
+		}}},
+		{{Key: "$match", Value: dueFilter}},
+		{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: r.projects.Name()}, {Key: "localField", Value: "project_id"},
+			{Key: "foreignField", Value: "_id"}, {Key: "as", Value: "project"},
+		}}},
+		{{Key: "$unwind", Value: "$project"}},
+		{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: r.hosts.Name()}, {Key: "localField", Value: "managed_host_id"},
+			{Key: "foreignField", Value: "_id"}, {Key: "as", Value: "host"},
+		}}},
+		{{Key: "$unwind", Value: "$host"}},
+		{{Key: "$match", Value: bson.D{
+			{Key: "host.status", Value: bson.D{{Key: "$ne", Value: "disabled"}}},
+			{Key: "$expr", Value: bson.D{{Key: "$eq", Value: bson.A{
+				"$project.organization_id", "$host.organization_id",
+			}}}},
+		}}},
+		{{Key: "$sort", Value: bson.D{
+			{Key: "schedule.event_next_poll_at", Value: 1},
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}}},
+		{{Key: "$limit", Value: limit}},
+		{{Key: "$project", Value: bson.D{
+			{Key: "_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "managed_host_id", Value: 1}, {Key: "connection_mode", Value: 1},
+			{Key: "endpoint", Value: 1}, {Key: "tls_server_name", Value: 1},
+			{Key: "credential_ref", Value: 1},
+			{Key: "organization_id", Value: "$project.organization_id"},
+		}}},
+	}
+	cursor, err := r.targets.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("find runtime inventory event targets: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []scheduleTargetDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode runtime inventory event targets: %w", err)
+	}
+	targets := make([]biz.Target, 0, len(documents))
+	for _, document := range documents {
+		target, err := document.target()
+		if err != nil {
+			return nil, err
+		}
+		targets = append(targets, target)
+	}
+	return targets, nil
+}
+
+func (r *MongoScheduleRepository) TryAcquireEvents(
+	ctx context.Context,
+	target biz.Target,
+	ownerID string,
+	now, expiresAt time.Time,
+) (biz.EventScheduleLease, bool, error) {
+	ownerID = strings.TrimSpace(ownerID)
+	if err := target.Validate(); err != nil || ownerID == "" ||
+		now.IsZero() || !expiresAt.After(now) {
+		return biz.EventScheduleLease{}, false, biz.ErrInvalidTarget
+	}
+	filter := bson.D{
+		{Key: "_id", Value: target.RuntimeTargetID},
+		{Key: "$and", Value: bson.A{
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "event_next_poll_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+				bson.D{{Key: "event_next_poll_at", Value: bson.D{{Key: "$lte", Value: now.UTC()}}}},
+			}}},
+			bson.D{{Key: "$or", Value: bson.A{
+				bson.D{{Key: "event_lease_expires_at", Value: bson.D{{Key: "$exists", Value: false}}}},
+				bson.D{{Key: "event_lease_expires_at", Value: bson.D{{Key: "$lte", Value: now.UTC()}}}},
+			}}},
+		}},
+	}
+	var document eventScheduleLeaseDocument
+	err := r.leases.FindOneAndUpdate(
+		ctx,
+		filter,
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "organization_id", Value: target.OrganizationID},
+				{Key: "project_id", Value: target.ProjectID},
+				{Key: "managed_host_id", Value: target.ManagedHostID},
+				{Key: "event_owner_id", Value: ownerID},
+				{Key: "event_lease_expires_at", Value: expiresAt.UTC()},
+				{Key: "updated_at", Value: now.UTC()},
+			}},
+			{Key: "$unset", Value: bson.D{{Key: "event_next_poll_at", Value: ""}}},
+			{Key: "$inc", Value: bson.D{{Key: "event_token", Value: 1}}},
+			{Key: "$setOnInsert", Value: bson.D{{Key: "created_at", Value: now.UTC()}}},
+		},
+		options.FindOneAndUpdate().SetUpsert(true).SetReturnDocument(options.After),
+	).Decode(&document)
+	if mongo.IsDuplicateKeyError(err) || err == mongo.ErrNoDocuments {
+		return biz.EventScheduleLease{}, false, nil
+	}
+	if err != nil {
+		return biz.EventScheduleLease{}, false,
+			fmt.Errorf("claim runtime inventory event target: %w", err)
+	}
+	return biz.EventScheduleLease{
+		RuntimeTargetID: document.ID, OwnerID: document.EventOwnerID,
+		Token: document.EventToken, CursorAt: document.EventCursorAt,
+	}, true, nil
+}
+
+func (r *MongoScheduleRepository) FinishEvents(
+	ctx context.Context,
+	lease biz.EventScheduleLease,
+	finishedAt, cursorAt, nextPollAt time.Time,
+	succeeded bool,
+) error {
+	if strings.TrimSpace(lease.RuntimeTargetID) == "" ||
+		strings.TrimSpace(lease.OwnerID) == "" || lease.Token == 0 ||
+		finishedAt.IsZero() || nextPollAt.Before(finishedAt) ||
+		(!cursorAt.IsZero() && !lease.CursorAt.IsZero() && cursorAt.Before(lease.CursorAt)) {
+		return biz.ErrLeaseLost
+	}
+	resultField := "event_last_failure_at"
+	if succeeded {
+		resultField = "event_last_success_at"
+	}
+	set := bson.D{
+		{Key: resultField, Value: finishedAt.UTC()},
+		{Key: "event_next_poll_at", Value: nextPollAt.UTC()},
+		{Key: "updated_at", Value: finishedAt.UTC()},
+	}
+	if succeeded && !cursorAt.IsZero() {
+		set = append(set, bson.E{Key: "event_cursor_at", Value: cursorAt.UTC()})
+	}
+	result, err := r.leases.UpdateOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: lease.RuntimeTargetID},
+			{Key: "event_owner_id", Value: lease.OwnerID},
+			{Key: "event_token", Value: lease.Token},
+		},
+		bson.D{
+			{Key: "$set", Value: set},
+			{Key: "$unset", Value: bson.D{
+				{Key: "event_owner_id", Value: ""},
+				{Key: "event_lease_expires_at", Value: ""},
+			}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("finish runtime inventory event schedule: %w", err)
+	}
+	if result.MatchedCount != 1 {
+		return biz.ErrLeaseLost
+	}
+	return nil
+}
+
 func (r *MongoScheduleRepository) TryAcquire(
 	ctx context.Context,
 	target biz.Target,
@@ -340,5 +522,13 @@ type eventHintDocument struct {
 	ExpiresAt       time.Time       `bson:"expires_at"`
 }
 
+type eventScheduleLeaseDocument struct {
+	ID            string    `bson:"_id"`
+	EventOwnerID  string    `bson:"event_owner_id"`
+	EventToken    uint64    `bson:"event_token"`
+	EventCursorAt time.Time `bson:"event_cursor_at,omitempty"`
+}
+
 var _ biz.ScheduleRepository = (*MongoScheduleRepository)(nil)
 var _ biz.EventHintRepository = (*MongoScheduleRepository)(nil)
+var _ biz.EventScheduleRepository = (*MongoScheduleRepository)(nil)

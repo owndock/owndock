@@ -22,6 +22,12 @@ func TestRolePermissions(t *testing.T) {
 		{RoleDeveloper, PermissionDeploymentRollback, false},
 		{RoleMaintainer, PermissionDeploymentCancel, true},
 		{RoleMaintainer, PermissionDeploymentRollback, true},
+		{RoleViewer, PermissionRuntimeInventoryRead, true},
+		{RoleDeveloper, PermissionHostInventoryRead, false},
+		{RoleMaintainer, PermissionHostInventoryRead, true},
+		{RoleViewer, PermissionSourceRepositoryRead, true},
+		{RoleDeveloper, PermissionSourceRepositoryWrite, false},
+		{RoleMaintainer, PermissionSourceRepositoryWrite, true},
 	}
 	for _, test := range tests {
 		principal := Principal{

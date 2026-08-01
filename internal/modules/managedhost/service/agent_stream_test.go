@@ -475,6 +475,24 @@ func TestAgentCommandWireTypesRemainNarrow(t *testing.T) {
 		result.RuntimeProbe.Status != biz.RuntimeProbeReady {
 		t.Fatalf("Agent result = %+v", result)
 	}
+
+	var inventoryFrame agentFrame
+	err = decodeAgentFrame([]byte(
+		`{"type":"command_result","sequence":4,`+
+			`"command_result":{"command_id":"inventory-events-1",`+
+			`"status":"succeeded","runtime_inventory":{"events":{"events":[`+
+			`{"kind":"container","runtime_id":"container-1","action":"start",`+
+			`"occurred_at":"2026-07-30T10:00:00Z"}]}}}}`,
+	), &inventoryFrame)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inventoryResult := inventoryFrame.CommandResult.domain()
+	if inventoryResult.Inventory == nil || inventoryResult.Inventory.Events == nil ||
+		len(inventoryResult.Inventory.Events.Events) != 1 ||
+		inventoryResult.Inventory.Events.Events[0].RuntimeID != "container-1" {
+		t.Fatalf("Agent inventory event result = %+v", inventoryResult)
+	}
 }
 
 func testAgentTLSState(t *testing.T, rawCertificate []byte) *tls.ConnectionState {

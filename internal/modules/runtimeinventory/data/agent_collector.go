@@ -283,20 +283,7 @@ func waitForInventoryRetry(ctx context.Context, delay time.Duration) bool {
 }
 
 func (c *AgentCollector) dispatchError(ctx context.Context, err error) error {
-	if contextError := ctx.Err(); contextError != nil {
-		return contextError
-	}
-	switch {
-	case errors.Is(err, biz.ErrAgentNotConnected),
-		errors.Is(err, biz.ErrAgentDisconnected),
-		errors.Is(err, biz.ErrAgentCommandExpired),
-		errors.Is(err, biz.ErrAgentBackpressure),
-		errors.Is(err, biz.ErrAgentCapabilityUnavailable),
-		errors.Is(err, context.DeadlineExceeded):
-		return fmt.Errorf("%w: Agent unavailable", ErrAgentInventoryUnavailable)
-	default:
-		return fmt.Errorf("%w: command failed", ErrAgentInventoryUnavailable)
-	}
+	return agentInventoryDispatchError(ctx, err)
 }
 
 func (c *AgentCollector) releaseSnapshot(

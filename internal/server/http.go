@@ -35,6 +35,30 @@ type ProductAPI struct {
 	protected            http.Handler
 	protectedDeployment  http.Handler
 	protectedManagedHost http.Handler
+	protectedInventory   http.Handler
+	protectedBuild       http.Handler
+}
+
+func (p *ProductAPI) WithBuild(
+	buildAPI http.Handler,
+	authenticate func(http.Handler) http.Handler,
+) error {
+	if buildAPI == nil || authenticate == nil {
+		return fmt.Errorf("product build API is required")
+	}
+	p.protectedBuild = authenticate(buildAPI)
+	return nil
+}
+
+func (p *ProductAPI) WithRuntimeInventory(
+	inventory http.Handler,
+	authenticate func(http.Handler) http.Handler,
+) error {
+	if inventory == nil || authenticate == nil {
+		return fmt.Errorf("product runtime inventory API is required")
+	}
+	p.protectedInventory = authenticate(inventory)
+	return nil
 }
 
 func NewProductAPIWithDeploymentAndManagedHost(
@@ -89,6 +113,10 @@ func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case p.agentEnrollment != nil &&
 		r.URL.Path == apiV1+"/agent/enrollments:exchange":
 		p.agentEnrollment.ServeHTTP(w, r)
+	case p.protectedInventory != nil && isRuntimeInventoryPath(r.URL.Path):
+		p.protectedInventory.ServeHTTP(w, r)
+	case p.protectedBuild != nil && isProjectBuildPath(r.URL.Path):
+		p.protectedBuild.ServeHTTP(w, r)
 	case p.protectedDeployment != nil && isProjectDeploymentPath(r.URL.Path):
 		p.protectedDeployment.ServeHTTP(w, r)
 	case p.protectedManagedHost != nil &&
@@ -104,10 +132,24 @@ func (p *ProductAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func isRuntimeInventoryPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
+		(segments[2] == "projects" || segments[2] == "managed-hosts") &&
+		segments[3] != "" && segments[4] == "runtime-inventory"
+}
+
 func isProjectDeploymentPath(path string) bool {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	return len(segments) >= 5 && segments[0] == "api" && segments[1] == "v1" &&
 		segments[2] == "projects" && segments[3] != "" && segments[4] == "deployments"
+}
+
+func isProjectBuildPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) >= 5 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "projects" && segments[3] != "" &&
+		(segments[4] == "repository-credentials" || segments[4] == "source-repositories")
 }
 
 func NewHTTPServer(

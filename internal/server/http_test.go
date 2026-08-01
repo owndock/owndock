@@ -111,6 +111,65 @@ func TestProductAPIRoutesAuthenticationBoundary(t *testing.T) {
 	}
 }
 
+func TestProductAPIRoutesRuntimeInventoryBeforeOverlappingResources(t *testing.T) {
+	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "wrong control-plane handler", http.StatusTeapot)
+	})
+	authenticate := func(next http.Handler) http.Handler { return next }
+	api, err := NewProductAPI(identity, controlPlane, authenticate)
+	if err != nil {
+		t.Fatalf("NewProductAPI() error = %v", err)
+	}
+	if err := api.WithRuntimeInventory(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), authenticate); err != nil {
+		t.Fatalf("WithRuntimeInventory() error = %v", err)
+	}
+	for _, path := range []string{
+		"/api/v1/projects/project-1/runtime-inventory",
+		"/api/v1/managed-hosts/host-1/runtime-inventory",
+	} {
+		recorder := httptest.NewRecorder()
+		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
+func TestProductAPIRoutesBuildBeforeControlPlane(t *testing.T) {
+	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	controlPlane := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "wrong control-plane handler", http.StatusTeapot)
+	})
+	authenticate := func(next http.Handler) http.Handler { return next }
+	api, err := NewProductAPI(identity, controlPlane, authenticate)
+	if err != nil {
+		t.Fatalf("NewProductAPI() error = %v", err)
+	}
+	if err := api.WithBuild(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), authenticate); err != nil {
+		t.Fatalf("WithBuild() error = %v", err)
+	}
+	for _, path := range []string{
+		"/api/v1/projects/project-1/repository-credentials",
+		"/api/v1/projects/project-1/source-repositories",
+		"/api/v1/projects/project-1/source-repositories/source-1",
+	} {
+		recorder := httptest.NewRecorder()
+		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handler {
 	t.Helper()
 	checker := health.NewChecker()

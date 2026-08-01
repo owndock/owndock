@@ -94,6 +94,7 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	}
 	if cfg.Runtime.InventoryWorker.Enabled ||
 		cfg.Runtime.InventoryWorker.ConcurrencyValue() != defaultInventoryConcurrency ||
+		cfg.Runtime.InventoryWorker.EventConcurrencyValue() != defaultInventoryEventWorkers ||
 		cfg.Runtime.InventoryWorker.CandidateLimitValue() != defaultInventoryCandidates ||
 		cfg.Runtime.InventoryWorker.MaxChunkBytesValue() != defaultInventoryChunkBytes {
 		t.Fatalf("inventory worker defaults = %+v", cfg.Runtime.InventoryWorker)
@@ -234,9 +235,11 @@ func TestDeploymentWorkerRequiresProductAndMongoDB(t *testing.T) {
 func TestInventoryWorkerValidation(t *testing.T) {
 	worker := InventoryWorker{
 		Enabled: true, PollInterval: "1s", SyncInterval: "5m",
-		RetryInterval: "30s", LeaseDuration: "2m",
+		RetryInterval: "30s", EventPollInterval: "1s", EventWait: "2s",
+		LeaseDuration:    "2m",
 		OperationTimeout: "1m", CommandTimeout: "20s",
-		Concurrency: 2, CandidateLimit: 256, MaxChunkBytes: 48 * 1024,
+		Concurrency: 2, EventConcurrency: 4,
+		CandidateLimit: 256, MaxChunkBytes: 48 * 1024,
 	}
 	if err := worker.Validate(false, true); err == nil {
 		t.Fatal("inventory worker accepted disabled product")
@@ -249,6 +252,11 @@ func TestInventoryWorkerValidation(t *testing.T) {
 		t.Fatal("inventory worker accepted a lease shorter than its operation timeout")
 	}
 	worker.LeaseDuration = "2m"
+	worker.EventWait = "500ms"
+	if err := worker.Validate(true, true); err == nil {
+		t.Fatal("inventory worker accepted a sub-second event wait")
+	}
+	worker.EventWait = "2s"
 	worker.MaxChunkBytes = 512 * 1024
 	if err := worker.Validate(true, true); err == nil {
 		t.Fatal("inventory worker accepted chunks larger than the Agent contract")
@@ -273,6 +281,19 @@ func TestProductRequiresMongoDBAndSecurity(t *testing.T) {
 	cfg.Security.BootstrapTokenEnv = ""
 	if err := cfg.Validate(); err == nil {
 		t.Fatal("Validate() error = nil without bootstrap token env")
+	}
+}
+
+func TestProductSourceProbeTimeoutValidation(t *testing.T) {
+	for _, value := range []string{"1s", "10s", "30s", ""} {
+		if err := (Product{SourceProbeTimeout: value}).Validate(); err != nil {
+			t.Errorf("Product timeout %q error = %v", value, err)
+		}
+	}
+	for _, value := range []string{"500ms", "31s", "invalid"} {
+		if err := (Product{SourceProbeTimeout: value}).Validate(); err == nil {
+			t.Errorf("Product timeout %q accepted", value)
+		}
 	}
 }
 

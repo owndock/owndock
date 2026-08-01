@@ -40,6 +40,7 @@ const (
 	AgentCommandInventoryPrepare   AgentCommandKind = "runtime.inventory.prepare"
 	AgentCommandInventoryChunk     AgentCommandKind = "runtime.inventory.chunk"
 	AgentCommandInventoryRelease   AgentCommandKind = "runtime.inventory.release"
+	AgentCommandInventoryEvents    AgentCommandKind = "runtime.inventory.events"
 )
 
 func (k AgentCommandKind) Valid() bool {
@@ -51,7 +52,8 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandDeploymentCancel,
 		AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
-		AgentCommandInventoryRelease:
+		AgentCommandInventoryRelease,
+		AgentCommandInventoryEvents:
 		return true
 	default:
 		return false
@@ -72,10 +74,12 @@ type RuntimeProbeCommand struct {
 }
 
 type RuntimeInventoryCommand struct {
-	RuntimeTargetID string
-	ObservationID   string
-	MaxChunkBytes   int
-	ChunkIndex      int
+	RuntimeTargetID  string
+	ObservationID    string
+	MaxChunkBytes    int
+	ChunkIndex       int
+	EventSince       time.Time
+	EventWaitSeconds int
 }
 
 // DeploymentCommand is an internal, versioned transport contract. Secret
@@ -121,7 +125,8 @@ func (c AgentCommand) Validate() error {
 		}
 	case AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
-		AgentCommandInventoryRelease:
+		AgentCommandInventoryRelease,
+		AgentCommandInventoryEvents:
 		if c.RuntimeProbe != nil || c.Deployment != nil ||
 			c.Inventory == nil ||
 			!validInventoryCommand(c.Kind, *c.Inventory) {
@@ -186,6 +191,8 @@ func (c AgentCommand) Fingerprint() ([sha256.Size]byte, error) {
 		writeFingerprintString(hasher, c.Inventory.ObservationID)
 		writeFingerprintInt64(hasher, int64(c.Inventory.MaxChunkBytes))
 		writeFingerprintInt64(hasher, int64(c.Inventory.ChunkIndex))
+		writeFingerprintInt64(hasher, c.Inventory.EventSince.UTC().UnixNano())
+		writeFingerprintInt64(hasher, int64(c.Inventory.EventWaitSeconds))
 	}
 	var fingerprint [sha256.Size]byte
 	copy(fingerprint[:], hasher.Sum(nil))
@@ -231,6 +238,7 @@ type RuntimeProbeResult struct {
 type RuntimeInventoryResult struct {
 	Manifest *RuntimeInventoryManifest
 	Chunk    *runtimeinventory.Chunk
+	Events   *runtimeinventory.EventBatch
 }
 
 type RuntimeInventoryManifest struct {
@@ -261,6 +269,10 @@ func (r AgentCommandResult) Validate(command AgentCommand) error {
 	case AgentCommandInventoryChunk:
 		if r.Inventory.Chunk.Index != command.Inventory.ChunkIndex ||
 			r.Inventory.Chunk.Validate(command.Inventory.MaxChunkBytes) != nil {
+			return ErrResultInvalid
+		}
+	case AgentCommandInventoryEvents:
+		if r.Inventory.Events.Validate() != nil {
 			return ErrResultInvalid
 		}
 	}
@@ -294,12 +306,13 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 		case AgentCommandInventoryPrepare:
 			if r.RuntimeProbe != nil || r.Inventory == nil ||
 				!validInventoryManifest(r.Inventory.Manifest) ||
-				r.Inventory.Chunk != nil {
+				r.Inventory.Chunk != nil || r.Inventory.Events != nil {
 				return ErrResultInvalid
 			}
 		case AgentCommandInventoryChunk:
 			if r.RuntimeProbe != nil || r.Inventory == nil ||
 				r.Inventory.Manifest != nil || r.Inventory.Chunk == nil ||
+				r.Inventory.Events != nil ||
 				r.Inventory.Chunk.Validate(
 					runtimeinventory.MaxChunkBytes,
 				) != nil {
@@ -307,6 +320,12 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 			}
 		case AgentCommandInventoryRelease:
 			if r.RuntimeProbe != nil || r.Inventory != nil {
+				return ErrResultInvalid
+			}
+		case AgentCommandInventoryEvents:
+			if r.RuntimeProbe != nil || r.Inventory == nil ||
+				r.Inventory.Manifest != nil || r.Inventory.Chunk != nil ||
+				r.Inventory.Events == nil || r.Inventory.Events.Validate() != nil {
 				return ErrResultInvalid
 			}
 		default:
@@ -342,7 +361,8 @@ func (k AgentCommandKind) DurableResult() bool {
 	switch k {
 	case AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
-		AgentCommandInventoryRelease:
+		AgentCommandInventoryRelease,
+		AgentCommandInventoryEvents:
 		return false
 	default:
 		return k.Valid()
@@ -353,22 +373,31 @@ func validInventoryCommand(
 	kind AgentCommandKind,
 	command RuntimeInventoryCommand,
 ) bool {
-	if !validIdentifier(command.RuntimeTargetID) ||
-		!validIdentifier(command.ObservationID) {
+	if !validIdentifier(command.RuntimeTargetID) {
 		return false
 	}
 	switch kind {
 	case AgentCommandInventoryPrepare:
-		return command.MaxChunkBytes >= 4*1024 &&
+		return validIdentifier(command.ObservationID) &&
+			command.MaxChunkBytes >= 4*1024 &&
 			command.MaxChunkBytes <= runtimeinventory.DefaultChunkBytes &&
-			command.ChunkIndex == 0
+			command.ChunkIndex == 0 && command.EventSince.IsZero() &&
+			command.EventWaitSeconds == 0
 	case AgentCommandInventoryChunk:
-		return command.MaxChunkBytes >= 4*1024 &&
+		return validIdentifier(command.ObservationID) &&
+			command.MaxChunkBytes >= 4*1024 &&
 			command.MaxChunkBytes <= runtimeinventory.DefaultChunkBytes &&
 			command.ChunkIndex >= 0 &&
-			command.ChunkIndex < runtimeinventory.MaxChunks
+			command.ChunkIndex < runtimeinventory.MaxChunks &&
+			command.EventSince.IsZero() && command.EventWaitSeconds == 0
 	case AgentCommandInventoryRelease:
-		return command.MaxChunkBytes == 0 && command.ChunkIndex == 0
+		return validIdentifier(command.ObservationID) &&
+			command.MaxChunkBytes == 0 && command.ChunkIndex == 0 &&
+			command.EventSince.IsZero() && command.EventWaitSeconds == 0
+	case AgentCommandInventoryEvents:
+		return command.ObservationID == "" && command.MaxChunkBytes == 0 &&
+			command.ChunkIndex == 0 && command.EventWaitSeconds >= 1 &&
+			command.EventWaitSeconds <= 10
 	default:
 		return false
 	}

@@ -1,6 +1,6 @@
 # Git-to-Deploy 产品与安全边界
 
-> 状态：产品已接受，当前代码和公开 API 尚未实现。
+> 状态：产品已接受；Source Repository/Repository Credential 登记与受限连接探测 API 已实现，构建链尚未开放。
 
 Git-to-Deploy 的目标是让用户连接现有 Git 仓库，选择一个 Commit，通过受约束的 Dockerfile 构建 OCI 镜像，并自动形成可部署、可追踪、可回滚的 Release。用户仍可以跳过内置构建，直接使用外部 CI 已生成的 OCI 镜像。
 
@@ -71,4 +71,4 @@ flowchart TB
 
 ## 当前实现状态
 
-目前 OwnDock 已实现外部 OCI digest → Release → Deployment 的基础链路，但尚无 Source Repository、Repository Credential、Build Configuration、Build、Artifact、Build Worker、BuildKit 或 Webhook API。前端和官网可以介绍该产品方向，但在这些领域、契约和系统测试完成前必须明确标注“尚未开放”。
+目前 OwnDock 已实现外部 OCI digest → Release → Deployment 的基础链路，以及 Source Repository/Repository Credential 的 Project 所有权、RBAC、MongoDB、事务审计、登记查询和显式 probe API。probe 在 10 秒边界内执行等价于 `ls-remote` 的只读引用查询，运行时解析外部秘密，验证系统 CA 或固定 SSH Host Key，并只持久化安全状态；它不 checkout 源码、不运行仓库内容。真实 Git 服务兼容矩阵、Build Configuration、Build、Artifact、Build Worker、BuildKit 和 Webhook API 尚未完成。具体连接格式、状态和客户解释见 [Source Repository 使用说明](source-repositories.md)。

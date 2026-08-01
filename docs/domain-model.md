@@ -8,6 +8,8 @@ Managed Host 1 --0..1 active Agent Identity
 Managed Host 1 --* Runtime Target
 Organization 1 --* Project
 Project 1 --* Source Repository
+Project 1 --* Repository Credential
+Source Repository * --0..1 Repository Credential
 Project 1 --* Registry Credential
 Template --可选快照--> Application 1 --* Release
 Application 1 --* Build Configuration
@@ -23,7 +25,7 @@ Runtime Target 1 --* Runtime Inventory Current State
 
 - Managed Host 是 Organization 纳管的实际 Linux 主机；
 - Agent Enrollment 是短时一次性首次接入凭据，Agent Identity 是固定到 Host 和安装 instance 的机器身份；
-- Source Repository 表示平台无关的标准 Git HTTPS/SSH 代码来源；
+- Source Repository 表示平台无关的标准 Git HTTPS/SSH 代码来源，Repository Credential 只保存外部秘密引用和安全展示元数据；
 - Build Configuration 描述 Dockerfile、上下文、Registry、平台和资源限制；
 - Build 是一次不可变构建执行，Artifact 是按 digest 固定的 OCI 构建结果；
 - Application 是长期软件服务身份；
@@ -35,7 +37,7 @@ Runtime Target 1 --* Runtime Inventory Current State
 - Runtime Inventory Current State 保存资源最后安全摘要与 `present/absent` 时间线，不完整批次不能修改它；
 - Template 是可选的 Application 创建预设，不参与运行期隐式继承。
 
-Template、Source Repository、Build Configuration、Build 和 Artifact 已进入产品模型，但尚未进入当前代码/API。Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带分布式租约的周期调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window 和真实 HTTP Agent transport 已实现，持续 Event 游标订阅和公开权限查询尚未实现。自动安装、证书轮换和部署/终端的多主机故障系统验收仍未实现。
+Template、Build Configuration、Build 和 Artifact 已进入产品模型，但尚未进入当前代码/API。Source Repository 与 Repository Credential 已实现安全登记、RBAC、MongoDB、事务审计、执行期秘密解析和受限只读 Git probe；真实 Git 服务兼容矩阵仍待完成。Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带分布式租约的全量与 Event 调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window、有界持续读取、Docker 时间游标和失败不推进语义已实现。成功 Deployment 归属核验、Project/Host 权限分离、固定过滤与不透明游标的公开审计查询也已实现；真实双主机断线/事件洪峰系统验收尚未完成。自动安装、证书轮换和部署/终端的多主机故障系统验收仍未实现。
 
 ## 已实现的状态规则
 
@@ -56,6 +58,8 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Application 位于 Project 下；
 - Release 位于 Application 下，只接受固定 SHA-256 digest 的 OCI image reference，创建后不可变，并固定端口、配置键、CPU/内存与可选健康检查；
 - Registry Credential 位于 Project 下，只保存 registry server、username 和外部 `password_ref`，不保存密码正文；
+- Repository Credential 位于 Project 下，只保存 SSH Deploy Key/HTTPS Access Token 类型、展示元数据和外部 `secret_ref`；API 只返回 `secret_configured`；
+- Source Repository 位于 Project 下，只接受无凭据 HTTPS/SSH 地址；SSH 必须固定 Host Key fingerprint，凭据类型必须与协议一致，初始状态为 `pending`，显式探测后只保存安全状态和时间；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
 - Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
 - Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；受管 Worker 使用原子领取、租约 heartbeat、同 Deployment generation fence、跨 Deployment cutover sequence 和安全失败分类；
@@ -70,8 +74,8 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 ## 已接受但尚未实现
 
 - Template 创建和快照实例化；
-- Source Repository、Repository Credential、Build Configuration、Build、Artifact、Build Worker/BuildKit 和 Webhook Adapter；
-- Docker Runtime Inventory 的 direct/Agent 持续 Event 游标订阅、Host/Project 权限和公开查询 API；
+- Source Repository 真实 Git 服务兼容矩阵，以及 Build Configuration、Build、Artifact、Build Worker/BuildKit 和 Webhook Adapter；
+- Docker Runtime Inventory 的持续 Event 双主机/容量/秘密泄漏安全验收；
 - Agent 自动安装、部署/取消执行、证书安全轮换和 Agent Runtime Gateway；
 - 多主机部署选址系统验收；
 - TerminalSession、容器 exec、主机 PTY、WSS 终端传输和终端访问策略；
@@ -89,7 +93,7 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 1. 在已实现 enrollment、固定身份、双端心跳连接、`runtime.probe`、两阶段部署和持久结果缓存上完成安装自动化和证书轮换；
 2. 使用两台真实 Agent 主机完成选址、断线、网络分区、延迟旧命令和过期 fence 系统验收；
-3. 完成 Runtime Inventory 的 Event 对账和权限查询；
+3. 完成 Runtime Inventory 的双主机、容量、事件洪峰和秘密泄漏系统验收；
 4. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
 5. 完成 Terminal 权限、TerminalSession、容器 exec、主机 PTY 和 WSS 安全链路；
 6. 建立 Template、用户/成员管理以及生产安全运维能力；

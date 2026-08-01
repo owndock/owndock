@@ -49,10 +49,44 @@ func (e *DockerExecutor) executeInventory(
 		return e.inventoryChunk(command), nil
 	case agentprotocol.AgentCommandInventoryRelease:
 		return e.releaseInventory(command), nil
+	case agentprotocol.AgentCommandInventoryEvents:
+		return e.pollInventoryEvents(ctx, command)
 	default:
 		return agentprotocol.AgentCommandResult{},
 			agentprotocol.ErrCommandInvalid
 	}
+}
+
+func (e *DockerExecutor) pollInventoryEvents(
+	ctx context.Context,
+	command agentprotocol.AgentCommand,
+) (agentprotocol.AgentCommandResult, error) {
+	engine, err := e.newInventoryEngine(e.socketPath)
+	if err != nil {
+		return inventoryFailure(command.ID, "inventory_configuration"), nil
+	}
+	pollContext, cancel := context.WithTimeout(
+		ctx,
+		time.Duration(command.Inventory.EventWaitSeconds)*time.Second,
+	)
+	batch, readErr := dockerinventory.NewEventReader(engine).ReadSince(
+		pollContext,
+		command.Inventory.EventSince,
+		inventory.MaxEventsPerWindow,
+	)
+	cancel()
+	_ = engine.Close()
+	if readErr != nil {
+		if contextError := ctx.Err(); contextError != nil {
+			return agentprotocol.AgentCommandResult{}, contextError
+		}
+		return inventoryFailure(command.ID, "inventory_unavailable"), nil
+	}
+	return agentprotocol.AgentCommandResult{
+		CommandID: command.ID,
+		Status:    agentprotocol.AgentCommandSucceeded,
+		Inventory: &agentprotocol.RuntimeInventoryResult{Events: &batch},
+	}, nil
 }
 
 func (e *DockerExecutor) prepareInventory(
@@ -262,10 +296,10 @@ func inventoryChunksBytes(chunks []inventory.Chunk) int {
 		if err != nil {
 			return maximumInventorySnapshotBytes + 1
 		}
-		total += len(payload)
-		if total > maximumInventorySnapshotBytes {
-			return total
+		if len(payload) > maximumInventorySnapshotBytes-total {
+			return maximumInventorySnapshotBytes + 1
 		}
+		total += len(payload)
 	}
 	return total
 }

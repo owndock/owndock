@@ -16,6 +16,9 @@ import (
 	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
 	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
 	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
+	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
+	builddata "github.com/owndock/owndock/internal/modules/build/data"
+	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
 	controlplaneservice "github.com/owndock/owndock/internal/modules/controlplane/service"
@@ -35,6 +38,7 @@ import (
 	"github.com/owndock/owndock/internal/modules/meta"
 	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
+	runtimeinventoryservice "github.com/owndock/owndock/internal/modules/runtimeinventory/service"
 	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
@@ -123,6 +127,7 @@ func run() error {
 	var productAPI *server.ProductAPI
 	var deploymentWorkerServer *lifecycle.Server
 	var inventoryWorkerServer *lifecycle.Server
+	var inventoryEventWorkerServer *lifecycle.Server
 	var agentControlServer *server.AgentServer
 	cleanup := func(ctx context.Context) error {
 		var mongoErr error
@@ -345,6 +350,42 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("create product API: %w", err)
 		}
+		runtimeInventoryViewUseCase, err := runtimeinventorybiz.NewViewUseCase(
+			runtimeinventorydata.NewMongoViewRepository(mongoClient.Database()),
+			auditStore,
+			id.New,
+			time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create runtime inventory view use case: %w", err)
+		}
+		if err := productAPI.WithRuntimeInventory(
+			runtimeinventoryservice.NewHTTP(runtimeInventoryViewUseCase),
+			identityHTTP.Authenticate,
+		); err != nil {
+			return fmt.Errorf("mount runtime inventory API: %w", err)
+		}
+		buildRepository := builddata.NewMongoRepository(mongoClient.Database())
+		sourceProbeTimeout, err := cfg.Product.SourceProbeTimeoutDuration()
+		if err != nil {
+			return fmt.Errorf("parse source repository probe timeout: %w", err)
+		}
+		buildUseCase := buildbiz.NewUseCase(
+			controlPlaneStore,
+			buildRepository,
+			mongoClient,
+			auditStore,
+			id.New,
+			time.Now,
+		).WithSourceProber(builddata.NewGitSourceProber(
+			builddata.NewEnvironmentRepositorySecretResolver(),
+		).WithTimeout(sourceProbeTimeout))
+		if err := productAPI.WithBuild(
+			buildservice.NewHTTP(buildUseCase),
+			identityHTTP.Authenticate,
+		); err != nil {
+			return fmt.Errorf("mount build API: %w", err)
+		}
 		if cfg.Runtime.DeploymentWorker.Enabled {
 			pollInterval, err := cfg.Runtime.DeploymentWorker.PollIntervalDuration()
 			if err != nil {
@@ -450,16 +491,30 @@ func run() error {
 			if durationErr != nil {
 				return durationErr
 			}
+			eventPollInterval, durationErr :=
+				cfg.Runtime.InventoryWorker.EventPollIntervalDuration()
+			if durationErr != nil {
+				return durationErr
+			}
+			eventWait, durationErr :=
+				cfg.Runtime.InventoryWorker.EventWaitDuration()
+			if durationErr != nil {
+				return durationErr
+			}
 			inventoryRepository := runtimeinventorydata.NewMongoRepository(
 				mongoClient.Database(),
+			).WithOwnershipVerifier(
+				runtimeinventorydata.NewMongoOwnershipVerifier(mongoClient.Database()),
 			)
 			scheduleRepository :=
 				runtimeinventorydata.NewMongoScheduleRepository(
 					mongoClient.Database(),
 				)
+			directCredentials :=
+				runtimeinventorydata.NewEnvironmentDirectCredentialResolver()
 			directCollector, collectorErr :=
 				runtimeinventorydata.NewDirectTargetCollector(
-					runtimeinventorydata.NewEnvironmentDirectCredentialResolver(),
+					directCredentials,
 					inventoryRepository,
 					id.New,
 					time.Now,
@@ -475,6 +530,23 @@ func run() error {
 			collectors := map[runtimeaccess.Mode]runtimeinventorybiz.Collector{
 				runtimeaccess.ModeDirectDocker: directCollector,
 			}
+			directEventCollector, eventCollectorErr :=
+				runtimeinventorydata.NewDirectEventCollector(
+					directCredentials,
+					scheduleRepository,
+					eventWait,
+					time.Now,
+				)
+			if eventCollectorErr != nil {
+				return fmt.Errorf(
+					"create direct runtime inventory event collector: %w",
+					eventCollectorErr,
+				)
+			}
+			eventCollectors :=
+				map[runtimeaccess.Mode]runtimeinventorybiz.EventCollector{
+					runtimeaccess.ModeDirectDocker: directEventCollector,
+				}
 			if agentCommandDispatcher != nil {
 				agentCollector, agentCollectorErr :=
 					runtimeinventorydata.NewAgentCollector(
@@ -493,6 +565,22 @@ func run() error {
 				}
 				agentCollector.WithEventHints(scheduleRepository)
 				collectors[runtimeaccess.ModeAgent] = agentCollector
+				agentEventCollector, agentEventCollectorErr :=
+					runtimeinventorydata.NewAgentEventCollector(
+						agentCommandDispatcher,
+						scheduleRepository,
+						id.New,
+						time.Now,
+						commandTimeout,
+						eventWait,
+					)
+				if agentEventCollectorErr != nil {
+					return fmt.Errorf(
+						"create Agent runtime inventory event collector: %w",
+						agentEventCollectorErr,
+					)
+				}
+				eventCollectors[runtimeaccess.ModeAgent] = agentEventCollector
 			}
 			inventoryRunner, runnerErr := runtimeinventoryworker.NewRunner(
 				scheduleRepository,
@@ -524,6 +612,44 @@ func run() error {
 				return fmt.Errorf("create runtime inventory worker loop: %w", loopErr)
 			}
 			inventoryWorkerServer = lifecycle.NewServer(inventoryLoop)
+			inventoryEventRunner, eventRunnerErr :=
+				runtimeinventoryworker.NewEventRunner(
+					scheduleRepository,
+					runtimeinventorydata.NewEventCollectorRouter(eventCollectors),
+					instanceID+"-inventory-events",
+					leaseDuration,
+					eventPollInterval,
+					retryInterval,
+					cfg.Runtime.InventoryWorker.CandidateLimitValue(),
+					time.Now,
+				)
+			if eventRunnerErr != nil {
+				return fmt.Errorf(
+					"create runtime inventory event runner: %w",
+					eventRunnerErr,
+				)
+			}
+			inventoryEventLoop, eventLoopErr :=
+				runtimeinventoryworker.NewLoop(
+					inventoryEventRunner,
+					eventPollInterval,
+					operationTimeout,
+					cfg.Runtime.InventoryWorker.EventConcurrencyValue(),
+					func(error) {
+						_ = logger.Log(
+							log.LevelError,
+							"component", "runtime_inventory_event_worker",
+							"failure.category", "event_collection_failed",
+						)
+					},
+				)
+			if eventLoopErr != nil {
+				return fmt.Errorf(
+					"create runtime inventory event worker loop: %w",
+					eventLoopErr,
+				)
+			}
+			inventoryEventWorkerServer = lifecycle.NewServer(inventoryEventLoop)
 		}
 	}
 	httpServer, err := server.NewHTTPServer(
@@ -546,6 +672,9 @@ func run() error {
 	}
 	if inventoryWorkerServer != nil {
 		managedServers = append(managedServers, inventoryWorkerServer)
+	}
+	if inventoryEventWorkerServer != nil {
+		managedServers = append(managedServers, inventoryEventWorkerServer)
 	}
 	if agentControlServer != nil {
 		managedServers = append(managedServers, agentControlServer)

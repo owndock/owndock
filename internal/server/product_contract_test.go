@@ -12,6 +12,8 @@ import (
 	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
 	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
 	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
+	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
+	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	controlplaneservice "github.com/owndock/owndock/internal/modules/controlplane/service"
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
@@ -25,6 +27,8 @@ import (
 	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
 	managedhostservice "github.com/owndock/owndock/internal/modules/managedhost/service"
 	"github.com/owndock/owndock/internal/modules/meta"
+	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	runtimeinventoryservice "github.com/owndock/owndock/internal/modules/runtimeinventory/service"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
 	"github.com/owndock/owndock/internal/platform/observability"
@@ -100,6 +104,29 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 	if err != nil {
 		t.Fatalf("NewProductAPI() error = %v", err)
 	}
+	runtimeInventoryUseCase, err := runtimeinventorybiz.NewViewUseCase(
+		contractRuntimeInventory{}, audits, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("NewViewUseCase() error = %v", err)
+	}
+	if err := productAPI.WithRuntimeInventory(
+		runtimeinventoryservice.NewHTTP(runtimeInventoryUseCase),
+		identityHTTP.Authenticate,
+	); err != nil {
+		t.Fatalf("WithRuntimeInventory() error = %v", err)
+	}
+	buildHTTP := buildservice.NewHTTP(buildbiz.NewUseCase(
+		controlStore,
+		newContractBuildStore(),
+		transaction.Passthrough{},
+		audits,
+		newID,
+		now,
+	).WithSourceProber(contractSourceProber{}))
+	if err := productAPI.WithBuild(buildHTTP, identityHTTP.Authenticate); err != nil {
+		t.Fatalf("WithBuild() error = %v", err)
+	}
 
 	applications := applicationdata.NewMemoryRepository()
 	environments := environmentdata.NewMemoryRepository()
@@ -134,6 +161,39 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		t.Fatalf("NewHTTPServer() error = %v", err)
 	}
 	return srv
+}
+
+type contractRuntimeInventory struct{}
+
+func (contractRuntimeInventory) ListProject(
+	context.Context, string, string, runtimeinventorybiz.ViewQuery,
+) (runtimeinventorybiz.StatePage, error) {
+	return runtimeinventorybiz.StatePage{Items: []runtimeinventorybiz.State{contractInventoryState()}}, nil
+}
+
+func (contractRuntimeInventory) ListHost(
+	context.Context, string, string, runtimeinventorybiz.ViewQuery,
+) (runtimeinventorybiz.StatePage, error) {
+	return runtimeinventorybiz.StatePage{Items: []runtimeinventorybiz.State{contractInventoryState()}}, nil
+}
+
+func contractInventoryState() runtimeinventorybiz.State {
+	now := time.Unix(100, 0).UTC()
+	return runtimeinventorybiz.State{
+		Resource: runtimeinventorybiz.Resource{
+			ObservationID: "observation-1", OrganizationID: "organization-1",
+			ManagedHostID: "test-id", RuntimeTargetID: "test-id",
+			Kind: runtimeinventorybiz.KindContainer, RuntimeID: "container-1",
+			Name: "api", Managed: true, ProjectID: "test-id",
+			DeploymentID: "test-id",
+			Container:    &runtimeinventorybiz.ContainerSummary{State: "running"},
+			Ports:        []runtimeinventorybiz.Port{}, Mounts: []runtimeinventorybiz.Mount{},
+			Networks:   []runtimeinventorybiz.NetworkAttachment{},
+			ObservedAt: now, SchemaVersion: runtimeinventorybiz.CurrentSchemaVersion,
+		},
+		Presence:    runtimeinventorybiz.PresencePresent,
+		FirstSeenAt: now, LastSeenAt: now, ReconciledAt: now, Generation: 1,
+	}
 }
 
 type contractIdentityRepository struct {
@@ -519,4 +579,107 @@ func (s *contractControlStore) EnvironmentExists(_ context.Context, projectID, e
 		}
 	}
 	return false, nil
+}
+
+type contractBuildStore struct {
+	credentials map[string]buildbiz.RepositoryCredential
+	sources     map[string]buildbiz.SourceRepository
+}
+
+type contractSourceProber struct{}
+
+func (contractSourceProber) ProbeSource(
+	context.Context,
+	buildbiz.SourceRepository,
+	*buildbiz.RepositoryCredential,
+) (buildbiz.SourceRepositoryStatus, error) {
+	return buildbiz.SourceRepositoryStatusReady, nil
+}
+
+func newContractBuildStore() *contractBuildStore {
+	return &contractBuildStore{
+		credentials: make(map[string]buildbiz.RepositoryCredential),
+		sources:     make(map[string]buildbiz.SourceRepository),
+	}
+}
+
+func (s *contractBuildStore) ListCredentials(
+	_ context.Context,
+	projectID string,
+) ([]buildbiz.CredentialSummary, error) {
+	items := make([]buildbiz.CredentialSummary, 0, len(s.credentials))
+	for _, item := range s.credentials {
+		if item.ProjectID == projectID {
+			items = append(items, item.Summary())
+		}
+	}
+	return items, nil
+}
+
+func (s *contractBuildStore) CreateCredential(
+	_ context.Context,
+	item buildbiz.RepositoryCredential,
+) (buildbiz.CredentialSummary, error) {
+	s.credentials[item.ID] = item
+	return item.Summary(), nil
+}
+
+func (s *contractBuildStore) GetCredential(
+	_ context.Context,
+	projectID, credentialID string,
+) (buildbiz.RepositoryCredential, error) {
+	item, found := s.credentials[credentialID]
+	if !found || item.ProjectID != projectID {
+		return buildbiz.RepositoryCredential{}, buildbiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *contractBuildStore) ListSources(
+	_ context.Context,
+	projectID string,
+) ([]buildbiz.SourceRepository, error) {
+	items := make([]buildbiz.SourceRepository, 0, len(s.sources))
+	for _, item := range s.sources {
+		if item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func (s *contractBuildStore) CreateSource(
+	_ context.Context,
+	item buildbiz.SourceRepository,
+) (buildbiz.SourceRepository, error) {
+	s.sources[item.ID] = item
+	return item, nil
+}
+
+func (s *contractBuildStore) GetSource(
+	_ context.Context,
+	projectID, sourceID string,
+) (buildbiz.SourceRepository, error) {
+	item, found := s.sources[sourceID]
+	if !found || item.ProjectID != projectID {
+		return buildbiz.SourceRepository{}, buildbiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *contractBuildStore) UpdateSourceProbe(
+	_ context.Context,
+	projectID, sourceID string,
+	status buildbiz.SourceRepositoryStatus,
+	probedAt time.Time,
+) (buildbiz.SourceRepository, error) {
+	item, found := s.sources[sourceID]
+	if !found || item.ProjectID != projectID {
+		return buildbiz.SourceRepository{}, buildbiz.ErrNotFound
+	}
+	item.Status = status
+	item.LastProbedAt = probedAt
+	item.UpdatedAt = probedAt
+	s.sources[sourceID] = item
+	return item, nil
 }

@@ -28,6 +28,7 @@ development:
 
 product:
   enabled: false
+  source_probe_timeout: 10s
 
 runtime:
   deployment_worker:
@@ -40,10 +41,13 @@ runtime:
     poll_interval: 2s
     sync_interval: 5m
     retry_interval: 30s
+    event_poll_interval: 1s
+    event_wait: 2s
     lease_duration: 2m
     operation_timeout: 1m
     command_timeout: 20s
     concurrency: 2
+    event_concurrency: 4
     candidate_limit: 256
     max_chunk_bytes: 49152
 

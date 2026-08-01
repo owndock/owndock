@@ -70,6 +70,76 @@ type collectorStub struct {
 	err error
 }
 
+type eventScheduleRepositoryStub struct {
+	targets        []biz.Target
+	available      bool
+	lease          biz.EventScheduleLease
+	finished       bool
+	succeeded      bool
+	finishedCursor time.Time
+	nextPollAt     time.Time
+}
+
+func (r *eventScheduleRepositoryStub) ListEventTargets(
+	context.Context,
+	int,
+	time.Time,
+) ([]biz.Target, error) {
+	return append([]biz.Target(nil), r.targets...), nil
+}
+
+func (r *eventScheduleRepositoryStub) TryAcquireEvents(
+	_ context.Context,
+	target biz.Target,
+	owner string,
+	_, _ time.Time,
+) (biz.EventScheduleLease, bool, error) {
+	if !r.available {
+		return biz.EventScheduleLease{}, false, nil
+	}
+	r.available = false
+	if r.lease.RuntimeTargetID == "" {
+		r.lease = biz.EventScheduleLease{
+			RuntimeTargetID: target.RuntimeTargetID,
+			OwnerID:         owner,
+			Token:           1,
+			CursorAt:        time.Unix(9000, 0).UTC(),
+		}
+	}
+	return r.lease, true, nil
+}
+
+func (r *eventScheduleRepositoryStub) FinishEvents(
+	_ context.Context,
+	lease biz.EventScheduleLease,
+	_, cursor, next time.Time,
+	succeeded bool,
+) error {
+	if lease != r.lease {
+		return biz.ErrLeaseLost
+	}
+	r.finished = true
+	r.succeeded = succeeded
+	r.finishedCursor = cursor
+	r.nextPollAt = next
+	return nil
+}
+
+type eventCollectorStub struct {
+	cursor time.Time
+	err    error
+	seen   time.Time
+}
+
+func (c *eventCollectorStub) CollectEvents(
+	_ context.Context,
+	_ biz.Target,
+	cursor time.Time,
+) (time.Time, error) {
+	c.seen = cursor
+	return c.cursor, c.err
+}
+
 func (c collectorStub) Collect(context.Context, biz.Target) error { return c.err }
 
 func TestRunnerSchedulesSuccessAndRetry(t *testing.T) {
@@ -139,6 +209,53 @@ func TestRunnerDoesNothingWhenEveryTargetIsLeased(t *testing.T) {
 	}
 	if repository.finished {
 		t.Fatal("leased target was settled by a worker that did not own it")
+	}
+}
+
+func TestEventRunnerAdvancesCursorOnlyAfterSuccess(t *testing.T) {
+	now := time.Unix(10000, 0).UTC()
+	tests := []struct {
+		name       string
+		collectErr error
+		wantCursor time.Time
+		wantDelay  time.Duration
+		succeeded  bool
+	}{
+		{
+			name: "success", wantCursor: time.Unix(9005, 0).UTC(),
+			wantDelay: time.Second, succeeded: true,
+		},
+		{
+			name: "failure", collectErr: errors.New("stream failed"),
+			wantCursor: time.Unix(9000, 0).UTC(), wantDelay: 30 * time.Second,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			repository := &eventScheduleRepositoryStub{
+				targets: []biz.Target{testTarget(t)}, available: true,
+			}
+			collector := &eventCollectorStub{
+				cursor: time.Unix(9005, 0).UTC(), err: test.collectErr,
+			}
+			runner, err := NewEventRunner(
+				repository, collector, "worker-1", 2*time.Minute,
+				time.Second, 30*time.Second, 100, func() time.Time { return now },
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runErr := runner.RunOnce(t.Context())
+			if (runErr != nil) != (test.collectErr != nil) {
+				t.Fatalf("RunOnce() error = %v", runErr)
+			}
+			if !collector.seen.Equal(time.Unix(9000, 0).UTC()) ||
+				!repository.finishedCursor.Equal(test.wantCursor) ||
+				!repository.nextPollAt.Equal(now.Add(test.wantDelay)) ||
+				repository.succeeded != test.succeeded {
+				t.Fatalf("event settlement = %#v", repository)
+			}
+		})
 	}
 }
 

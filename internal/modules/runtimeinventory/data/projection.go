@@ -8,8 +8,9 @@ import (
 )
 
 // ProjectResources converts the shared collector payload into domain objects.
-// Ownership is intentionally not inferred from Docker labels: INV-007 must
-// verify a container against the current Deployment before setting Managed.
+// Ownership is intentionally not inferred from Docker labels. The current
+// projection verifies container candidates against successful Deployments in
+// bounded batches before setting Managed.
 func ProjectResources(
 	observation biz.Observation,
 	source []transport.Resource,

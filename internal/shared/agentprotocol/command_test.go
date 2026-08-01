@@ -270,6 +270,53 @@ func TestRuntimeInventoryCommandDocumentRoundTrip(t *testing.T) {
 	}
 }
 
+func TestRuntimeInventoryEventPollIsTypedBoundedAndNonDurable(t *testing.T) {
+	command := AgentCommand{
+		ID:       "inventory-event-command-1",
+		Kind:     AgentCommandInventoryEvents,
+		Deadline: time.Unix(1500, 0).UTC(),
+		Inventory: &RuntimeInventoryCommand{
+			RuntimeTargetID:  "target-1",
+			EventSince:       time.Unix(1400, 0).UTC(),
+			EventWaitSeconds: 2,
+		},
+	}
+	if err := command.Validate(); err != nil || command.Kind.DurableResult() {
+		t.Fatalf("event command validation/durability = %v/%v", err, command.Kind.DurableResult())
+	}
+	document := NewCommandDocument(command)
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "observation_id") {
+		t.Fatalf("event command leaked unrelated observation field: %s", encoded)
+	}
+	var decoded CommandDocument
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if !command.Equivalent(decoded.Domain()) {
+		t.Fatalf("event command round trip = %+v", decoded.Domain())
+	}
+	batch := runtimeinventory.EventBatch{Events: []runtimeinventory.Event{{
+		Kind: runtimeinventory.KindContainer, RuntimeID: "container-1",
+		Action:     runtimeinventory.EventActionStart,
+		OccurredAt: time.Unix(1401, 0).UTC(),
+	}}}
+	result := AgentCommandResult{
+		CommandID: command.ID, Status: AgentCommandSucceeded,
+		Inventory: &RuntimeInventoryResult{Events: &batch},
+	}
+	if err := result.Validate(command); err != nil {
+		t.Fatal(err)
+	}
+	command.Inventory.EventWaitSeconds = 11
+	if !errors.Is(command.Validate(), ErrCommandInvalid) {
+		t.Fatal("event command accepted an unbounded wait")
+	}
+}
+
 func deploymentCommand(kind AgentCommandKind) AgentCommand {
 	return AgentCommand{
 		ID:       "command-1",

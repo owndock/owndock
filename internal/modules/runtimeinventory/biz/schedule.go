@@ -154,3 +154,33 @@ func eventHintID(h EventHint) string {
 type EventHintRepository interface {
 	RecordEventHint(context.Context, EventHint) error
 }
+
+type EventCollector interface {
+	CollectEvents(context.Context, Target, time.Time) (time.Time, error)
+}
+
+type EventScheduleLease struct {
+	RuntimeTargetID string
+	OwnerID         string
+	Token           uint64
+	CursorAt        time.Time
+}
+
+type EventScheduleRepository interface {
+	ListEventTargets(context.Context, int, time.Time) ([]Target, error)
+	TryAcquireEvents(
+		context.Context,
+		Target,
+		string,
+		time.Time,
+		time.Time,
+	) (EventScheduleLease, bool, error)
+	FinishEvents(
+		context.Context,
+		EventScheduleLease,
+		time.Time,
+		time.Time,
+		time.Time,
+		bool,
+	) error
+}

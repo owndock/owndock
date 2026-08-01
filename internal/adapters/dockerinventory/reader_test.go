@@ -11,6 +11,7 @@ import (
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/api/types/volume"
 	"github.com/moby/moby/client"
+	runtimeinventory "github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
 type fakeEngine struct {
@@ -21,6 +22,8 @@ type fakeEngine struct {
 	networks         client.NetworkListResult
 	volumes          client.VolumeListResult
 	networkError     error
+	imageCalled      bool
+	networkCalled    bool
 	volumeCalled     bool
 }
 
@@ -36,6 +39,7 @@ func (f *fakeEngine) ImageList(
 	_ context.Context,
 	options client.ImageListOptions,
 ) (client.ImageListResult, error) {
+	f.imageCalled = true
 	f.imageOptions = options
 	return f.images, nil
 }
@@ -44,7 +48,43 @@ func (f *fakeEngine) NetworkList(
 	context.Context,
 	client.NetworkListOptions,
 ) (client.NetworkListResult, error) {
+	f.networkCalled = true
 	return f.networks, f.networkError
+}
+
+func TestReaderRejectsOversizedSnapshotBeforeCallingMoreEndpoints(t *testing.T) {
+	engine := &fakeEngine{containers: client.ContainerListResult{Items: []container.Summary{
+		{ID: "container-1", Names: []string{"/one"}},
+		{ID: "container-2", Names: []string{"/two"}},
+		{ID: "container-3", Names: []string{"/three"}},
+	}}}
+	reader := NewReader(engine)
+	reader.maximumResources = 2
+	resources, err := reader.Collect(t.Context())
+	if !errors.Is(err, runtimeinventory.ErrSnapshotTooLarge) || resources != nil {
+		t.Fatalf("Collect() = %#v, %v", resources, err)
+	}
+	if engine.imageCalled || engine.networkCalled || engine.volumeCalled {
+		t.Fatalf("oversized snapshot called later endpoints: %+v", engine)
+	}
+}
+
+func TestResourceLimitUsesOverflowSafeCumulativeAccounting(t *testing.T) {
+	for _, test := range []struct {
+		maximum int
+		counts  []int
+		want    bool
+	}{
+		{maximum: 10, counts: []int{3, 7}, want: false},
+		{maximum: 10, counts: []int{3, 8}, want: true},
+		{maximum: runtimeinventory.MaxResources, counts: []int{runtimeinventory.MaxResources}, want: false},
+		{maximum: runtimeinventory.MaxResources, counts: []int{runtimeinventory.MaxResources, 1}, want: true},
+		{maximum: 10, counts: []int{-1}, want: true},
+	} {
+		if got := exceedsResourceLimit(test.maximum, test.counts...); got != test.want {
+			t.Errorf("exceedsResourceLimit(%d, %v) = %t, want %t", test.maximum, test.counts, got, test.want)
+		}
+	}
 }
 
 func (f *fakeEngine) VolumeList(

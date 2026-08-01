@@ -3,6 +3,7 @@ package agentruntime
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -24,8 +25,8 @@ type inventoryEngineStub struct {
 }
 
 func (s *inventoryEngineStub) Events(
-	_ context.Context,
-	_ client.EventsListOptions,
+	ctx context.Context,
+	options client.EventsListOptions,
 ) client.EventsResult {
 	messages := make(chan events.Message, len(s.events))
 	errorsChannel := make(chan error, 1)
@@ -33,8 +34,16 @@ func (s *inventoryEngineStub) Events(
 		messages <- event
 	}
 	close(messages)
-	errorsChannel <- io.EOF
-	close(errorsChannel)
+	if options.Until == "" {
+		go func() {
+			<-ctx.Done()
+			errorsChannel <- ctx.Err()
+			close(errorsChannel)
+		}()
+	} else {
+		errorsChannel <- io.EOF
+		close(errorsChannel)
+	}
 	return client.EventsResult{Messages: messages, Err: errorsChannel}
 }
 
@@ -239,6 +248,44 @@ func TestDockerInventorySnapshotExpiresWithoutDiskFallback(t *testing.T) {
 	}
 }
 
+func TestDockerInventorySnapshotStoreIsStrictlyBounded(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	executor := &DockerExecutor{
+		now:                func() time.Time { return now },
+		inventorySnapshots: make(map[string]*inventorySnapshot),
+	}
+	t.Cleanup(func() {
+		executor.mu.Lock()
+		defer executor.mu.Unlock()
+		for _, snapshot := range executor.inventorySnapshots {
+			if snapshot.expirationTimer != nil {
+				snapshot.expirationTimer.Stop()
+			}
+		}
+	})
+	for index := 0; index < maximumInventorySnapshots; index++ {
+		snapshot := &inventorySnapshot{
+			observationID:   fmt.Sprintf("observation-%d", index),
+			runtimeTargetID: "target-1", maxChunkBytes: inventory.DefaultChunkBytes,
+			expiresAt: now.Add(inventorySnapshotTTL),
+		}
+		if _, code := executor.storeInventorySnapshot(snapshot); code != "" {
+			t.Fatalf("store snapshot %d code = %q", index, code)
+		}
+	}
+	overflow := &inventorySnapshot{
+		observationID: "observation-overflow", runtimeTargetID: "target-1",
+		maxChunkBytes: inventory.DefaultChunkBytes,
+		expiresAt:     now.Add(inventorySnapshotTTL),
+	}
+	if _, code := executor.storeInventorySnapshot(overflow); code != "inventory_capacity" {
+		t.Fatalf("overflow snapshot code = %q", code)
+	}
+	if len(executor.inventorySnapshots) != maximumInventorySnapshots {
+		t.Fatalf("snapshot count = %d", len(executor.inventorySnapshots))
+	}
+}
+
 func TestDockerInventoryPrepareReportsEventsDuringSnapshotWindow(t *testing.T) {
 	cache, err := NewFileResultCache(filepath.Join(t.TempDir(), "state"), 8)
 	if err != nil {
@@ -277,6 +324,40 @@ func TestDockerInventoryPrepareReportsEventsDuringSnapshotWindow(t *testing.T) {
 		manifest.Events[0].RuntimeID != "container-removed-during-agent-snapshot" ||
 		manifest.Events[0].Action != inventory.EventActionDestroy {
 		t.Fatalf("Agent snapshot events = %#v", manifest)
+	}
+}
+
+func TestDockerInventoryEventPollUsesDockerOwnedCursor(t *testing.T) {
+	cache, err := NewFileResultCache(filepath.Join(t.TempDir(), "state"), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewDockerExecutor(
+		"/var/run/docker.sock", cache, noopCutoverStore{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Unix(4000, 0).UTC()
+	executor.newInventoryEngine = func(string) (dockerInventoryEngine, error) {
+		return &inventoryEngineStub{events: []events.Message{{
+			Type: events.ContainerEventType, Action: events.ActionStart,
+			Actor:    events.Actor{ID: "container-live-event"},
+			TimeNano: since.Add(time.Second).UnixNano(),
+		}}}, nil
+	}
+	command := agentprotocol.AgentCommand{
+		ID: "inventory-events-1", Kind: agentprotocol.AgentCommandInventoryEvents,
+		Deadline: time.Now().Add(time.Minute).UTC(),
+		Inventory: &agentprotocol.RuntimeInventoryCommand{
+			RuntimeTargetID: "target-1", EventSince: since, EventWaitSeconds: 1,
+		},
+	}
+	result, err := executor.Execute(t.Context(), command)
+	if err != nil || result.Inventory == nil || result.Inventory.Events == nil ||
+		len(result.Inventory.Events.Events) != 1 ||
+		result.Inventory.Events.CursorAt(since) != since.Add(time.Second) {
+		t.Fatalf("event poll result/error = %+v/%v", result, err)
 	}
 }
 

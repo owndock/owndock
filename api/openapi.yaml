@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser and management HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Environment, Runtime Target, Deployment lifecycle, and Audit operations form the implemented product slice when product mode is enabled. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands, Agent Runtime Gateway, Git-to-Deploy, Terminal, and Template are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser and management HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, and Audit operations form the implemented product slice when product mode is enabled. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Build execution, Webhook, Terminal, and Template operations are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -15,7 +15,9 @@ tags:
   - name: Releases
   - name: Managed Hosts
   - name: Runtime Targets
+  - name: Runtime Inventory
   - name: Registry Credentials
+  - name: Source Repositories
   - name: Audit
   - name: Applications
   - name: Environments
@@ -119,6 +121,36 @@ paths:
         "403":
           $ref: "#/components/responses/APIError"
         "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/managed-hosts/{managed_host_id}/runtime-inventory:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ManagedHostID"
+    get:
+      tags: [Runtime Inventory]
+      operationId: listHostRuntimeInventory
+      summary: List safe runtime inventory for a managed host
+      description: Owner and Maintainer only. Returns containers, images, networks, and volumes observed on this Organization-owned host. This permission does not grant terminal access. Callers cannot provide a Docker endpoint, object ID selector, or arbitrary Docker filter.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/InventoryRuntimeTargetID"
+        - $ref: "#/components/parameters/InventoryKind"
+        - $ref: "#/components/parameters/InventoryIncludeAbsent"
+        - $ref: "#/components/parameters/InventoryLimit"
+        - $ref: "#/components/parameters/InventoryCursor"
+      responses:
+        "200":
+          $ref: "#/components/responses/RuntimeInventoryStatePage"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
@@ -630,6 +662,160 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/repository-credentials:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Source Repositories]
+      operationId: listRepositoryCredentials
+      summary: List safe Git repository credential metadata
+      description: The secret reference and secret material are never returned. secret_configured only confirms that a protected reference exists.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/RepositoryCredentialList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Source Repositories]
+      operationId: createRepositoryCredential
+      summary: Register Git read credential metadata backed by an external secret
+      description: Owner or Maintainer only. SSH Deploy Key and HTTPS Access Token are supported. The response never echoes secret_ref.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateRepositoryCredentialRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/RepositoryCredentialCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/source-repositories:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Source Repositories]
+      operationId: listSourceRepositories
+      summary: List approved Git repository connections
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SourceRepositoryList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Source Repositories]
+      operationId: createSourceRepository
+      summary: Register an HTTPS or SSH Git repository connection
+      description: Owner or Maintainer only. Credentials in repository_url, insecure Git protocols, local paths, queries, fragments, and unpinned SSH hosts are rejected. Creation does not fetch code or start a Build.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSourceRepositoryRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/SourceRepositoryCreated"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/source-repositories/{source_repository_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/SourceRepositoryID"
+    get:
+      tags: [Source Repositories]
+      operationId: getSourceRepository
+      summary: Get an approved Git repository connection
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SourceRepositoryResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/source-repositories/{source_repository_id}/probe:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/SourceRepositoryID"
+    post:
+      tags: [Source Repositories]
+      operationId: probeSourceRepository
+      summary: Verify a Git repository connection and its default branch
+      description: Owner or Maintainer only. Resolves the external credential only for this request, lists remote references without checking out source code, verifies normal HTTPS TLS or the pinned SSH host key, persists a safe status, and writes an audit event. It never returns the credential or raw transport error.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SourceRepositoryResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/environments:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -677,6 +863,42 @@ paths:
         "409":
           $ref: "#/components/responses/APIError"
         "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/runtime-inventory:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Runtime Inventory]
+      operationId: listProjectRuntimeInventory
+      summary: List verified managed runtime inventory for a project
+      description: Returns only containers whose OwnDock labels match a successful Deployment in this Organization, Project, and Runtime Target. Related image, mount, port, and network summaries are embedded in each container; host-wide image, network, and volume objects are not exposed. Callers cannot provide a Docker endpoint, container ID, or arbitrary Docker filter.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/InventoryRuntimeTargetID"
+        - name: kind
+          in: query
+          required: false
+          description: The Project view currently contains verified managed containers only.
+          schema:
+            type: string
+            enum: [container]
+        - $ref: "#/components/parameters/InventoryIncludeAbsent"
+        - $ref: "#/components/parameters/InventoryLimit"
+        - $ref: "#/components/parameters/InventoryCursor"
+      responses:
+        "200":
+          $ref: "#/components/responses/RuntimeInventoryStatePage"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
           $ref: "#/components/responses/APIError"
         "422":
           $ref: "#/components/responses/APIError"
@@ -1039,6 +1261,13 @@ components:
       schema:
         type: string
         minLength: 1
+    SourceRepositoryID:
+      name: source_repository_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
     ApplicationID:
       name: application_id
       in: path
@@ -1067,6 +1296,48 @@ components:
       schema:
         type: string
         minLength: 1
+    InventoryRuntimeTargetID:
+      name: runtime_target_id
+      in: query
+      required: false
+      description: Restrict results to one registered runtime target.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 160
+    InventoryKind:
+      name: kind
+      in: query
+      required: false
+      schema:
+        type: string
+        enum: [container, image, network, volume]
+    InventoryIncludeAbsent:
+      name: include_absent
+      in: query
+      required: false
+      description: Include resources recently confirmed absent. They are retained for a bounded explanation window.
+      schema:
+        type: boolean
+        default: false
+    InventoryLimit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 100
+    InventoryCursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque continuation cursor returned by the previous page.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 2048
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -1246,6 +1517,65 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/RegistryCredential"
+    RepositoryCredentialList:
+      description: Safe Git repository credential metadata collection. Secret references are excluded.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RepositoryCredential"
+    RepositoryCredentialCreated:
+      description: Safe Git repository credential metadata. Secret references are excluded.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RepositoryCredential"
+    SourceRepositoryList:
+      description: Project source repository connection collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SourceRepository"
+    SourceRepositoryCreated:
+      description: Source repository connection created in pending state. No Git fetch or Build has started.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SourceRepository"
+    SourceRepositoryResponse:
+      description: Source repository connection metadata.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SourceRepository"
     ManagedHostList:
       description: Organization managed host collection.
       headers:
@@ -1413,6 +1743,25 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/AuditEvent"
+    RuntimeInventoryStatePage:
+      description: A bounded page of safe current runtime state. Internal labels, raw Inspect data, environment values, registry authorization, and host source paths are never returned.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/RuntimeInventoryState"
+              next_cursor:
+                type: string
+                minLength: 1
     ApplicationList:
       description: Application collection.
       headers:
@@ -1713,6 +2062,94 @@ components:
           type: string
           minLength: 1
         created_at:
+          type: string
+          format: date-time
+    RepositoryCredential:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, type, secret_configured, version, created_by, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          enum: [ssh_deploy_key, https_access_token]
+        username:
+          type: string
+          maxLength: 128
+        secret_configured:
+          type: boolean
+          readOnly: true
+        public_key_fingerprint:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+    SourceRepository:
+      type: object
+      additionalProperties: false
+      required: [id, project_id, name, repository_url, protocol, default_branch, status, created_by, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        repository_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: Credential-free HTTPS, ssh://, or git@host:path repository address.
+        protocol:
+          type: string
+          enum: [https, ssh]
+          readOnly: true
+        default_branch:
+          type: string
+          minLength: 1
+          maxLength: 255
+        credential_id:
+          type: string
+          minLength: 1
+        ssh_host_key_fingerprint:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
+        status:
+          type: string
+          enum: [pending, ready, unreachable, authentication_error, host_key_mismatch, reference_not_found]
+          readOnly: true
+        last_probed_at:
+          type: string
+          format: date-time
+          readOnly: true
+        created_by:
+          type: string
+          minLength: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
           type: string
           format: date-time
     ReleaseRuntimeSpec:
@@ -2045,6 +2482,51 @@ components:
         password_ref:
           type: string
           pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+    CreateRepositoryCredentialRequest:
+      type: object
+      additionalProperties: false
+      required: [name, type, secret_ref]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        type:
+          type: string
+          enum: [ssh_deploy_key, https_access_token]
+        username:
+          type: string
+          maxLength: 128
+        secret_ref:
+          type: string
+          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+          writeOnly: true
+        public_key_fingerprint:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
+    CreateSourceRepositoryRequest:
+      type: object
+      additionalProperties: false
+      required: [name, repository_url, default_branch]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        repository_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        default_branch:
+          type: string
+          minLength: 1
+          maxLength: 255
+        credential_id:
+          type: string
+          minLength: 1
+        ssh_host_key_fingerprint:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
     CreateManagedHostRequest:
       oneOf:
         - $ref: "#/components/schemas/CreateAgentManagedHostRequest"
@@ -2320,6 +2802,232 @@ components:
         environment_id:
           type: string
         revision:
+          type: string
+    RuntimeInventoryState:
+      type: object
+      additionalProperties: false
+      required: [observation_id, organization_id, managed_host_id, runtime_target_id, kind, runtime_id, name, managed, ports, mounts, networks, observed_at, schema_version, presence, first_seen_at, last_seen_at, reconciled_at, generation]
+      properties:
+        observation_id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        managed_host_id:
+          type: string
+          minLength: 1
+        runtime_target_id:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum: [container, image, network, volume]
+        runtime_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+        managed:
+          type: boolean
+        project_id:
+          type: string
+          minLength: 1
+        deployment_id:
+          type: string
+          minLength: 1
+        container:
+          $ref: "#/components/schemas/RuntimeContainerSummary"
+        image:
+          $ref: "#/components/schemas/RuntimeImageSummary"
+        network:
+          $ref: "#/components/schemas/RuntimeNetworkSummary"
+        volume:
+          $ref: "#/components/schemas/RuntimeVolumeSummary"
+        ports:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/RuntimePort"
+        mounts:
+          type: array
+          maxItems: 128
+          items:
+            $ref: "#/components/schemas/RuntimeMount"
+        networks:
+          type: array
+          maxItems: 64
+          items:
+            $ref: "#/components/schemas/RuntimeNetworkAttachment"
+        observed_at:
+          type: string
+          format: date-time
+        schema_version:
+          type: integer
+          minimum: 1
+        presence:
+          type: string
+          enum: [present, absent]
+        first_seen_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+        absent_at:
+          type: string
+          format: date-time
+        reconciled_at:
+          type: string
+          format: date-time
+        generation:
+          type: integer
+          format: int64
+          minimum: 1
+    RuntimeContainerSummary:
+      type: object
+      additionalProperties: false
+      required: [exit_code, oom_killed]
+      properties:
+        image_reference:
+          type: string
+        image_digest:
+          type: string
+        state:
+          type: string
+        health:
+          type: string
+        exit_code:
+          type: integer
+        oom_killed:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+    RuntimeImageSummary:
+      type: object
+      additionalProperties: false
+      required: [repo_tags, repo_digests, size_bytes]
+      properties:
+        repo_tags:
+          type: array
+          items:
+            type: string
+        repo_digests:
+          type: array
+          items:
+            type: string
+        size_bytes:
+          type: integer
+          format: int64
+        os:
+          type: string
+        architecture:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    RuntimeNetworkSummary:
+      type: object
+      additionalProperties: false
+      required: [internal, attachable, ingress, enable_ipv4, enable_ipv6, ipam]
+      properties:
+        driver:
+          type: string
+        scope:
+          type: string
+        internal:
+          type: boolean
+        attachable:
+          type: boolean
+        ingress:
+          type: boolean
+        enable_ipv4:
+          type: boolean
+        enable_ipv6:
+          type: boolean
+        ipam:
+          type: array
+          items:
+            $ref: "#/components/schemas/RuntimeIPAMConfig"
+    RuntimeVolumeSummary:
+      type: object
+      additionalProperties: false
+      required: [in_use, usage_known]
+      properties:
+        driver:
+          type: string
+        scope:
+          type: string
+        in_use:
+          type: boolean
+        usage_known:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+    RuntimeIPAMConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        subnet:
+          type: string
+        ip_range:
+          type: string
+        gateway:
+          type: string
+    RuntimePort:
+      type: object
+      additionalProperties: false
+      required: [container_port, host_port, protocol]
+      properties:
+        name:
+          type: string
+        container_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        host_ip:
+          type: string
+        host_port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        protocol:
+          type: string
+    RuntimeMount:
+      type: object
+      additionalProperties: false
+      required: [type, destination, read_only]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [bind, volume, tmpfs]
+        destination:
+          type: string
+        read_only:
+          type: boolean
+    RuntimeNetworkAttachment:
+      type: object
+      additionalProperties: false
+      properties:
+        network_id:
+          type: string
+        name:
+          type: string
+        driver:
+          type: string
+        ip_address:
+          type: string
+        gateway:
+          type: string
+        mac:
           type: string
     ErrorResponse:
       type: object

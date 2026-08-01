@@ -50,6 +50,7 @@ type agentRuntimeProbeResult struct {
 type agentRuntimeInventoryResult struct {
 	Manifest *agentRuntimeInventoryManifest `json:"manifest,omitempty"`
 	Chunk    *runtimeinventory.Chunk        `json:"chunk,omitempty"`
+	Events   *runtimeinventory.EventBatch   `json:"events,omitempty"`
 }
 
 type agentRuntimeInventoryManifest struct {
@@ -75,7 +76,7 @@ func newAgentResult(result agentprotocol.AgentCommandResult) *agentCommandResult
 	}
 	if result.Inventory != nil {
 		document.Inventory = &agentRuntimeInventoryResult{
-			Chunk: result.Inventory.Chunk,
+			Chunk: result.Inventory.Chunk, Events: result.Inventory.Events,
 		}
 		if result.Inventory.Manifest != nil {
 			manifest := result.Inventory.Manifest

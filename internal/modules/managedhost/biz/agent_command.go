@@ -42,6 +42,7 @@ const (
 	AgentCommandInventoryPrepare   = agentprotocol.AgentCommandInventoryPrepare
 	AgentCommandInventoryChunk     = agentprotocol.AgentCommandInventoryChunk
 	AgentCommandInventoryRelease   = agentprotocol.AgentCommandInventoryRelease
+	AgentCommandInventoryEvents    = agentprotocol.AgentCommandInventoryEvents
 	AgentCommandSucceeded          = agentprotocol.AgentCommandSucceeded
 	AgentCommandFailed             = agentprotocol.AgentCommandFailed
 	RuntimeProbeReady              = agentprotocol.RuntimeProbeReady

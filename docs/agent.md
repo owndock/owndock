@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能使用已签发的机器证书连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment 和 Runtime Inventory 内存分块。Server 已有默认关闭的 Inventory 周期 Worker；Inventory 已覆盖重连、快照丢失、背压、多 Server 调度门禁以及 snapshot window Event 的真实 HTTP 传输。持续 Event 订阅、自动安装、证书轮换和部署/终端的真实多主机故障系统验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能使用已签发的机器证书连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块和有界 Event 续读。Server 已有默认关闭的 Inventory 全量与 Event Worker；Inventory 已覆盖重连、快照丢失、背压、多 Server 调度门禁、Docker 时间游标和失败不推进游标。自动安装、证书轮换和部署/终端的真实多主机故障系统验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -81,6 +81,7 @@ control:
     - runtime.inventory.prepare
     - runtime.inventory.chunk
     - runtime.inventory.release
+    - runtime.inventory.events
 
 runtime:
   docker_socket: /var/run/docker.sock
@@ -97,12 +98,12 @@ runtime:
 - `docker_socket` 只接受本机绝对 Unix Socket 路径，不接受 `tcp://` 地址；
 - `state_directory` 必须是权限受限的真实目录；命令结果和部署切换水位分别使用 `0600` 文件、fsync 和原子替换保存；
 - 持久结果只保存 command kind、SHA-256 指纹和安全结果；Registry authorization、Environment 值、目标 ID 和原始 Docker 错误不会写入缓存；
-- Runtime Inventory manifest/chunk/release 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 最多携带 64 条发生在四类 List 读取窗口内的规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
+- Runtime Inventory manifest/chunk/release/events 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 和 Event poll 每批最多携带 64 条规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
 - 部署切换水位只保存稳定容器槽位、最高 cutover sequence 和对应 Deployment ID，不保存完整命令或秘密；它独立于可淘汰的结果缓存，因此 Agent 重启或容器缺失后仍能拒绝旧命令；
 - `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不淘汰旧水位；删除 Application/Environment/Runtime Target 时的生命周期感知回收尚未实现；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
-- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；三项 `runtime.inventory.*` 必须一起启用，并要求 `max_frame_bytes >= 65536`。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
+- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，并要求 `max_frame_bytes >= 65536`。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
 
 运行：
 
@@ -181,7 +182,7 @@ Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell�
 - 尚未完成双主机选址、断线、网络分区和旧命令延迟到达的系统验收；
 - 不能进入容器终端或主机终端；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
-- Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约周期任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window Event 传输与两个 Runner 竞争；持续 Event 订阅和面向 Web 的查询 API 尚未实现。
+- Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标和两个 Runner 竞争；Project/Host 权限查询 API 已实现，真实双主机断线/洪峰系统验收尚未完成。
 
 Agent Control Server 启用时，Server 会同时注册 Agent probe 和部署路径；Host 在线且本机 Docker probe 成功后，Agent Runtime Target 可以进入 `ready`。多主机系统验收完成前，文档和 UI 仍需明确标注当前支持范围。
 

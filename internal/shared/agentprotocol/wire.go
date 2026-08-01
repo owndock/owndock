@@ -23,10 +23,12 @@ type RuntimeProbeDocument struct {
 }
 
 type RuntimeInventoryDocument struct {
-	RuntimeTargetID string `json:"runtime_target_id"`
-	ObservationID   string `json:"observation_id"`
-	MaxChunkBytes   int    `json:"max_chunk_bytes,omitempty"`
-	ChunkIndex      int    `json:"chunk_index,omitempty"`
+	RuntimeTargetID  string    `json:"runtime_target_id"`
+	ObservationID    string    `json:"observation_id,omitempty"`
+	MaxChunkBytes    int       `json:"max_chunk_bytes,omitempty"`
+	ChunkIndex       int       `json:"chunk_index,omitempty"`
+	EventSince       time.Time `json:"event_since,omitzero"`
+	EventWaitSeconds int       `json:"event_wait_seconds,omitempty"`
 }
 
 type DeploymentDocument struct {
@@ -89,10 +91,12 @@ func NewCommandDocument(command AgentCommand) *CommandDocument {
 	}
 	if command.Inventory != nil {
 		document.Inventory = &RuntimeInventoryDocument{
-			RuntimeTargetID: command.Inventory.RuntimeTargetID,
-			ObservationID:   command.Inventory.ObservationID,
-			MaxChunkBytes:   command.Inventory.MaxChunkBytes,
-			ChunkIndex:      command.Inventory.ChunkIndex,
+			RuntimeTargetID:  command.Inventory.RuntimeTargetID,
+			ObservationID:    command.Inventory.ObservationID,
+			MaxChunkBytes:    command.Inventory.MaxChunkBytes,
+			ChunkIndex:       command.Inventory.ChunkIndex,
+			EventSince:       command.Inventory.EventSince.UTC(),
+			EventWaitSeconds: command.Inventory.EventWaitSeconds,
 		}
 	}
 	return document
@@ -114,10 +118,12 @@ func (d CommandDocument) Domain() AgentCommand {
 	}
 	if d.Inventory != nil {
 		command.Inventory = &RuntimeInventoryCommand{
-			RuntimeTargetID: d.Inventory.RuntimeTargetID,
-			ObservationID:   d.Inventory.ObservationID,
-			MaxChunkBytes:   d.Inventory.MaxChunkBytes,
-			ChunkIndex:      d.Inventory.ChunkIndex,
+			RuntimeTargetID:  d.Inventory.RuntimeTargetID,
+			ObservationID:    d.Inventory.ObservationID,
+			MaxChunkBytes:    d.Inventory.MaxChunkBytes,
+			ChunkIndex:       d.Inventory.ChunkIndex,
+			EventSince:       d.Inventory.EventSince.UTC(),
+			EventWaitSeconds: d.Inventory.EventWaitSeconds,
 		}
 	}
 	return command

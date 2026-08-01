@@ -31,26 +31,30 @@ func (r Role) Valid() bool {
 type Permission string
 
 const (
-	PermissionProjectRead        Permission = "project.read"
-	PermissionProjectCreate      Permission = "project.create"
-	PermissionApplicationRead    Permission = "application.read"
-	PermissionApplicationWrite   Permission = "application.write"
-	PermissionReleaseRead        Permission = "release.read"
-	PermissionReleaseCreate      Permission = "release.create"
-	PermissionManagedHostRead    Permission = "managed_host.read"
-	PermissionManagedHostWrite   Permission = "managed_host.write"
-	PermissionRuntimeTargetRead  Permission = "runtime_target.read"
-	PermissionRuntimeTargetWrite Permission = "runtime_target.write"
-	PermissionRegistryRead       Permission = "registry.read"
-	PermissionRegistryWrite      Permission = "registry.write"
-	PermissionEnvironmentRead    Permission = "environment.read"
-	PermissionEnvironmentWrite   Permission = "environment.write"
-	PermissionDeploymentRead     Permission = "deployment.read"
-	PermissionDeploymentCreate   Permission = "deployment.create"
-	PermissionDeploymentCancel   Permission = "deployment.cancel"
-	PermissionDeploymentRollback Permission = "deployment.rollback"
-	PermissionAuditRead          Permission = "audit.read"
-	PermissionOrganizationManage Permission = "organization.manage"
+	PermissionProjectRead           Permission = "project.read"
+	PermissionProjectCreate         Permission = "project.create"
+	PermissionApplicationRead       Permission = "application.read"
+	PermissionApplicationWrite      Permission = "application.write"
+	PermissionReleaseRead           Permission = "release.read"
+	PermissionReleaseCreate         Permission = "release.create"
+	PermissionManagedHostRead       Permission = "managed_host.read"
+	PermissionManagedHostWrite      Permission = "managed_host.write"
+	PermissionRuntimeTargetRead     Permission = "runtime_target.read"
+	PermissionRuntimeTargetWrite    Permission = "runtime_target.write"
+	PermissionRegistryRead          Permission = "registry.read"
+	PermissionRegistryWrite         Permission = "registry.write"
+	PermissionEnvironmentRead       Permission = "environment.read"
+	PermissionEnvironmentWrite      Permission = "environment.write"
+	PermissionDeploymentRead        Permission = "deployment.read"
+	PermissionDeploymentCreate      Permission = "deployment.create"
+	PermissionDeploymentCancel      Permission = "deployment.cancel"
+	PermissionDeploymentRollback    Permission = "deployment.rollback"
+	PermissionAuditRead             Permission = "audit.read"
+	PermissionRuntimeInventoryRead  Permission = "runtime_inventory.read"
+	PermissionHostInventoryRead     Permission = "host_inventory.read"
+	PermissionSourceRepositoryRead  Permission = "source_repository.read"
+	PermissionSourceRepositoryWrite Permission = "source_repository.write"
+	PermissionOrganizationManage    Permission = "organization.manage"
 )
 
 type Principal struct {
@@ -80,13 +84,18 @@ func allowed(role Role, permission Permission) bool {
 		return true
 	}
 	switch permission {
-	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead, PermissionRuntimeTargetRead, PermissionRegistryRead, PermissionEnvironmentRead, PermissionDeploymentRead:
+	case PermissionProjectRead, PermissionApplicationRead, PermissionReleaseRead,
+		PermissionRuntimeTargetRead, PermissionRegistryRead,
+		PermissionEnvironmentRead, PermissionDeploymentRead,
+		PermissionRuntimeInventoryRead, PermissionSourceRepositoryRead:
 		return role == RoleMaintainer || role == RoleDeveloper || role == RoleViewer
-	case PermissionManagedHostRead:
+	case PermissionManagedHostRead, PermissionHostInventoryRead:
 		return role == RoleMaintainer
 	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionDeploymentCreate, PermissionDeploymentCancel:
 		return role == RoleMaintainer || role == RoleDeveloper
 	case PermissionRuntimeTargetWrite, PermissionRegistryWrite, PermissionEnvironmentWrite, PermissionDeploymentRollback, PermissionAuditRead:
+		return role == RoleMaintainer
+	case PermissionSourceRepositoryWrite:
 		return role == RoleMaintainer
 	case PermissionProjectCreate, PermissionOrganizationManage:
 		return false

@@ -216,11 +216,12 @@ func validCapabilities(values []string) bool {
 		switch value {
 		case agentprotocol.CapabilityInventoryPrepare,
 			agentprotocol.CapabilityInventoryChunk,
-			agentprotocol.CapabilityInventoryRelease:
+			agentprotocol.CapabilityInventoryRelease,
+			agentprotocol.CapabilityInventoryEvents:
 			inventoryCount++
 		}
 	}
-	return inventoryCount == 0 || inventoryCount == 3
+	return inventoryCount == 0 || inventoryCount == 4
 }
 
 func inventoryCapabilitiesEnabled(values []string) bool {

@@ -9,6 +9,7 @@ const (
 	CapabilityInventoryPrepare   = "runtime.inventory.prepare"
 	CapabilityInventoryChunk     = "runtime.inventory.chunk"
 	CapabilityInventoryRelease   = "runtime.inventory.release"
+	CapabilityInventoryEvents    = "runtime.inventory.events"
 )
 
 var supportedCapabilities = []string{
@@ -20,6 +21,7 @@ var supportedCapabilities = []string{
 	CapabilityInventoryPrepare,
 	CapabilityInventoryChunk,
 	CapabilityInventoryRelease,
+	CapabilityInventoryEvents,
 }
 
 // SupportedCapabilities returns the exact capabilities implemented by this
@@ -57,6 +59,8 @@ func RequiredCapability(kind AgentCommandKind) (string, bool) {
 		return CapabilityInventoryChunk, true
 	case AgentCommandInventoryRelease:
 		return CapabilityInventoryRelease, true
+	case AgentCommandInventoryEvents:
+		return CapabilityInventoryEvents, true
 	default:
 		return "", false
 	}

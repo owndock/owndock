@@ -28,7 +28,173 @@ func Default() []Migration {
 		{Version: 12, Name: "index_runtime_inventory", Up: indexRuntimeInventory},
 		{Version: 13, Name: "schedule_runtime_inventory", Up: scheduleRuntimeInventory},
 		{Version: 14, Name: "reconcile_runtime_inventory_state", Up: reconcileRuntimeInventoryState},
+		{Version: 15, Name: "schedule_runtime_inventory_events", Up: scheduleRuntimeInventoryEvents},
+		{Version: 16, Name: "index_runtime_inventory_views", Up: indexRuntimeInventoryViews},
+		{Version: 17, Name: "optimize_runtime_inventory_view_indexes", Up: optimizeRuntimeInventoryViewIndexes},
+		{Version: 18, Name: "index_source_repositories", Up: indexSourceRepositories},
 	}
+}
+
+func indexSourceRepositories(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("repository_credentials").Indexes().CreateMany(
+		ctx,
+		[]mongo.IndexModel{
+			uniqueIndex("uniq_repository_credential_project_name", bson.D{
+				{Key: "project_id", Value: 1},
+				{Key: "name_normalized", Value: 1},
+			}),
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "created_at", Value: 1},
+					{Key: "_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_repository_credential_project_created"),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create repository credential indexes: %w", err)
+	}
+	_, err = database.Collection("source_repositories").Indexes().CreateMany(
+		ctx,
+		[]mongo.IndexModel{
+			uniqueIndex("uniq_source_repository_project_name", bson.D{
+				{Key: "project_id", Value: 1},
+				{Key: "name_normalized", Value: 1},
+			}),
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "created_at", Value: 1},
+					{Key: "_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_source_repository_project_created"),
+			},
+			{
+				Keys: bson.D{
+					{Key: "project_id", Value: 1},
+					{Key: "credential_id", Value: 1},
+				},
+				Options: options.Index().SetName("idx_source_repository_credential"),
+			},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create source repository indexes: %w", err)
+	}
+	return nil
+}
+
+func indexRuntimeInventoryViews(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	return createRuntimeInventoryViewIndexes(ctx, database, false)
+}
+
+func optimizeRuntimeInventoryViewIndexes(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	indexes := database.Collection("runtime_inventory_current").Indexes()
+	for _, name := range []string{
+		"idx_runtime_inventory_project_view",
+		"idx_runtime_inventory_host_view",
+	} {
+		if err := indexes.DropOne(ctx, name); err != nil {
+			var commandError mongo.CommandError
+			if errors.As(err, &commandError) && commandError.Code == 27 {
+				continue
+			}
+			return fmt.Errorf("drop runtime inventory view index %s: %w", name, err)
+		}
+	}
+	return createRuntimeInventoryViewIndexes(ctx, database, true)
+}
+
+func createRuntimeInventoryViewIndexes(
+	ctx context.Context,
+	database *mongo.Database,
+	optimized bool,
+) error {
+	projectKeys := bson.D{
+		{Key: "organization_id", Value: 1},
+		{Key: "project_id", Value: 1},
+		{Key: "managed", Value: 1},
+		{Key: "presence", Value: 1},
+		{Key: "runtime_target_id", Value: 1},
+		{Key: "kind", Value: 1},
+		{Key: "name", Value: 1},
+		{Key: "runtime_id", Value: 1},
+	}
+	hostKeys := bson.D{
+		{Key: "organization_id", Value: 1},
+		{Key: "managed_host_id", Value: 1},
+		{Key: "presence", Value: 1},
+		{Key: "runtime_target_id", Value: 1},
+		{Key: "kind", Value: 1},
+		{Key: "name", Value: 1},
+		{Key: "runtime_id", Value: 1},
+	}
+	if optimized {
+		projectKeys = bson.D{
+			{Key: "organization_id", Value: 1},
+			{Key: "project_id", Value: 1},
+			{Key: "managed", Value: 1},
+			{Key: "runtime_target_id", Value: 1},
+			{Key: "kind", Value: 1},
+			{Key: "name", Value: 1},
+			{Key: "runtime_id", Value: 1},
+			{Key: "presence", Value: 1},
+		}
+		hostKeys = bson.D{
+			{Key: "organization_id", Value: 1},
+			{Key: "managed_host_id", Value: 1},
+			{Key: "runtime_target_id", Value: 1},
+			{Key: "kind", Value: 1},
+			{Key: "name", Value: 1},
+			{Key: "runtime_id", Value: 1},
+			{Key: "presence", Value: 1},
+		}
+	}
+	_, err := database.Collection("runtime_inventory_current").
+		Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys:    projectKeys,
+			Options: options.Index().SetName("idx_runtime_inventory_project_view"),
+		},
+		{
+			Keys:    hostKeys,
+			Options: options.Index().SetName("idx_runtime_inventory_host_view"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime inventory view indexes: %w", err)
+	}
+	return nil
+}
+
+func scheduleRuntimeInventoryEvents(
+	ctx context.Context,
+	database *mongo.Database,
+) error {
+	_, err := database.Collection("runtime_inventory_schedule").
+		Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "event_next_poll_at", Value: 1},
+			{Key: "event_lease_expires_at", Value: 1},
+			{Key: "_id", Value: 1},
+		},
+		Options: options.Index().SetName("idx_runtime_inventory_event_schedule_due"),
+	})
+	if err != nil {
+		return fmt.Errorf("create runtime inventory event schedule index: %w", err)
+	}
+	return nil
 }
 
 func reconcileRuntimeInventoryState(

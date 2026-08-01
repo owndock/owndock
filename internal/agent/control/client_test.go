@@ -56,6 +56,35 @@ func TestMaximumInventoryEventManifestFitsDefaultControlFrame(t *testing.T) {
 	}
 }
 
+func TestMaximumInventoryEventPollFitsDefaultControlFrame(t *testing.T) {
+	events := make([]inventory.Event, inventory.MaxEventsPerWindow)
+	for index := range events {
+		events[index] = inventory.Event{
+			Kind:       inventory.KindContainer,
+			RuntimeID:  strings.Repeat("b", 508) + string(rune('A'+index%26)),
+			Action:     inventory.EventActionUpdate,
+			OccurredAt: time.Unix(2000+int64(index), 0).UTC(),
+		}
+	}
+	result := agentprotocol.AgentCommandResult{
+		CommandID: "inventory-events-1",
+		Status:    agentprotocol.AgentCommandSucceeded,
+		Inventory: &agentprotocol.RuntimeInventoryResult{
+			Events: &inventory.EventBatch{Events: events, Truncated: true},
+		},
+	}
+	encoded, err := json.Marshal(agentFrame{
+		Type: "command_result", Sequence: 2,
+		CommandResult: newAgentResult(result),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) >= 64*1024 {
+		t.Fatalf("maximum inventory event poll frame = %d bytes", len(encoded))
+	}
+}
+
 func (e *probeExecutorStub) Execute(
 	_ context.Context,
 	command agentprotocol.AgentCommand,

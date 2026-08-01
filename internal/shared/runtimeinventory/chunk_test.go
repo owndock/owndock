@@ -3,6 +3,7 @@ package runtimeinventory
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,39 @@ func TestSplitRejectsOneOversizedResource(t *testing.T) {
 	_, err := Split([]Resource{resource}, 128, 1)
 	if !errors.Is(err, ErrSnapshotTooLarge) {
 		t.Fatalf("error = %v, want %v", err, ErrSnapshotTooLarge)
+	}
+}
+
+func TestSplitLargeHostSnapshotRemainsBoundedAndLossless(t *testing.T) {
+	const resourceCount = 10_000
+	resources := make([]Resource, resourceCount)
+	for index := range resources {
+		id := fmt.Sprintf("container-%05d", index)
+		resources[index] = testResource(id, "registry.example.com/team/api:1")
+	}
+	chunks, err := Split(resources, DefaultChunkBytes, MaxResourcesPerChunk)
+	if err != nil {
+		t.Fatalf("Split() error = %v", err)
+	}
+	seen := make(map[string]struct{}, resourceCount)
+	for index, chunk := range chunks {
+		if chunk.Index != index || len(chunk.Resources) > MaxResourcesPerChunk {
+			t.Fatalf("chunk %d metadata = index:%d resources:%d", index, chunk.Index, len(chunk.Resources))
+		}
+		payload, marshalErr := json.Marshal(chunk)
+		if marshalErr != nil || len(payload) > DefaultChunkBytes ||
+			chunk.Validate(DefaultChunkBytes) != nil {
+			t.Fatalf("chunk %d size/validation = %d/%v/%v", index, len(payload), marshalErr, chunk.Validate(DefaultChunkBytes))
+		}
+		for _, resource := range chunk.Resources {
+			if _, duplicate := seen[resource.RuntimeID]; duplicate {
+				t.Fatalf("duplicate resource %q", resource.RuntimeID)
+			}
+			seen[resource.RuntimeID] = struct{}{}
+		}
+	}
+	if len(seen) != resourceCount || len(chunks) > MaxChunks {
+		t.Fatalf("reconstructed resources/chunks = %d/%d", len(seen), len(chunks))
 	}
 }
 

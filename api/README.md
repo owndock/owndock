@@ -56,9 +56,15 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Application | `GET/POST /api/v1/projects/{project_id}/applications` | 查询或创建 Project Application |
 | Release | `GET/POST /api/v1/projects/{project_id}/applications/{application_id}/releases` | 查询或创建固定 OCI digest 与运行规格的不可变 Release |
 | Registry | `GET/POST /api/v1/projects/{project_id}/registry-credentials` | 管理引用外部秘密的 Registry Credential 元数据 |
+| Source Repository | `GET/POST /api/v1/projects/{project_id}/repository-credentials` | 管理 Git 读取凭据元数据；响应不回读 `secret_ref` |
+| Source Repository | `GET/POST /api/v1/projects/{project_id}/source-repositories` | 管理不含凭据的 HTTPS/SSH 仓库连接；创建不触发 Git 或 Build |
+| Source Repository | `GET /api/v1/projects/{project_id}/source-repositories/{source_repository_id}` | 查询仓库协议、默认分支、Host Key 和安全连接状态 |
+| Source Repository | `POST /api/v1/projects/{project_id}/source-repositories/{source_repository_id}/probe` | 单次解析外部凭据，只读验证远端仓库、默认分支和 TLS/SSH 主机身份 |
 | Environment | `GET/POST /api/v1/projects/{project_id}/environments` | 管理逻辑环境及普通配置值或 `secret://` 引用 |
 | Runtime Target | `GET/POST /api/v1/projects/{project_id}/runtime-targets` | 管理绑定同 Organization Host 的 `direct/agent` 运行目标 |
 | Runtime Target | `POST /api/v1/projects/{project_id}/runtime-targets/{runtime_target_id}/probe` | 显式探测 direct Docker 目标并保存安全状态 |
+| Runtime Inventory | `GET /api/v1/projects/{project_id}/runtime-inventory` | 查询经成功 Deployment 核验的 Project 受管容器安全视图 |
+| Runtime Inventory | `GET /api/v1/managed-hosts/{managed_host_id}/runtime-inventory` | Owner/Maintainer 查询 Host 的四类安全资源，包括未受管资源 |
 | Deployment | `GET/POST /api/v1/projects/{project_id}/deployments` | 查询或创建不可变 Deployment 操作 |
 | Deployment | `GET /api/v1/projects/{project_id}/deployments/{deployment_id}` | 查询 Deployment 状态 |
 | Deployment | `POST /api/v1/projects/{project_id}/deployments/{deployment_id}/cancel` | 请求取消进行中的 Deployment |
@@ -66,9 +72,9 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Deployment | `POST /api/v1/projects/{project_id}/deployments/{deployment_id}/rollback` | 使用此前成功 Release 创建一个新回滚操作 |
 | Audit | `GET /api/v1/audit-events` | 查询当前 Organization 或指定 Project 的安全审计元数据 |
 
-该切片已具备内置 RBAC、范围校验、MongoDB Repository、事务审计和契约测试。direct/agent Docker Gateway 和受管 Deployment Worker 已实现但默认关闭；Agent 首次身份接入、双端 mTLS 连接/版本/心跳、类型化 probe/部署传输、抖动退避重连、本机 Docker 执行、secret-safe 结果缓存和持久切换水位已实现。Agent Server 与 Worker 同时启用时，Agent probe 和 Deployment Gateway 配套注册；自动安装、证书轮换和多主机系统验收仍未完成。Template、Git-to-Deploy、Terminal 和用户管理 API 尚未加入公开契约。
+该切片已具备内置 RBAC、范围校验、MongoDB Repository、事务审计和契约测试。Source Repository 支持受限 probe，但不 checkout 源码或启动 Build；probe 只返回并持久化 `ready`、认证失败、Host Key 不匹配、默认分支不存在或不可达等安全类别，原始传输错误和秘密不会外泄。其限制和“仓库地址/读取凭据/Webhook”的区别见 [使用说明](../docs/source-repositories.md)。Runtime Inventory 只接受固定 Kind、Runtime Target、absent 开关、最大 200 条的页大小和不透明游标；未知或重复参数会被拒绝，不能提交 Docker endpoint、对象 ID 或任意 filter。direct/agent Docker Gateway 和受管 Worker 已实现但默认关闭；Agent 首次身份接入、双端 mTLS 连接/版本/心跳、类型化 probe/部署/Inventory 传输、抖动退避重连、本机 Docker 执行、secret-safe 结果缓存和持久切换水位已实现。Agent Server 与 Worker 同时启用时，Agent probe 和 Deployment Gateway 配套注册；自动安装、证书轮换和多主机系统验收仍未完成。Template、Build/Webhook、Terminal 和用户管理 API 尚未加入公开契约。
 
-凭据正文不通过资源 API 保存：Runtime、Registry、Environment Secret 与 Agent CA 都由受约束的外部秘密来源提供。
+凭据正文不通过资源 API 保存：Git、Runtime、Registry、Environment Secret 与 Agent CA 都由受约束的外部秘密来源提供。
 
 ## 默认关闭的工程样例
 

@@ -11,6 +11,7 @@ import (
 	managedhostdata "github.com/owndock/owndock/internal/modules/managedhost/data"
 	inventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	transport "github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
@@ -76,8 +77,95 @@ func (s *inventoryDispatcherStub) Dispatch(
 			CommandID: command.ID,
 			Status:    managedhostbiz.AgentCommandSucceeded,
 		}, nil
+	case managedhostbiz.AgentCommandInventoryEvents:
+		return managedhostbiz.AgentCommandResult{
+			CommandID: command.ID,
+			Status:    managedhostbiz.AgentCommandSucceeded,
+			Inventory: &managedhostbiz.RuntimeInventoryResult{
+				Events: &transport.EventBatch{
+					Events: append([]transport.Event(nil), s.events...),
+				},
+			},
+		}, nil
 	default:
 		return managedhostbiz.AgentCommandResult{}, fmt.Errorf("unexpected kind")
+	}
+}
+
+func TestAgentEventCollectorAdvancesOnlyToDockerEventTime(t *testing.T) {
+	cursor := time.Unix(7000, 0).UTC()
+	eventAt := cursor.Add(3 * time.Second)
+	dispatcher := &inventoryDispatcherStub{events: []transport.Event{{
+		Kind: transport.KindContainer, RuntimeID: "container-1",
+		Action: transport.EventActionStart, OccurredAt: eventAt,
+	}}}
+	hints := &eventHintRepositoryStub{}
+	identifier := 0
+	collector, err := NewAgentEventCollector(
+		dispatcher,
+		hints,
+		func() (string, error) {
+			identifier++
+			return fmt.Sprintf("event-command-%d", identifier), nil
+		},
+		func() time.Time { return cursor.Add(time.Hour) },
+		5*time.Second,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := runtimeaccess.NewAgent("host-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := inventorybiz.Target{
+		OrganizationID: "organization-1", ProjectID: "project-1",
+		ManagedHostID: "host-1", RuntimeTargetID: "target-1", Connection: connection,
+	}
+	got, err := collector.CollectEvents(t.Context(), target, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(eventAt) || len(hints.hints) != 1 {
+		t.Fatalf("cursor / hints = %v / %#v", got, hints.hints)
+	}
+	command := dispatcher.commands[0]
+	if command.Kind != agentprotocol.AgentCommandInventoryEvents ||
+		!command.Inventory.EventSince.Equal(cursor) ||
+		command.Inventory.EventWaitSeconds != 1 {
+		t.Fatalf("event command = %#v", command)
+	}
+}
+
+func TestAgentEventCollectorDoesNotAdvanceWhenHintWriteFails(t *testing.T) {
+	cursor := time.Unix(7100, 0).UTC()
+	dispatcher := &inventoryDispatcherStub{events: []transport.Event{{
+		Kind: transport.KindContainer, RuntimeID: "container-1",
+		Action: transport.EventActionDestroy, OccurredAt: cursor.Add(time.Second),
+	}}}
+	hints := &eventHintRepositoryStub{err: errors.New("MongoDB unavailable")}
+	collector, err := NewAgentEventCollector(
+		dispatcher,
+		hints,
+		func() (string, error) { return "event-command-write-failure", nil },
+		time.Now,
+		5*time.Second,
+		time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := runtimeaccess.NewAgent("host-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collector.CollectEvents(t.Context(), inventorybiz.Target{
+		OrganizationID: "organization-1", ProjectID: "project-1",
+		ManagedHostID: "host-1", RuntimeTargetID: "target-1", Connection: connection,
+	}, cursor)
+	if err == nil || !got.Equal(cursor) {
+		t.Fatalf("cursor / error = %v / %v", got, err)
 	}
 }
 

@@ -77,6 +77,11 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "list project runtime inventory", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/runtime-inventory?kind=container&limit=100",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "create project application", method: http.MethodPost, target: "/api/v1/projects/test-id/applications",
 			body: `{"name":"API"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
@@ -91,6 +96,32 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		},
 		{
 			name: "list registry credentials", method: http.MethodGet, target: "/api/v1/projects/test-id/registry-credentials",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create repository credential", method: http.MethodPost, target: "/api/v1/projects/test-id/repository-credentials",
+			body:    `{"name":"Git token","type":"https_access_token","username":"builder","secret_ref":"secret://git-token"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list repository credentials", method: http.MethodGet, target: "/api/v1/projects/test-id/repository-credentials",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create source repository", method: http.MethodPost, target: "/api/v1/projects/test-id/source-repositories",
+			body:    `{"name":"API source","repository_url":"https://git.example.com/team/api.git","default_branch":"main","credential_id":"test-id"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list source repositories", method: http.MethodGet, target: "/api/v1/projects/test-id/source-repositories",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get source repository", method: http.MethodGet, target: "/api/v1/projects/test-id/source-repositories/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "probe source repository", method: http.MethodPost, target: "/api/v1/projects/test-id/source-repositories/test-id/probe",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
@@ -113,6 +144,11 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		},
 		{
 			name: "get managed host", method: http.MethodGet, target: "/api/v1/managed-hosts/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list host runtime inventory", method: http.MethodGet,
+			target:  "/api/v1/managed-hosts/test-id/runtime-inventory?include_absent=true&limit=100",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{

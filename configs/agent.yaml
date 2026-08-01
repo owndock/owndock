@@ -24,6 +24,7 @@ control:
     - runtime.inventory.prepare
     - runtime.inventory.chunk
     - runtime.inventory.release
+    - runtime.inventory.events
 
 runtime:
   docker_socket: /var/run/docker.sock

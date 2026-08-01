@@ -51,6 +51,32 @@ func (e Event) Validate() error {
 }
 
 type EventBatch struct {
-	Events    []Event
-	Truncated bool
+	Events    []Event `json:"events,omitempty"`
+	Truncated bool    `json:"truncated,omitempty"`
+}
+
+func (b EventBatch) Validate() error {
+	if len(b.Events) > MaxEventsPerWindow ||
+		(b.Truncated && len(b.Events) != MaxEventsPerWindow) {
+		return ErrInvalidResource
+	}
+	for _, event := range b.Events {
+		if err := event.Validate(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// CursorAt returns the newest Docker-owned event timestamp that was safely
+// received. With an inclusive Docker Since query, replaying the last event is
+// intentional and is deduplicated by EventHint identity.
+func (b EventBatch) CursorAt(previous time.Time) time.Time {
+	cursor := previous.UTC()
+	for _, event := range b.Events {
+		if event.OccurredAt.After(cursor) {
+			cursor = event.OccurredAt.UTC()
+		}
+	}
+	return cursor
 }

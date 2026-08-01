@@ -11,8 +11,12 @@ var ErrInvalidLoop = errors.New("runtime inventory worker loop is invalid")
 
 type ErrorHandler func(error)
 
+type OnceRunner interface {
+	RunOnce(context.Context) error
+}
+
 type Loop struct {
-	runner           *Runner
+	runner           OnceRunner
 	pollInterval     time.Duration
 	operationTimeout time.Duration
 	concurrency      int
@@ -20,7 +24,7 @@ type Loop struct {
 }
 
 func NewLoop(
-	runner *Runner,
+	runner OnceRunner,
 	pollInterval, operationTimeout time.Duration,
 	concurrency int,
 	onError ErrorHandler,

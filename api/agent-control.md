@@ -26,7 +26,7 @@ Server 还会使用证书序列号和 SHA-256 指纹查询 MongoDB，并确认�
 - Host 仍绑定该身份、使用 `agent` 模式且未禁用；
 - hello frame 中的身份字段与证书身份完全一致。
 - hello 上报的 capabilities 是 enrollment 时写入 Agent Identity 能力授权的子集。
-- Agent 二进制新增 capability 不会自动扩大已有 Identity 权限；实际 hello 使用本机配置的列表。Runtime Inventory 的 prepare/chunk/release 必须作为一组授权和启用。
+- Agent 二进制新增 capability 不会自动扩大已有 Identity 权限；实际 hello 使用本机配置的列表。Runtime Inventory 的 prepare/chunk/release/events 必须作为一组授权和启用。
 
 TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host 标记为 `online`。
 
@@ -37,7 +37,7 @@ TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host �
 - Agent `sequence` 必须为大于零的单调递增整数；
 - Server 使用独立的单调递增 `sequence`；
 - Agent 可以发送 `hello`、`heartbeat` 和 `command_result`；Server 可以发送确认、安全错误和严格类型化的 `command`；
-- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel` 和 `runtime.inventory.prepare/chunk/release`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
+- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
 - frame 中不能携带 Docker endpoint、Socket、SSH 地址、用户选择的 Shell 或任意宿主机命令；
 - 连接建立后的协议错误通过安全 `error` frame 返回，不透传数据库或证书错误。
 
@@ -63,7 +63,8 @@ TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host �
       "deployment.cancel",
       "runtime.inventory.prepare",
       "runtime.inventory.chunk",
-      "runtime.inventory.release"
+      "runtime.inventory.release",
+      "runtime.inventory.events"
     ]
   }
 }
@@ -157,7 +158,7 @@ Server 接受并缓存结果后给出确认，Agent 之后才能安全清理自�
 - 同一 Host 上，相同 ID 且内容完全一致的并发请求复用同一个等待结果；相同 ID、不同目标、deadline 或部署内容会被拒绝；
 - 每条新命令下发前都会检查当前已认证 hello 是否声明该 command capability；未声明时命令不会入队，Deployment Gateway 返回 `unsupported_target`；
 - 已完成结果保存在 Server 进程内的全局有界缓存中，默认最多 256 条；缓存只保留 command kind、SHA-256 指纹和安全结果，不保留完整命令或秘密；同一进程内重连后可重放结果，Server 重启或缓存淘汰后不能把它当作持久化事实；
-- Runtime Inventory 三类命令是例外：chunk 可能接近 frame 上限，且 prepare 对应 Agent 内存快照，不能作为跨重启事实，因此 Agent 磁盘缓存和 Server 已完成结果缓存都明确跳过它们；重试会重新下发同一 observation/index，Agent 进程仍在时从同一内存快照返回，Agent 重启后返回 snapshot missing 并重新开始 observation；
+- Runtime Inventory 四类命令是例外：chunk 可能接近 frame 上限，prepare 对应 Agent 内存快照，events 是短时实时结果，都不能作为跨重启事实，因此 Agent 磁盘缓存和 Server 已完成结果缓存都明确跳过它们；快照重试会重新下发同一 observation/index，Agent 进程仍在时从同一内存快照返回，Agent 重启后返回 snapshot missing 并重新开始 observation；
 - command deadline 到期、Agent 断线、Host 被禁用或新 session 替换旧 session 时，所有仍在等待的调用都会得到明确失败；
 - 重复且完全相同的结果可安全确认；未知、冲突或结构不匹配的结果会关闭当前协议连接；
 - Project Runtime Target 已有受 RBAC 保护的 probe API，Server 侧会从数据库 Target/Host 映射到 `runtime.probe` command；Agent 控制客户端通过受信任的本机 Unix Socket Ping Docker，并把安全结果写入 `0600`、原子替换、有界的磁盘缓存。缓存 v2 只保存 command kind、SHA-256 指纹和安全结果，不保存 Runtime Target ID、Registry authorization、Environment 值或原始错误；旧版只含 probe 标识的缓存可以读取，并在后续写入时升级。Agent Control Server 启用后，composition root 会把 Agent prober 与已实现的 Deployment Gateway 配套注册；离线或未启用仍安全返回不可达/不可用，不会回退 direct。
@@ -168,7 +169,8 @@ Runtime Inventory 不把一台主机的全部 Container、Image、Network 和 Vo
 
 1. `runtime.inventory.prepare` 固定 Runtime Target、observation ID 和单块字节上限；
 2. Agent 通过本机 Docker List API 生成安全投影，在内存中按字节和资源数分块；Server 收到 manifest 后逐个发送 `runtime.inventory.chunk`；
-3. Server 每收到一块就校验并事务写入 MongoDB，全部完成后切换 current head，再发送 `runtime.inventory.release`。
+3. Server 每收到一块就校验并事务写入 MongoDB，全部完成后切换 current head，再发送 `runtime.inventory.release`；
+4. 两次全量盘点之间，Server 使用独立的 `runtime.inventory.events` 短时轮询，让 Agent 从上次 Docker 事件时间继续读取安全摘要。
 
 prepare 示例：
 
@@ -227,6 +229,44 @@ chunk 请求只增加 index；返回值只能包含 OwnDock 安全资源结构�
 - 一次只拉取一块，现有 command/result 确认就是流控和背压边界；
 - Container Env、Registry authorization、Volume mountpoint/options/status、宿主机 mount source、任意 Docker 原始错误和非白名单 Label 不进入 chunk；
 - `release` 幂等；断线或部分失败时 MongoDB 继续返回上一份完整视图，open observation 两小时后自动回收。
+
+Event 请求示例：
+
+```json
+{
+  "command_id": "command-events",
+  "kind": "runtime.inventory.events",
+  "deadline": "2026-07-30T10:00:30Z",
+  "runtime_inventory": {
+    "runtime_target_id": "runtime-target-id",
+    "event_since": "2026-07-30T09:59:58.123Z",
+    "event_wait_seconds": 2
+  }
+}
+```
+
+`event_since` 不是 Server 当前时间，而是上一批已经安全处理的 Docker Event 时间。Agent 最多等待 10 秒并返回最多 64 条白名单事件；结果不包含 Actor attributes、Labels 或命令内容：
+
+```json
+{
+  "command_id": "command-events",
+  "status": "succeeded",
+  "runtime_inventory": {
+    "events": {
+      "events": [
+        {
+          "kind": "container",
+          "runtime_id": "docker-container-id",
+          "action": "start",
+          "occurred_at": "2026-07-30T10:00:00.456Z"
+        }
+      ]
+    }
+  }
+}
+```
+
+Server 只有在所有事件提示都写入成功后，才把游标推进到最大的 `occurred_at`。断线、超时以外的读取错误或 MongoDB 写入失败都会保留旧游标；下一次使用 inclusive `Since` 重放，重复提示按稳定 ID 去重。Event 只催促一次完整 observation，不能直接把资源标记为 present 或 absent。
 
 ```mermaid
 sequenceDiagram

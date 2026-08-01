@@ -25,6 +25,7 @@ type MongoRepository struct {
 	current      *mongo.Collection
 	heads        *mongo.Collection
 	counters     *mongo.Collection
+	ownership    biz.OwnershipVerifier
 }
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
@@ -36,6 +37,16 @@ func NewMongoRepository(database *mongo.Database) *MongoRepository {
 		heads:        database.Collection("runtime_inventory_heads"),
 		counters:     database.Collection("runtime_inventory_counters"),
 	}
+}
+
+// WithOwnershipVerifier enables trusted Project ownership projection. Runtime
+// labels remain untrusted until the verifier matches them to a completed
+// OwnDock deployment in the same organization and runtime target.
+func (r *MongoRepository) WithOwnershipVerifier(
+	verifier biz.OwnershipVerifier,
+) *MongoRepository {
+	r.ownership = verifier
+	return r
 }
 
 func (r *MongoRepository) Begin(
@@ -464,13 +475,67 @@ func (r *MongoRepository) reconcileCurrent(
 	}
 	defer func() { _ = cursor.Close(ctx) }()
 
-	models := make([]mongo.WriteModel, 0, currentProjectionBatchSize)
+	documents := make([]resourceDocument, 0, currentProjectionBatchSize)
 	for cursor.Next(ctx) {
 		var document resourceDocument
 		if err := cursor.Decode(&document); err != nil {
 			return fmt.Errorf("decode completed runtime inventory projection: %w", err)
 		}
-		set, err := currentResourceSet(document, observation.Generation, completedAt)
+		documents = append(documents, document)
+		if len(documents) == currentProjectionBatchSize {
+			if err := r.reconcileCurrentBatch(
+				ctx, documents, observation.Generation, completedAt,
+			); err != nil {
+				return err
+			}
+			documents = documents[:0]
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("iterate completed runtime inventory projection: %w", err)
+	}
+	return r.reconcileCurrentBatch(
+		ctx, documents, observation.Generation, completedAt,
+	)
+}
+
+func (r *MongoRepository) reconcileCurrentBatch(
+	ctx context.Context,
+	documents []resourceDocument,
+	generation uint64,
+	reconciledAt time.Time,
+) error {
+	if len(documents) == 0 {
+		return nil
+	}
+	containers := make([]biz.Resource, 0, len(documents))
+	for index := range documents {
+		// Ownership fields in collected documents are never authoritative. Clear
+		// them even when no verifier is configured so labels or legacy data cannot
+		// silently grant Project visibility.
+		documents[index].Managed = false
+		documents[index].ProjectID = ""
+		documents[index].DeploymentID = ""
+		if documents[index].Kind == biz.KindContainer {
+			containers = append(containers, documents[index].domain())
+		}
+	}
+	verified := map[string]biz.Ownership{}
+	if r.ownership != nil {
+		var err error
+		verified, err = r.ownership.VerifyContainers(ctx, containers)
+		if err != nil {
+			return fmt.Errorf("verify runtime inventory ownership: %w", err)
+		}
+	}
+	models := make([]mongo.WriteModel, 0, len(documents))
+	for _, document := range documents {
+		if ownership, found := verified[document.RuntimeID]; document.Kind == biz.KindContainer && found {
+			document.Managed = true
+			document.ProjectID = ownership.ProjectID
+			document.DeploymentID = ownership.DeploymentID
+		}
+		set, err := currentResourceSet(document, generation, reconciledAt)
 		if err != nil {
 			return err
 		}
@@ -478,21 +543,12 @@ func (r *MongoRepository) reconcileCurrent(
 			SetFilter(bson.D{{Key: "_id", Value: currentResourceDocumentID(document)}}).
 			SetUpdate(bson.D{
 				{Key: "$set", Value: set},
-				{Key: "$setOnInsert", Value: bson.D{{Key: "first_seen_at", Value: completedAt}}},
+				{Key: "$setOnInsert", Value: bson.D{{Key: "first_seen_at", Value: reconciledAt}}},
 				{Key: "$unset", Value: bson.D{
 					{Key: "absent_at", Value: ""},
 					{Key: "expires_at", Value: ""},
 				}},
 			}).SetUpsert(true))
-		if len(models) == currentProjectionBatchSize {
-			if err := r.writeCurrentBatch(ctx, models); err != nil {
-				return err
-			}
-			models = models[:0]
-		}
-	}
-	if err := cursor.Err(); err != nil {
-		return fmt.Errorf("iterate completed runtime inventory projection: %w", err)
 	}
 	return r.writeCurrentBatch(ctx, models)
 }

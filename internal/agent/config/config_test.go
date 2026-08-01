@@ -27,7 +27,7 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 	}
 	if config.Control.MaxFrameBytes != 65536 ||
 		config.Control.MaxConcurrentCommands != 4 ||
-		len(config.Control.Capabilities) != 8 ||
+		len(config.Control.Capabilities) != 9 ||
 		config.Runtime.ResultCacheSize != 256 ||
 		config.Runtime.CutoverWatermarkSize != 16384 {
 		t.Fatalf("config = %#v", config)

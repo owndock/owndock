@@ -129,7 +129,8 @@ func (e *DockerExecutor) execute(
 		)
 	case agentprotocol.AgentCommandInventoryPrepare,
 		agentprotocol.AgentCommandInventoryChunk,
-		agentprotocol.AgentCommandInventoryRelease:
+		agentprotocol.AgentCommandInventoryRelease,
+		agentprotocol.AgentCommandInventoryEvents:
 		result, executeError = e.executeInventory(commandContext, command)
 	default:
 		return agentprotocol.AgentCommandResult{},

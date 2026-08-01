@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口及除 Template、Git-to-Deploy 外的首个部署核心资源；Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、显式 presence current 投影、四类 Docker 安全 mapper/List Reader、有界分块、Agent 内存拉取协议、snapshot window Event transport、真实 Runtime Target/短时凭据接线和带 Mongo 分布式租约的默认关闭周期 Worker，并覆盖重连、快照丢失、背压、多 Runner 竞争与 Event/Finish 调度竞态；Docker Event 持续订阅/游标恢复和公开权限 API 尚未实现。Git-to-Deploy 已接受但尚未实现，后续必须进入隔离 Build Worker/BuildKit 边界；默认关闭的顶层工程样例不属于正式产品实现。
+产品边界已经固定为 Organization 下的 Managed Host，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现外部 OCI 镜像入口和 Source Repository/Repository Credential 安全登记与只读连接探测；Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、显式 presence current 投影、四类 Docker 安全 mapper/List Reader、有界分块、Agent 内存拉取协议、snapshot window 与持续 Event transport、Docker 时间游标恢复、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的默认关闭周期 Worker，以及 Project/Host 权限分离的公开审计查询 API；重连、快照丢失、背压、多 Runner 竞争与 Event/Finish 调度竞态已覆盖，真实双主机、容量与事件洪峰系统验收仍未完成。Git checkout 和构建链尚未实现，后续必须进入隔离 Build Worker/BuildKit 边界；默认关闭的顶层工程样例不属于正式产品实现。
 
 ## 模块边界
 
@@ -43,7 +43,7 @@ Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `
 
 ## Build Boundary
 
-Git-to-Deploy 已进入产品架构，但当前代码尚未实现。构建链必须与 API Server 和生产 Runtime Boundary 隔离：
+Git-to-Deploy 已进入产品架构。当前已实现 Source Repository/Repository Credential 领域、MongoDB、RBAC、事务审计、公开登记查询和受限 Git probe；Build 与 Artifact 尚未实现。probe 只列远端引用，并在执行期解析秘密、验证 TLS/固定 SSH Host Key、检查默认分支，不能扩展为 checkout 或客户代码执行。构建链必须与 API Server 和生产 Runtime Boundary 隔离：
 
 - API Server 只校验并持久化 Source Repository、Build Configuration 和 Build 任务，不执行 Git checkout、Dockerfile 或任意 Shell；
 - 独立 Build Worker 领取带租约和 fence 的任务，通过受认证窄接口调用固定版本、不可变镜像 digest 的 BuildKit；
@@ -52,7 +52,7 @@ Git-to-Deploy 已进入产品架构，但当前代码尚未实现。构建链必
 - Registry 返回真实 OCI digest 后创建 Artifact，Artifact 再通过窄用例接口创建不可变 Release；
 - 外部 CI 镜像继续直接创建 Release，不依赖 Build 模块。
 
-领域、Webhook 与安全图见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)。在 Build Worker、BuildKit 和系统测试完成前，不注册占位构建 API。
+领域、Webhook 与安全图见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)，当前连接和探测规则见 [Source Repository 使用说明](source-repositories.md)。真实 Git 服务兼容矩阵仍是 BUILD-001 的剩余门禁；在 Build Worker、BuildKit 和系统测试完成前不注册占位构建 API。
 
 ## Runtime Gateway 边界
 
@@ -66,15 +66,15 @@ Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host �
 
 ## Runtime Inventory 边界
 
-Runtime Inventory 记录 Docker Engine 的可重建安全视图，不是 Deployment 的期望状态，也不是 Docker API Proxy。领域位于 `internal/modules/runtimeinventory`，`biz` 不导入 Moby SDK；`internal/adapters/dockerinventory` 调用四类 List API 和有限时间窗 Events API，并把 Docker 类型转换成不依赖 Server 领域的 OwnDock 安全传输投影，供 direct 与 Agent 复用。
+Runtime Inventory 记录 Docker Engine 的可重建安全视图，不是 Deployment 的期望状态，也不是 Docker API Proxy。领域位于 `internal/modules/runtimeinventory`，`biz` 不导入 Moby SDK；`internal/adapters/dockerinventory` 调用四类 List API、快照时间窗 Events API 和有界持续 Events API，并把 Docker 类型转换成不依赖 Server 领域的 OwnDock 安全传输投影，供 direct 与 Agent 复用。
 
 一次 observation 声明分块数和资源总数。`Begin` 通过 MongoDB counter 为每个 Runtime Target 原子分配单调 generation，避免多 Server 时钟参与新旧裁决。每个分块在 MongoDB 事务中写入 receipt、资源和接收计数；读取始终先解析 `runtime_inventory_heads`，因此 open observation 不可见。全部分块完成后，Repository 在事务中把 observation 标记完成并切换 head；generation 较小的延迟 observation 不能覆盖当前 head。未完成 generation 两小时后回收；完成时移除当前 generation 的 TTL，上一 generation 在被替换七天后回收。
 
-持久化模型没有原始 Inspect、Container Env、Registry authorization、Volume options/status、宿主 Mount source 或 Docker 原始错误。采集 mapper 只保留三个结构化归属候选 Label，Server 投影不会直接信任这些 Label 并授予 `managed` 身份；Network IPAM 和 Container port/mount/attachment 使用固定类型与数量限制。默认分块上限为 48 KiB/500 资源，硬上限 512 KiB。Docker 日志、Stats 和高频原始 Event 不进入这些资源文档。完整设计与当前工程状态见 [Docker Runtime Inventory](runtime-inventory.md)。
+持久化模型没有原始 Inspect、Container Env、Registry authorization、Volume options/status、宿主 Mount source 或 Docker 原始错误。采集 mapper 只保留三个结构化归属候选 Label；Server 只在成功 Deployment 的 Organization、Project、Application 与 Runtime Target 全部匹配后设置受管归属。Project API 只读这些已核验容器，Host API 以独立权限读取四类安全资源，两者都不接受 endpoint、对象 ID 或任意 Docker filter，也不授予 Terminal 权限。Network IPAM 和 Container port/mount/attachment 使用固定类型与数量限制。默认分块上限为 48 KiB/500 资源，硬上限 512 KiB。Docker 日志、Stats 和高频原始 Event 不进入这些资源文档。完整设计与当前工程状态见 [Docker Runtime Inventory](runtime-inventory.md)。
 
-Agent 模式使用 `runtime.inventory.prepare/chunk/release`，不是一次性推送整机 JSON。prepare 在 Agent 内存创建最多 10 分钟、32 MiB 的安全快照，Server 按 index 一次拉取并落库一个不超过约定字节数的 chunk；三类结果都不进入 Agent 磁盘结果缓存或 Server completed cache。Agent 重连且进程仍在时可继续同一 observation，Agent 重启则重新开始；MongoDB open TTL 回收旧批次。direct 模式复用相同 transport projection 和 Repository 提交流程。
+Agent 模式使用 `runtime.inventory.prepare/chunk/release`，不是一次性推送整机 JSON。prepare 在 Agent 内存创建最多 10 分钟、32 MiB 的安全快照，Server 按 index 一次拉取并落库一个不超过约定字节数的 chunk。`runtime.inventory.events` 使用 Docker 事件时间游标做有界轮询；四类 inventory 结果都不进入 Agent 磁盘结果缓存或 Server completed cache。Agent 重连且进程仍在时可继续同一 observation，Agent 重启则重新开始；MongoDB open TTL 回收旧批次。direct 模式复用相同 transport projection 和 Repository 提交流程。
 
-周期 Worker 通过内部 Mongo projection 只读取 `ready` Runtime Target 及其 Project Organization，连接信息仍是路由元数据和凭据引用。direct Collector 在调用前解析短时 TLS PEM、创建独立 Moby Client，调用后关闭并清零字节；Agent Collector 只按 Managed Host 路由到现有 mTLS 连接。`runtime_inventory_schedule` 对每个 Runtime Target 原子领取 owner、递增 token 和 expiry；完成时必须匹配三者，成功按同步周期再次到期，失败按较短间隔重试。配置强制 lease 大于 operation timeout，并限制单进程并发，避免同目标跨进程重叠采集。
+周期 Worker 通过内部 Mongo projection 只读取 `ready` Runtime Target 及其 Project Organization，连接信息仍是路由元数据和凭据引用。direct Collector 在调用前解析短时 TLS PEM、创建独立 Moby Client，调用后关闭并清零字节；Agent Collector 只按 Managed Host 路由到现有 mTLS 连接。`runtime_inventory_schedule` 为全量采集和 Event 轮询分别原子领取 owner、递增 token 和 expiry；完成时必须匹配对应 fence。Event 游标只在整批提示安全记录后推进，失败保持原值，inclusive `Since` 重放由稳定提示 ID 去重。Event 使用独立有界并发池，不占用全量采集 Worker；配置强制 lease 大于 operation timeout，避免同目标跨进程重叠采集。
 
 ## 可观测性
 

@@ -18,7 +18,7 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - 不提供任意 YAML/Shell 流水线，也不在 API Server 或生产 Runtime Target 上构建客户源码；
 - Kubernetes 和其他运行时通过后续适配器扩展。
 
-当前代码已经实现外部 OCI 镜像到 Release/Deployment 的基础链路；Git-to-Deploy 已进入产品范围但尚未实现。产品接受不等于代码已交付。
+当前代码已经实现外部 OCI 镜像到 Release/Deployment 的基础链路，以及 Source Repository/Repository Credential 的安全登记和受限连接探测；Git checkout、构建与 Webhook 尚未实现。产品接受不等于代码已交付。
 
 ## 产品模型
 
@@ -69,7 +69,7 @@ Application 是 Project 内长期存在、可多次发布的软件服务身份�
 
 ### Source Repository、Build 与 Artifact
 
-Source Repository 保存平台无关的 Git HTTPS/SSH 地址和外部读取凭据引用。私有仓库读取凭据与 Webhook 秘密分开：前者允许 OwnDock 拉取代码，后者只用于验证“何时触发构建”的通知。通俗解释、首版范围和安全隔离见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)。
+Source Repository 保存平台无关的 Git HTTPS/SSH 地址，并通过 ID 关联只含外部秘密引用的 Repository Credential。Owner/Maintainer 可以显式探测连接：系统只列出远端引用，验证默认分支、HTTPS TLS 或固定 SSH Host Key，然后保存不含原始错误的安全状态。私有仓库读取凭据与 Webhook 秘密分开：前者允许 OwnDock 读取代码，后者只用于验证“何时触发构建”的通知。通俗解释、当前规则和安全隔离见 [Source Repository 使用说明](source-repositories.md) 与 [Git-to-Deploy 产品边界](git-to-deploy.md)。
 
 Build Configuration 属于 Application，声明 Dockerfile、构建上下文、目标 Registry、平台与资源限制；Build 固定 Commit 和配置快照；成功推送 Registry 后形成按 digest 固定的 Artifact，再由 Artifact 创建不可变 Release。
 

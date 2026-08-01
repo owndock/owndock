@@ -32,7 +32,7 @@ type directInventoryEngineStub struct {
 }
 
 func (e *directInventoryEngineStub) Events(
-	_ context.Context,
+	ctx context.Context,
 	options client.EventsListOptions,
 ) client.EventsResult {
 	e.eventOptions = options
@@ -42,8 +42,16 @@ func (e *directInventoryEngineStub) Events(
 		messages <- item
 	}
 	close(messages)
-	errorsChannel <- io.EOF
-	close(errorsChannel)
+	if options.Until == "" {
+		go func() {
+			<-ctx.Done()
+			errorsChannel <- ctx.Err()
+			close(errorsChannel)
+		}()
+	} else {
+		errorsChannel <- io.EOF
+		close(errorsChannel)
+	}
 	return client.EventsResult{Messages: messages, Err: errorsChannel}
 }
 
@@ -53,12 +61,16 @@ func (*directInventoryEngineStub) ContainerList(context.Context, client.Containe
 
 type eventHintRepositoryStub struct {
 	hints []inventorybiz.EventHint
+	err   error
 }
 
 func (r *eventHintRepositoryStub) RecordEventHint(
 	_ context.Context,
 	hint inventorybiz.EventHint,
 ) error {
+	if r.err != nil {
+		return r.err
+	}
 	r.hints = append(r.hints, hint)
 	return nil
 }
@@ -178,6 +190,68 @@ func TestDirectTargetCollectorKeepsCredentialEphemeral(t *testing.T) {
 	}
 	if !engine.closed || !repository.completed {
 		t.Fatalf("engine closed / observation completed = %v / %v", engine.closed, repository.completed)
+	}
+	for name, value := range map[string][]byte{
+		"CA": ca, "certificate": certificate, "key": key,
+	} {
+		for _, item := range value {
+			if item != 0 {
+				t.Fatalf("%s credential was not cleared", name)
+			}
+		}
+	}
+}
+
+func TestDirectEventCollectorUsesPersistedCursorAndClearsCredential(t *testing.T) {
+	cursor := time.Unix(8000, 0).UTC()
+	eventAt := cursor.Add(2 * time.Second)
+	ca := []byte("ca")
+	certificate := []byte("certificate")
+	key := []byte("private-key")
+	engine := &directInventoryEngineStub{events: []events.Message{{
+		Type:     events.ContainerEventType,
+		Action:   events.ActionStart,
+		Actor:    events.Actor{ID: "container-live"},
+		TimeNano: eventAt.UnixNano(),
+	}}}
+	hints := &eventHintRepositoryStub{}
+	collector, err := NewDirectEventCollector(
+		directCredentialResolverStub{credential: dockerengine.TLSCredential{
+			CACertificate: ca, ClientCertificate: certificate, ClientKey: key,
+		}},
+		hints,
+		time.Millisecond,
+		func() time.Time { return cursor.Add(time.Hour) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	collector.openEngine = func(
+		runtimeaccess.Connection,
+		dockerengine.TLSCredential,
+	) (DirectEngine, error) {
+		return engine, nil
+	}
+	connection, err := runtimeaccess.NewDirectDocker(
+		"host-1", "tcp://runtime.example:2376", "runtime.example", "secret://runtime-test",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := collector.CollectEvents(t.Context(), inventorybiz.Target{
+		OrganizationID: "organization-1", ProjectID: "project-1",
+		ManagedHostID: "host-1", RuntimeTargetID: "target-1", Connection: connection,
+	}, cursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(eventAt) || len(hints.hints) != 1 ||
+		engine.eventOptions.Since != cursor.Format(time.RFC3339Nano) ||
+		engine.eventOptions.Until != "" || !engine.closed {
+		t.Fatalf(
+			"cursor / hints / options / closed = %v / %#v / %#v / %v",
+			got, hints.hints, engine.eventOptions, engine.closed,
+		)
 	}
 	for name, value := range map[string][]byte{
 		"CA": ca, "certificate": certificate, "key": key,
