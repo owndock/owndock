@@ -1,6 +1,6 @@
 # Agent Control Protocol v1
 
-> 状态：Server 端连接、认证、版本协商、心跳和类型化 probe/部署/Runtime Inventory command/result 传输已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照和持久切换水位也已实现。Runtime Inventory 尚未接入周期调度，自动安装、证书轮换和多主机故障系统验收仍未完成。
+> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、持久切换水位、受限容器终端和固定身份主机 PTY 也已实现。Agent 证书已经支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。自动安装、跨控制面实例断流与多主机故障系统验收仍未完成。
 
 Agent 控制协议运行在独立的 mTLS 监听端口，不与浏览器 Bearer API 共用认证边界。Agent 主动发起：
 
@@ -30,13 +30,56 @@ Server 还会使用证书序列号和 SHA-256 指纹查询 MongoDB，并确认�
 
 TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host 标记为 `online`。
 
+## 客户端证书轮换
+
+Agent 使用当前机器证书，在同一个独立 mTLS 监听端口调用：
+
+```text
+POST /api/v1/agent/certificate:rotate
+Content-Type: application/json
+```
+
+这个接口不接受 enrollment token、用户 Bearer Token，也不允许请求体指定 Organization、Host、Identity 或 instance。Server 只从当前 TLS 客户端证书和数据库固定身份推导这些字段。它与持续连接一样不放入主 HTTP OpenAPI 的默认 Server 地址。
+
+请求中的 CSR 由 Agent 本地生成，私钥不会离开主机。`rotation_id`、CSR 和私钥会先以 `0600` pending 文件持久化，因此请求成功但响应丢失、进程退出或网络中断后，Agent 会重放同一请求，而不是生成另一把无法匹配的私钥：
+
+```json
+{
+  "rotation_id": "url-safe-random-id",
+  "csr_pem": "-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----\n"
+}
+```
+
+Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返回原证书；同一 rotation ID 携带不同 CSR 会失败。成功响应带有 `Cache-Control: no-store`：
+
+```json
+{
+  "agent_identity_id": "identity-id",
+  "managed_host_id": "host-id",
+  "rotation_id": "url-safe-random-id",
+  "certificate_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "ca_certificate_pem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "certificate_expires_at": "2026-09-01T00:00:00Z"
+}
+```
+
+完整过渡顺序如下：
+
+1. Agent 默认在证书到期前 7 天生成新 Ed25519 密钥和 CSR，并持久化 pending 请求；
+2. Server 在事务内保存新证书、旧证书和 pending 响应。旧证书最多再接受 10 分钟的普通控制连接，且不能超过它自己的有效期；
+3. Agent 不信任响应中的 CA 来改变信任根，而是使用本机已配置 CA 验证新证书、固定 SPIFFE 身份、clientAuth、有效期和密钥配对；
+4. 验证通过后，Agent 用同目录临时文件、`fsync` 和一次 `rename` 原子替换单文件 identity bundle，删除 pending 文件并立即重连；
+5. Server 看到新证书完成 hello 后确认轮换，立即删除旧证书和 pending 响应。此后旧证书即使仍在 10 分钟窗口内也不能再连接。
+
+如果 Agent 在第 2～4 步之间退出，启动恢复会用旧证书和原 pending 请求取回同一张新证书。即使 10 分钟普通连接窗口已经结束，只要旧证书自身仍有效，Server 也仅允许它凭完全相同的 rotation ID 和 CSR hash 读取已经保存的 pending 响应；它不能建立控制流、提交不同 CSR 或创建另一轮换。新身份、CA、权限或文件安全检查失败时，现有 bundle 不会被覆盖；损坏的 pending 文件也不会被静默忽略。
+
 ## Frame 规则
 
 - 默认最大 frame 为 65,536 字节，可配置范围为 1 KiB～1 MiB；
 - 未知 JSON 字段、多个 JSON 值、空 frame 和超限 frame 都会拒绝；
 - Agent `sequence` 必须为大于零的单调递增整数；
 - Server 使用独立的单调递增 `sequence`；
-- Agent 可以发送 `hello`、`heartbeat` 和 `command_result`；Server 可以发送确认、安全错误和严格类型化的 `command`；
+- Agent 可以发送 `hello`、`heartbeat`、`command_result` 和 `terminal`；Server 可以发送确认、安全错误、严格类型化的 `command` 和 `terminal`；
 - `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
 - frame 中不能携带 Docker endpoint、Socket、SSH 地址、用户选择的 Shell 或任意宿主机命令；
 - 连接建立后的协议错误通过安全 `error` frame 返回，不透传数据库或证书错误。
@@ -64,7 +107,9 @@ TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host �
       "runtime.inventory.prepare",
       "runtime.inventory.chunk",
       "runtime.inventory.release",
-      "runtime.inventory.events"
+      "runtime.inventory.events",
+      "terminal.container",
+      "terminal.host"
     ]
   }
 }
@@ -162,6 +207,34 @@ Server 接受并缓存结果后给出确认，Agent 之后才能安全清理自�
 - command deadline 到期、Agent 断线、Host 被禁用或新 session 替换旧 session 时，所有仍在等待的调用都会得到明确失败；
 - 重复且完全相同的结果可安全确认；未知、冲突或结构不匹配的结果会关闭当前协议连接；
 - Project Runtime Target 已有受 RBAC 保护的 probe API，Server 侧会从数据库 Target/Host 映射到 `runtime.probe` command；Agent 控制客户端通过受信任的本机 Unix Socket Ping Docker，并把安全结果写入 `0600`、原子替换、有界的磁盘缓存。缓存 v2 只保存 command kind、SHA-256 指纹和安全结果，不保存 Runtime Target ID、Registry authorization、Environment 值或原始错误；旧版只含 probe 标识的缓存可以读取，并在后续写入时升级。Agent Control Server 启用后，composition root 会把 Agent prober 与已实现的 Deployment Gateway 配套注册；离线或未启用仍安全返回不可达/不可用，不会回退 direct。
+
+## 终端会话复用
+
+`terminal.container` 和 `terminal.host` 都不是任意命令 RPC。Server 只有在 TerminalSession 已通过登录会话、RBAC、策略、固定目标和一次性票据检查后，才会通过已认证的 Host 连接发送 `terminal` frame。两项 capability 分开授权，拥有容器终端能力不能打开主机终端。终端不使用 command/result 缓存；断线即关闭，用户需要重新创建会话。
+
+Server 发出的第一帧固定为 `open`，每个终端拥有独立的 `session_id` 和双向 sequence：
+
+```json
+{"type":"terminal","sequence":8,"terminal":{"session_id":"terminal-session-id","sequence":1,"type":"open","open":{"kind":"container","deployment_id":"deployment-id","project_id":"project-id","application_id":"application-id","environment_id":"environment-id","runtime_target_id":"runtime-target-id","container_name":"owndock-managed-name","cutover_sequence":42,"columns":120,"rows":30}}}
+```
+
+Agent 不直接信任容器名。它根据 Project、Application、Environment 和 Runtime Target 再次推导稳定名称，并用 Deployment、cutover sequence 和领域标签核对运行中的容器。通过后返回 `ready`：
+
+```json
+{"type":"terminal","sequence":6,"terminal":{"session_id":"terminal-session-id","sequence":1,"type":"ready"}}
+```
+
+主机 OPEN 更窄，只允许类型和窗口尺寸：
+
+```json
+{"type":"terminal","sequence":9,"terminal":{"session_id":"host-session-id","sequence":1,"type":"open","open":{"kind":"host","columns":120,"rows":30}}}
+```
+
+Agent 从本机可信配置取得固定系统账号、Shell 和终止宽限，拒绝所有容器选择字段。Agent 进程必须本来就以配置账号运行；协议和执行器都不支持 `sudo`、`su`、`setuid`、任意 command/env/workdir 或用户切换。PTY 使用最小重建环境，关闭时回收整个进程组。
+
+后续 `stdin`/`stdout` 每帧最多 32 KiB，`resize` 最大 1000×500。Server→Agent 和 Agent→Server 的会话 sequence 分别从 1 连续递增；全局 frame sequence 仍按整条 Agent 连接递增。启用任一终端 capability 时双方 frame 上限必须至少为 65,536 字节。Agent 同时最多维护 16 个终端，其中主机终端最多 4 个；Server Registry、Agent 入站队列和共享发送队列均有界，背压、重连、目标停止或 identity 变化都会关闭会话。
+
+容器 executor 固定尝试 `/bin/sh`、`/bin/bash`、`/bin/ash`；主机 executor 只使用本机可信配置中的单个 Shell。协议没有 Docker endpoint、socket path、shell、command、user、env、workdir、detach 或 privileged 字段。终端字节不进入 MongoDB、命令结果缓存、普通日志、Trace 或审计事件。
 
 ## Runtime Inventory 拉取协议
 
@@ -370,6 +443,6 @@ sequenceDiagram
 
 ## 后续兼容扩展
 
-`v1` 的后续 frame 只能加入与已授权领域操作关联的类型化 command/result，例如 Terminal session。每条 command 必须有唯一 command ID、幂等结果、超时和有界缓冲；协议不会提供“执行任意宿主机命令”的通用 RPC。
+`v1` 的后续 frame 只能加入与已授权领域操作关联的类型化 command/result 或临时会话。每条持久命令必须有唯一 command ID、幂等结果、超时和有界缓冲；临时终端使用独立会话序号、上限与关闭语义。协议不会提供“执行任意宿主机命令”的通用 RPC。
 
 Server 侧 probe/Deployment 类型契约、重复等待、secret-safe 结果缓存和慢消费者 backpressure，以及 Agent 侧 TLS 1.3 客户端、严格帧校验、心跳、抖动退避重连、优雅停止、deadline、本机 Docker executor、并发去重和跨重启持久结果均已完成。双端流一致性测试已覆盖当前 `v1`；在相邻 Agent/Server 版本 conformance 和发行升级矩阵完成前，`AGENT-002` 仍处于进行中。

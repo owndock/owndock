@@ -87,6 +87,29 @@ func TestRunnerStopsDuringReconnectWait(t *testing.T) {
 	}
 }
 
+func TestRunnerReconnectRequestSkipsBackoff(t *testing.T) {
+	session := &sessionStub{errors: []error{
+		ErrReconnectRequested,
+		&PermanentError{Code: "done"},
+	}}
+	waits := 0
+	runner, err := NewRunner(session, RunnerConfig{
+		MinimumDelay: time.Second, MaximumDelay: 2 * time.Second,
+		StableAfter: time.Minute,
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.wait = func(context.Context, time.Duration) bool {
+		waits++
+		return true
+	}
+	err = runner.Run(t.Context())
+	if !IsPermanent(err) || session.calls != 2 || waits != 0 {
+		t.Fatalf("error=%v calls=%d waits=%d", err, session.calls, waits)
+	}
+}
+
 func TestJitterAndDelayRemainBounded(t *testing.T) {
 	for range 100 {
 		value := jitterDuration(10 * time.Second)

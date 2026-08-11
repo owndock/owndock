@@ -46,7 +46,45 @@ func Default() []Migration {
 		{Version: 30, Name: "add_project_members", Up: addProjectMembers},
 		{Version: 31, Name: "add_ingress_rate_limits", Up: addIngressRateLimits},
 		{Version: 32, Name: "add_terminal_access_and_sessions", Up: addTerminalAccessAndSessions},
+		{Version: 33, Name: "bind_terminal_authentication_sessions", Up: bindTerminalAuthenticationSessions},
 	}
+}
+
+func bindTerminalAuthenticationSessions(ctx context.Context, database *mongo.Database) error {
+	sessions := database.Collection("terminal_sessions")
+	missingBinding := bson.D{{Key: "authentication_session_id", Value: bson.D{{Key: "$exists", Value: false}}}}
+	now := time.Now().UTC()
+	if _, err := sessions.UpdateMany(ctx, bson.D{
+		{Key: "authentication_session_id", Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: "active", Value: true},
+	}, bson.D{
+		{Key: "$set", Value: bson.D{
+			{Key: "authentication_session_id", Value: "legacy-invalidated"},
+			{Key: "status", Value: "failed"},
+			{Key: "active", Value: false},
+			{Key: "ended_at", Value: now},
+			{Key: "close_reason", Value: "permission_revoked"},
+			{Key: "safe_error_code", Value: "terminal_authentication_session_missing"},
+		}},
+		{Key: "$unset", Value: bson.D{{Key: "ticket_hash", Value: ""}}},
+	}); err != nil {
+		return fmt.Errorf("invalidate unbound active terminal sessions: %w", err)
+	}
+	if _, err := sessions.UpdateMany(ctx, missingBinding, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "authentication_session_id", Value: "legacy-invalidated"},
+	}}}); err != nil {
+		return fmt.Errorf("mark unbound historical terminal sessions: %w", err)
+	}
+	if _, err := sessions.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "authentication_session_id", Value: 1},
+			{Key: "active", Value: 1},
+		},
+		Options: options.Index().SetName("idx_terminal_authentication_session_active"),
+	}); err != nil {
+		return fmt.Errorf("index bound terminal authentication sessions: %w", err)
+	}
+	return nil
 }
 
 func addTerminalAccessAndSessions(ctx context.Context, database *mongo.Database) error {

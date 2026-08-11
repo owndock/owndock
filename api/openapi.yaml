@@ -420,6 +420,28 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/terminal-sessions/{terminal_session_id}:connect:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/TerminalSessionID"
+    get:
+      tags: [Terminal Sessions]
+      operationId: connectTerminalSession
+      summary: Upgrade a pending container or host Terminal Session to WSS
+      description: Requires the owndock.terminal.v1 WebSocket subprotocol, a strictly same-origin browser request, and the short-lived path-scoped HttpOnly ticket cookie. The Bearer token is not placed in the URL or WebSocket subprotocol. The Server revalidates the login session bound at creation, atomically consumes the ticket, selects the persisted session kind and fixed target, and then expects an OPEN v1 control message with only the initial terminal size.
+      security:
+        - terminalTicket: []
+      responses:
+        "101":
+          description: WebSocket protocol switched. Subsequent text messages carry bounded terminal control metadata and binary messages carry bounded stdin/stdout bytes.
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "405":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
   /api/v1/agent/enrollments:exchange:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2434,6 +2456,11 @@ components:
       scheme: bearer
       bearerFormat: opaque
       description: Opaque user session token sent explicitly in Authorization. The REST API does not authenticate user cookies.
+    terminalTicket:
+      type: apiKey
+      in: cookie
+      name: __Secure-owndock_terminal_ticket
+      description: Short-lived, one-time terminal ticket scoped to the exact connect path. It is never returned in JSON or accepted in the URL.
     buildTriggerAuth:
       type: http
       scheme: bearer
@@ -4717,6 +4744,21 @@ components:
         direct_ssh_ref:
           type: string
           pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+          description: External private-key reference; returned as metadata, never resolved into the API response.
+        direct_ssh_address:
+          type: string
+          minLength: 3
+          maxLength: 255
+          description: Fixed SSH host and port, for example host.example.com:22.
+        direct_ssh_user:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$"
+        direct_ssh_host_key_sha256:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
+          description: Pinned OpenSSH SHA-256 host-key fingerprint. Host-key verification cannot be disabled.
         last_seen_at:
           type: string
           format: date-time
@@ -5239,6 +5281,20 @@ components:
         direct_ssh_ref:
           type: string
           pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+          description: Optional direct SSH private-key reference. If set, address, user and host-key fingerprint are all required.
+        direct_ssh_address:
+          type: string
+          minLength: 3
+          maxLength: 255
+          description: Fixed SSH host and port, for example host.example.com:22.
+        direct_ssh_user:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,31}$"
+        direct_ssh_host_key_sha256:
+          type: string
+          pattern: "^SHA256:[A-Za-z0-9+/]{43}$"
     CreateRuntimeTargetRequest:
       oneOf:
         - $ref: "#/components/schemas/CreateAgentRuntimeTargetRequest"

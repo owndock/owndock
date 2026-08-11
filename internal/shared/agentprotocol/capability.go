@@ -10,6 +10,8 @@ const (
 	CapabilityInventoryChunk     = "runtime.inventory.chunk"
 	CapabilityInventoryRelease   = "runtime.inventory.release"
 	CapabilityInventoryEvents    = "runtime.inventory.events"
+	CapabilityTerminalContainer  = "terminal.container"
+	CapabilityTerminalHost       = "terminal.host"
 )
 
 var supportedCapabilities = []string{
@@ -22,6 +24,8 @@ var supportedCapabilities = []string{
 	CapabilityInventoryChunk,
 	CapabilityInventoryRelease,
 	CapabilityInventoryEvents,
+	CapabilityTerminalContainer,
+	CapabilityTerminalHost,
 }
 
 // SupportedCapabilities returns the exact capabilities implemented by this

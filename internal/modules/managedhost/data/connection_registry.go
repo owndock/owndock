@@ -3,13 +3,17 @@ package data
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
+
+var ErrAgentTerminalUnavailable = errors.New("Agent terminal stream is unavailable")
 
 type pendingAgentCommand struct {
 	command     biz.AgentCommand
@@ -21,11 +25,23 @@ type pendingAgentCommand struct {
 }
 
 type agentConnection struct {
-	sessionID    string
-	capabilities map[string]struct{}
-	cancel       context.CancelFunc
-	commands     chan biz.AgentCommand
-	pending      map[string]*pendingAgentCommand
+	sessionID      string
+	capabilities   map[string]struct{}
+	cancel         context.CancelFunc
+	commands       chan biz.AgentCommand
+	pending        map[string]*pendingAgentCommand
+	terminalFrames chan agentprotocol.TerminalFrame
+	terminals      map[string]*agentTerminalState
+}
+
+type agentTerminalState struct {
+	ready             chan struct{}
+	done              chan struct{}
+	output            chan []byte
+	lastAgentSequence uint64
+	serverSequence    uint64
+	readyReceived     bool
+	err               error
 }
 
 type completedCommandKey struct {
@@ -78,11 +94,13 @@ func (r *ConnectionRegistry) Register(
 		cancel = func() {}
 	}
 	connection := &agentConnection{
-		sessionID:    sessionID,
-		capabilities: capabilitySet(capabilities),
-		cancel:       cancel,
-		commands:     make(chan biz.AgentCommand, r.outboundBuffer),
-		pending:      make(map[string]*pendingAgentCommand),
+		sessionID:      sessionID,
+		capabilities:   capabilitySet(capabilities),
+		cancel:         cancel,
+		commands:       make(chan biz.AgentCommand, r.outboundBuffer),
+		pending:        make(map[string]*pendingAgentCommand),
+		terminalFrames: make(chan agentprotocol.TerminalFrame, r.outboundBuffer),
+		terminals:      make(map[string]*agentTerminalState),
 	}
 
 	r.mu.Lock()
@@ -94,6 +112,127 @@ func (r *ConnectionRegistry) Register(
 	r.mu.Unlock()
 
 	return connection.commands
+}
+
+func (r *ConnectionRegistry) TerminalFrames(
+	hostID, sessionID string,
+) <-chan agentprotocol.TerminalFrame {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	connection := r.connections[hostID]
+	if connection != nil && connection.sessionID == sessionID {
+		return connection.terminalFrames
+	}
+	closed := make(chan agentprotocol.TerminalFrame)
+	close(closed)
+	return closed
+}
+
+func (r *ConnectionRegistry) OpenTerminal(
+	ctx context.Context,
+	hostID, terminalSessionID string,
+	open agentprotocol.TerminalOpen,
+) (agentprotocol.TerminalStream, error) {
+	frame := agentprotocol.TerminalFrame{
+		SessionID: terminalSessionID, Sequence: 1,
+		Type: agentprotocol.TerminalFrameOpen, Open: &open,
+	}
+	if err := frame.Validate(agentprotocol.TerminalServerToAgent); err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	connection := r.connections[hostID]
+	if connection == nil {
+		r.mu.Unlock()
+		return nil, biz.ErrAgentNotConnected
+	}
+	requiredCapability := agentprotocol.CapabilityTerminalContainer
+	if open.Kind == agentprotocol.TerminalKindHost {
+		requiredCapability = agentprotocol.CapabilityTerminalHost
+	}
+	if _, supported := connection.capabilities[requiredCapability]; !supported {
+		r.mu.Unlock()
+		return nil, biz.ErrAgentCapabilityUnavailable
+	}
+	if connection.terminals[terminalSessionID] != nil {
+		r.mu.Unlock()
+		return nil, biz.ErrAgentCommandInvalid
+	}
+	state := &agentTerminalState{
+		ready: make(chan struct{}), done: make(chan struct{}),
+		output: make(chan []byte, min(r.outboundBuffer, 16)), serverSequence: 1,
+	}
+	connection.terminals[terminalSessionID] = state
+	select {
+	case connection.terminalFrames <- frame:
+		r.mu.Unlock()
+	case <-ctx.Done():
+		delete(connection.terminals, terminalSessionID)
+		r.mu.Unlock()
+		return nil, ctx.Err()
+	default:
+		delete(connection.terminals, terminalSessionID)
+		r.mu.Unlock()
+		return nil, biz.ErrAgentBackpressure
+	}
+	select {
+	case <-state.ready:
+		return &registryTerminalStream{
+			registry: r, hostID: hostID, sessionID: terminalSessionID,
+			state: state,
+		}, nil
+	case <-state.done:
+		return nil, terminalStateError(state)
+	case <-ctx.Done():
+		r.finishTerminal(hostID, terminalSessionID, ctx.Err(), true)
+		return nil, ctx.Err()
+	}
+}
+
+func (r *ConnectionRegistry) CompleteTerminalFrame(
+	hostID, agentSessionID string,
+	frame agentprotocol.TerminalFrame,
+) error {
+	if err := frame.Validate(agentprotocol.TerminalAgentToServer); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	connection := r.connections[hostID]
+	if connection == nil || connection.sessionID != agentSessionID {
+		return biz.ErrAgentDisconnected
+	}
+	state := connection.terminals[frame.SessionID]
+	if state == nil || frame.Sequence != state.lastAgentSequence+1 {
+		return agentprotocol.ErrTerminalFrameInvalid
+	}
+	state.lastAgentSequence = frame.Sequence
+	switch frame.Type {
+	case agentprotocol.TerminalFrameReady:
+		if state.readyReceived {
+			return agentprotocol.ErrTerminalFrameInvalid
+		}
+		state.readyReceived = true
+		close(state.ready)
+	case agentprotocol.TerminalFrameStdout:
+		if !state.readyReceived {
+			return agentprotocol.ErrTerminalFrameInvalid
+		}
+		payload := append([]byte(nil), frame.Data...)
+		select {
+		case state.output <- payload:
+		default:
+			r.finishTerminalLocked(connection, frame.SessionID, biz.ErrAgentBackpressure, true)
+			return biz.ErrAgentBackpressure
+		}
+	case agentprotocol.TerminalFrameClose:
+		r.finishTerminalLocked(connection, frame.SessionID, io.EOF, false)
+	case agentprotocol.TerminalFrameError:
+		r.finishTerminalLocked(connection, frame.SessionID, ErrAgentTerminalUnavailable, false)
+	default:
+		return agentprotocol.ErrTerminalFrameInvalid
+	}
+	return nil
 }
 
 func (r *ConnectionRegistry) Unregister(hostID, sessionID string) {
@@ -296,7 +435,11 @@ func (r *ConnectionRegistry) terminateLocked(
 	err error,
 ) {
 	connection.cancel()
+	for sessionID := range connection.terminals {
+		r.finishTerminalLocked(connection, sessionID, err, false)
+	}
 	close(connection.commands)
+	close(connection.terminalFrames)
 	for commandID, pending := range connection.pending {
 		delete(connection.pending, commandID)
 		pending.err = err
@@ -304,6 +447,165 @@ func (r *ConnectionRegistry) terminateLocked(
 		close(pending.done)
 	}
 }
+
+type registryTerminalStream struct {
+	registry  *ConnectionRegistry
+	hostID    string
+	sessionID string
+	state     *agentTerminalState
+	current   []byte
+	closeOnce sync.Once
+}
+
+func (s *registryTerminalStream) Read(payload []byte) (int, error) {
+	for len(s.current) == 0 {
+		select {
+		case next := <-s.state.output:
+			s.current = next
+		case <-s.state.done:
+			select {
+			case next := <-s.state.output:
+				s.current = next
+			default:
+				return 0, terminalStateError(s.state)
+			}
+		}
+	}
+	read := copy(payload, s.current)
+	s.current = s.current[read:]
+	return read, nil
+}
+
+func (s *registryTerminalStream) Write(payload []byte) (int, error) {
+	if len(payload) == 0 {
+		return 0, nil
+	}
+	written := 0
+	for len(payload) > 0 {
+		chunkSize := min(len(payload), agentprotocol.MaximumTerminalDataBytes)
+		chunk := append([]byte(nil), payload[:chunkSize]...)
+		if err := s.registry.sendTerminal(
+			s.hostID,
+			s.sessionID,
+			agentprotocol.TerminalFrameStdin,
+			0,
+			0,
+			chunk,
+		); err != nil {
+			return written, err
+		}
+		written += chunkSize
+		payload = payload[chunkSize:]
+	}
+	return written, nil
+}
+
+func (s *registryTerminalStream) Resize(
+	_ context.Context,
+	columns, rows uint16,
+) error {
+	return s.registry.sendTerminal(
+		s.hostID,
+		s.sessionID,
+		agentprotocol.TerminalFrameResize,
+		columns,
+		rows,
+		nil,
+	)
+}
+
+func (s *registryTerminalStream) Close() error {
+	s.closeOnce.Do(func() {
+		s.registry.finishTerminal(
+			s.hostID,
+			s.sessionID,
+			io.EOF,
+			true,
+		)
+	})
+	return nil
+}
+
+func (r *ConnectionRegistry) sendTerminal(
+	hostID, terminalSessionID string,
+	frameType agentprotocol.TerminalFrameType,
+	columns, rows uint16,
+	payload []byte,
+) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	connection := r.connections[hostID]
+	if connection == nil {
+		return biz.ErrAgentNotConnected
+	}
+	state := connection.terminals[terminalSessionID]
+	if state == nil || !state.readyReceived {
+		return ErrAgentTerminalUnavailable
+	}
+	state.serverSequence++
+	frame := agentprotocol.TerminalFrame{
+		SessionID: terminalSessionID, Sequence: state.serverSequence,
+		Type: frameType, Columns: columns, Rows: rows, Data: payload,
+	}
+	if err := frame.Validate(agentprotocol.TerminalServerToAgent); err != nil {
+		return err
+	}
+	select {
+	case connection.terminalFrames <- frame:
+		return nil
+	default:
+		r.finishTerminalLocked(connection, terminalSessionID, biz.ErrAgentBackpressure, true)
+		return biz.ErrAgentBackpressure
+	}
+}
+
+func (r *ConnectionRegistry) finishTerminal(
+	hostID, terminalSessionID string,
+	err error,
+	notifyAgent bool,
+) {
+	r.mu.Lock()
+	connection := r.connections[hostID]
+	if connection != nil {
+		r.finishTerminalLocked(connection, terminalSessionID, err, notifyAgent)
+	}
+	r.mu.Unlock()
+}
+
+func (r *ConnectionRegistry) finishTerminalLocked(
+	connection *agentConnection,
+	terminalSessionID string,
+	err error,
+	notifyAgent bool,
+) {
+	state := connection.terminals[terminalSessionID]
+	if state == nil {
+		return
+	}
+	delete(connection.terminals, terminalSessionID)
+	if notifyAgent {
+		state.serverSequence++
+		frame := agentprotocol.TerminalFrame{
+			SessionID: terminalSessionID, Sequence: state.serverSequence,
+			Type: agentprotocol.TerminalFrameClose,
+		}
+		select {
+		case connection.terminalFrames <- frame:
+		default:
+		}
+	}
+	state.err = err
+	close(state.done)
+}
+
+func terminalStateError(state *agentTerminalState) error {
+	if state.err == nil {
+		return ErrAgentTerminalUnavailable
+	}
+	return state.err
+}
+
+var _ agentprotocol.TerminalStream = (*registryTerminalStream)(nil)
 
 func (r *ConnectionRegistry) cacheCompletedLocked(
 	hostID string,

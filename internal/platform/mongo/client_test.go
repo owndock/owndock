@@ -608,14 +608,14 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		WithRuntimeTargetProbe(controlPlaneStore, readyRuntimeTargetProber{})
 	host, err := managedHostUseCase.Create(
 		ctx, principal, "Production Host", runtimeaccess.ModeDirectDocker,
-		"", "host-request",
+		managedhostbiz.DirectSSHConfiguration{}, "host-request",
 	)
 	if err != nil {
 		t.Fatalf("create managed host: %v", err)
 	}
 	agentHost, err := managedHostUseCase.Create(
 		ctx, principal, "Private Agent Host", runtimeaccess.ModeAgent,
-		"", "agent-host-request",
+		managedhostbiz.DirectSSHConfiguration{}, "agent-host-request",
 	)
 	if err != nil {
 		t.Fatalf("create agent managed host: %v", err)
@@ -3456,12 +3456,13 @@ func assertTerminalIndexes(t *testing.T, ctx context.Context, database *drivermo
 			"uniq_terminal_organization_policy": true,
 		},
 		"terminal_sessions": {
-			"uniq_terminal_ticket_hash":          true,
-			"uniq_active_terminal_user_slot":     true,
-			"uniq_active_terminal_target_slot":   true,
-			"idx_terminal_project_created":       false,
-			"idx_terminal_actor_created":         false,
-			"idx_terminal_expiry_reconciliation": false,
+			"uniq_terminal_ticket_hash":                  true,
+			"uniq_active_terminal_user_slot":             true,
+			"uniq_active_terminal_target_slot":           true,
+			"idx_terminal_project_created":               false,
+			"idx_terminal_actor_created":                 false,
+			"idx_terminal_expiry_reconciliation":         false,
+			"idx_terminal_authentication_session_active": false,
 		},
 	} {
 		cursor, err := database.Collection(collection).Indexes().List(ctx)
@@ -3531,7 +3532,7 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 		ConnectionMode: runtimeaccess.ModeDirectDocker,
 	}
 	first, err := terminalbiz.NewTerminalSession(
-		"terminal-session-1", "terminal-owner", strings.Repeat("a", 64),
+		"terminal-session-1", "terminal-owner", "terminal-login-session", strings.Repeat("a", 64),
 		"192.0.2.10", "OwnDock-Integration/1.0", "terminal-request-1", target, policy, now,
 	)
 	if err != nil {

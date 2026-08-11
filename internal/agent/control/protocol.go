@@ -18,10 +18,11 @@ const (
 )
 
 type agentFrame struct {
-	Type          string              `json:"type"`
-	Sequence      uint64              `json:"sequence"`
-	Hello         *agentHello         `json:"hello,omitempty"`
-	CommandResult *agentCommandResult `json:"command_result,omitempty"`
+	Type          string                       `json:"type"`
+	Sequence      uint64                       `json:"sequence"`
+	Hello         *agentHello                  `json:"hello,omitempty"`
+	CommandResult *agentCommandResult          `json:"command_result,omitempty"`
+	Terminal      *agentprotocol.TerminalFrame `json:"terminal,omitempty"`
 }
 
 type agentHello struct {
@@ -106,6 +107,7 @@ type serverFrame struct {
 	Code                     string                         `json:"code,omitempty"`
 	CommandID                string                         `json:"command_id,omitempty"`
 	Command                  *agentprotocol.CommandDocument `json:"command,omitempty"`
+	Terminal                 *agentprotocol.TerminalFrame   `json:"terminal,omitempty"`
 }
 
 func decodeServerFrame(value []byte, target *serverFrame) error {

@@ -21,9 +21,14 @@ type PolicyRepository interface {
 
 type SessionRepository interface {
 	GetSession(context.Context, string, string) (TerminalSession, error)
+	GetSessionForConnect(context.Context, string) (TerminalSession, error)
 	CreateSession(context.Context, TerminalSession) (TerminalSession, error)
 	SaveSession(context.Context, TerminalSession, uint64) (TerminalSession, error)
 	ConsumeTicket(context.Context, string, string, string, time.Time) (TerminalSession, error)
+}
+
+type PrincipalResolver interface {
+	ResolveTerminalPrincipal(context.Context, string, string, string) (security.Principal, error)
 }
 
 // ConnectSession atomically consumes the short-lived ticket before any
@@ -68,7 +73,7 @@ func (u *UseCase) ConnectSession(
 			ResourceID: session.ID, RequestID: requestID, CreatedAt: now,
 		})
 	})
-	return session.Redacted(), err
+	return session, err
 }
 
 func (u *UseCase) authorizeConnect(
@@ -152,11 +157,379 @@ type UseCase struct {
 	sessions     SessionRepository
 	targets      TargetResolver
 	projectRoles ProjectRoleResolver
+	principals   PrincipalResolver
+	containers   ContainerGateway
+	hosts        HostGateway
 	transaction  transaction.Manager
 	audit        sharedaudit.Recorder
 	tickets      TicketTokens
 	newID        func() (string, error)
 	now          func() time.Time
+}
+
+func (u *UseCase) WithContainerGateway(gateway ContainerGateway) *UseCase {
+	u.containers = gateway
+	return u
+}
+
+func (u *UseCase) WithHostGateway(gateway HostGateway) *UseCase {
+	u.hosts = gateway
+	return u
+}
+
+func (u *UseCase) WithPrincipalResolver(resolver PrincipalResolver) *UseCase {
+	u.principals = resolver
+	return u
+}
+
+// ReviewConnectedSession revalidates an open terminal against authoritative
+// session, login, role, policy and target state. It is intentionally read-only:
+// the streaming transport closes and persists the final lifecycle transition.
+func (u *UseCase) ReviewConnectedSession(
+	ctx context.Context,
+	connected TerminalSession,
+) (ConnectionReview, error) {
+	if u.principals == nil {
+		return ConnectionReview{}, ErrTerminalUnavailable
+	}
+	current, err := u.sessions.GetSession(
+		ctx,
+		connected.OrganizationID,
+		connected.ID,
+	)
+	if err != nil {
+		return ConnectionReview{}, err
+	}
+	if current.OrganizationID != connected.OrganizationID ||
+		current.ActorID != connected.ActorID || current.Kind != connected.Kind ||
+		current.ManagedHostID != connected.ManagedHostID ||
+		current.RuntimeTargetID != connected.RuntimeTargetID ||
+		current.DeploymentID != connected.DeploymentID ||
+		current.RunningInstanceID != connected.RunningInstanceID ||
+		current.InstanceGeneration != connected.InstanceGeneration ||
+		current.ConnectionMode != connected.ConnectionMode {
+		return ConnectionReview{}, ErrSessionNotFound
+	}
+	if current.Status != StatusOpen {
+		reason := current.CloseReason
+		if !reason.Valid() {
+			reason = CloseReasonUserRequested
+		}
+		return ConnectionReview{Terminate: true, Reason: reason}, nil
+	}
+	policy, err := u.connectedSessionPolicy(ctx, current)
+	if err != nil {
+		return ConnectionReview{}, err
+	}
+	principal, err := u.principals.ResolveTerminalPrincipal(
+		ctx,
+		current.OrganizationID,
+		current.ActorID,
+		current.AuthenticationSessionID,
+	)
+	if err != nil || !principal.Valid() ||
+		principal.OrganizationID != current.OrganizationID ||
+		principal.UserID != current.ActorID ||
+		principal.SessionID != current.AuthenticationSessionID {
+		return permissionRevokedReview(policy), nil
+	}
+	if err := u.authorizeConnect(ctx, principal, current); err != nil {
+		switch {
+		case errors.Is(err, ErrTargetNotFound), errors.Is(err, ErrTargetUnavailable):
+			return ConnectionReview{
+				Terminate: true,
+				Reason:    CloseReasonTargetUnavailable,
+			}, nil
+		case errors.Is(err, ErrAccessDenied), errors.Is(err, ErrSessionNotFound),
+			errors.Is(err, security.ErrForbidden),
+			errors.Is(err, security.ErrUnauthenticated):
+			return permissionRevokedReview(policy), nil
+		default:
+			return ConnectionReview{}, err
+		}
+	}
+	return ConnectionReview{}, nil
+}
+
+func (u *UseCase) connectedSessionPolicy(
+	ctx context.Context,
+	session TerminalSession,
+) (AccessPolicy, error) {
+	if session.Kind == KindContainer {
+		return u.effectiveProjectPolicy(
+			ctx,
+			session.OrganizationID,
+			session.ProjectID,
+		)
+	}
+	return u.effectiveOrganizationPolicy(ctx, session.OrganizationID)
+}
+
+func permissionRevokedReview(policy AccessPolicy) ConnectionReview {
+	return ConnectionReview{
+		Terminate:   true,
+		Reason:      CloseReasonPermissionRevoked,
+		GracePeriod: policy.RevocationGracePeriod,
+	}
+}
+
+// ConnectContainerWithTicket is the browser WSS entry point. The one-time
+// path-scoped cookie proves possession of the TerminalSession credential; the
+// login session bound at creation is resolved again so logout/revocation takes
+// effect without exposing the Bearer token to the WebSocket handshake.
+func (u *UseCase) ConnectContainerWithTicket(
+	ctx context.Context,
+	sessionID, rawTicket, requestID string,
+	size TerminalSize,
+) (TerminalSession, TerminalStream, error) {
+	if u.principals == nil {
+		return TerminalSession{}, nil, ErrTerminalUnavailable
+	}
+	session, err := u.sessions.GetSessionForConnect(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return TerminalSession{}, nil, ErrInvalidTicket
+	}
+	principal, err := u.principals.ResolveTerminalPrincipal(
+		ctx,
+		session.OrganizationID,
+		session.ActorID,
+		session.AuthenticationSessionID,
+	)
+	if err != nil || !principal.Valid() ||
+		principal.OrganizationID != session.OrganizationID ||
+		principal.UserID != session.ActorID ||
+		principal.SessionID != session.AuthenticationSessionID {
+		return TerminalSession{}, nil, ErrInvalidTicket
+	}
+	return u.ConnectContainer(ctx, principal, session.ID, rawTicket, requestID, size)
+}
+
+// ConnectWithTicket is the shared browser WSS entry point. The persisted
+// TerminalSession kind selects a server-configured gateway; the caller cannot
+// switch a container session into a host shell or vice versa.
+func (u *UseCase) ConnectWithTicket(
+	ctx context.Context,
+	sessionID, rawTicket, requestID string,
+	size TerminalSize,
+) (TerminalSession, TerminalStream, error) {
+	if u.principals == nil {
+		return TerminalSession{}, nil, ErrTerminalUnavailable
+	}
+	session, err := u.sessions.GetSessionForConnect(ctx, strings.TrimSpace(sessionID))
+	if err != nil {
+		return TerminalSession{}, nil, ErrInvalidTicket
+	}
+	principal, err := u.principals.ResolveTerminalPrincipal(
+		ctx,
+		session.OrganizationID,
+		session.ActorID,
+		session.AuthenticationSessionID,
+	)
+	if err != nil || !principal.Valid() ||
+		principal.OrganizationID != session.OrganizationID ||
+		principal.UserID != session.ActorID ||
+		principal.SessionID != session.AuthenticationSessionID {
+		return TerminalSession{}, nil, ErrInvalidTicket
+	}
+	return u.Connect(ctx, principal, session.ID, rawTicket, requestID, size)
+}
+
+func (u *UseCase) Connect(
+	ctx context.Context,
+	principal security.Principal,
+	sessionID, rawTicket, requestID string,
+	size TerminalSize,
+) (TerminalSession, TerminalStream, error) {
+	if err := size.Validate(); err != nil {
+		return TerminalSession{}, nil, err
+	}
+	connected, err := u.ConnectSession(ctx, principal, sessionID, rawTicket, requestID)
+	if err != nil {
+		return TerminalSession{}, nil, err
+	}
+	var target Target
+	switch connected.Kind {
+	case KindContainer:
+		if u.containers == nil {
+			err = ErrTerminalUnavailable
+			break
+		}
+		target, err = u.targets.ResolveContainer(
+			ctx, connected.OrganizationID, connected.ProjectID, connected.DeploymentID,
+		)
+		if err == nil && !sessionMatchesTarget(connected, target) {
+			err = ErrTargetUnavailable
+		}
+		if err == nil {
+			var stream TerminalStream
+			stream, err = u.containers.OpenContainer(ctx, connected.ID, target, size)
+			if err == nil {
+				return connected.Redacted(), stream, nil
+			}
+		}
+	case KindHost:
+		if u.hosts == nil {
+			err = ErrTerminalUnavailable
+			break
+		}
+		target, err = u.targets.ResolveHost(
+			ctx, connected.OrganizationID, connected.ManagedHostID,
+		)
+		if err == nil && !sessionMatchesTarget(connected, target) {
+			err = ErrTargetUnavailable
+		}
+		if err == nil {
+			var stream TerminalStream
+			stream, err = u.hosts.OpenHost(ctx, connected.ID, target, size)
+			if err == nil {
+				return connected.Redacted(), stream, nil
+			}
+		}
+	default:
+		err = ErrTargetUnavailable
+	}
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	cleanupError := u.failConnectedSession(cleanupContext, principal, connected, requestID, err)
+	return connected.Redacted(), nil, errors.Join(err, cleanupError)
+}
+
+// ConnectContainer consumes the one-time ticket and only then opens the
+// server-resolved runtime stream. A failed gateway connection is persisted as
+// a failed session so consumed tickets never leave an apparently active row.
+func (u *UseCase) ConnectContainer(
+	ctx context.Context,
+	principal security.Principal,
+	sessionID, rawTicket, requestID string,
+	size TerminalSize,
+) (TerminalSession, TerminalStream, error) {
+	if u.containers == nil {
+		return TerminalSession{}, nil, ErrTerminalUnavailable
+	}
+	if err := size.Validate(); err != nil {
+		return TerminalSession{}, nil, err
+	}
+	connected, err := u.ConnectSession(ctx, principal, sessionID, rawTicket, requestID)
+	if err != nil {
+		return TerminalSession{}, nil, err
+	}
+	if connected.Kind != KindContainer {
+		err = ErrTargetUnavailable
+	} else {
+		var target Target
+		target, err = u.targets.ResolveContainer(
+			ctx, connected.OrganizationID, connected.ProjectID, connected.DeploymentID,
+		)
+		if err == nil && !sessionMatchesTarget(connected, target) {
+			err = ErrTargetUnavailable
+		}
+		if err == nil {
+			var stream TerminalStream
+			stream, err = u.containers.OpenContainer(ctx, connected.ID, target, size)
+			if err == nil {
+				return connected.Redacted(), stream, nil
+			}
+		}
+	}
+	cleanupContext, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	cleanupError := u.failConnectedSession(cleanupContext, principal, connected, requestID, err)
+	return connected.Redacted(), nil, errors.Join(err, cleanupError)
+}
+
+func sessionMatchesTarget(session TerminalSession, target Target) bool {
+	if session.Kind == KindHost {
+		return target.Kind == KindHost &&
+			target.OrganizationID == session.OrganizationID &&
+			target.ManagedHostID == session.ManagedHostID &&
+			target.ConnectionMode == session.ConnectionMode
+	}
+	return target.Kind == KindContainer &&
+		target.OrganizationID == session.OrganizationID &&
+		target.ProjectID == session.ProjectID &&
+		target.ManagedHostID == session.ManagedHostID &&
+		target.RuntimeTargetID == session.RuntimeTargetID &&
+		target.DeploymentID == session.DeploymentID &&
+		target.RunningInstanceID == session.RunningInstanceID &&
+		target.InstanceGeneration == session.InstanceGeneration &&
+		target.ConnectionMode == session.ConnectionMode
+}
+
+func (u *UseCase) failConnectedSession(
+	ctx context.Context,
+	principal security.Principal,
+	session TerminalSession,
+	requestID string,
+	cause error,
+) error {
+	reason, safeCode := CloseReasonConnectionFailed, "terminal_connection_failed"
+	if errors.Is(cause, ErrTargetUnavailable) {
+		reason, safeCode = CloseReasonTargetUnavailable, "terminal_target_unavailable"
+	}
+	failed, err := session.Close(reason, safeCode, u.now().UTC())
+	if err != nil {
+		return err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return err
+	}
+	return u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		saved, saveErr := u.sessions.SaveSession(transactionContext, failed, session.Version)
+		if saveErr != nil {
+			return saveErr
+		}
+		failed = saved
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: session.OrganizationID,
+			ProjectID: session.ProjectID, ActorID: principal.UserID,
+			Action: "terminal_session.fail", ResourceType: "terminal_session",
+			ResourceID: session.ID, RequestID: requestID, CreatedAt: failed.EndedAt,
+		})
+	})
+}
+
+// CloseConnectedSession is used by the trusted streaming transport after it
+// has stopped forwarding bytes. It persists only lifecycle metadata and never
+// receives terminal payloads.
+func (u *UseCase) CloseConnectedSession(
+	ctx context.Context,
+	session TerminalSession,
+	reason CloseReason,
+	safeErrorCode, requestID string,
+) (TerminalSession, error) {
+	current, err := u.sessions.GetSession(ctx, session.OrganizationID, session.ID)
+	if err != nil {
+		return TerminalSession{}, err
+	}
+	if current.ActorID != session.ActorID || current.Kind != session.Kind {
+		return TerminalSession{}, ErrSessionNotFound
+	}
+	closed, err := current.Close(reason, safeErrorCode, u.now().UTC())
+	if err != nil {
+		return TerminalSession{}, err
+	}
+	if closed.Version == current.Version {
+		return closed.Redacted(), nil
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return TerminalSession{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		saved, saveErr := u.sessions.SaveSession(transactionContext, closed, current.Version)
+		if saveErr != nil {
+			return saveErr
+		}
+		closed = saved
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: current.OrganizationID,
+			ProjectID: current.ProjectID, ActorID: current.ActorID,
+			Action: "terminal_session.close", ResourceType: "terminal_session",
+			ResourceID: current.ID, RequestID: requestID, CreatedAt: closed.EndedAt,
+		})
+	})
+	return closed.Redacted(), err
 }
 
 func NewUseCase(
@@ -390,7 +763,7 @@ func (u *UseCase) createSession(
 	}
 	now := u.now().UTC()
 	session, err := NewTerminalSession(
-		sessionID, principal.UserID, ticketHash, clientIP, userAgent, requestID,
+		sessionID, principal.UserID, principal.SessionID, ticketHash, clientIP, userAgent, requestID,
 		target, policy, now,
 	)
 	if err != nil {

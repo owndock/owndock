@@ -39,6 +39,7 @@ type ProductAPI struct {
 	protectedInventory   http.Handler
 	protectedBuild       http.Handler
 	protectedTerminal    http.Handler
+	terminal             http.Handler
 	build                http.Handler
 	ingress              http.Handler
 }
@@ -51,6 +52,7 @@ func (p *ProductAPI) WithTerminal(
 		return fmt.Errorf("product terminal API is required")
 	}
 	p.protectedTerminal = authenticate(terminalAPI)
+	p.terminal = terminalAPI
 	return nil
 }
 
@@ -154,6 +156,8 @@ func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 		p.agentEnrollment.ServeHTTP(w, r)
 	case p.protectedInventory != nil && isRuntimeInventoryPath(r.URL.Path):
 		p.protectedInventory.ServeHTTP(w, r)
+	case p.terminal != nil && isTerminalConnectPath(r.URL.Path):
+		p.terminal.ServeHTTP(w, r)
 	case p.protectedTerminal != nil && isTerminalPath(r.URL.Path):
 		p.protectedTerminal.ServeHTTP(w, r)
 	case p.protectedBuild != nil && isProjectBuildPath(r.URL.Path):
@@ -194,6 +198,14 @@ func isTerminalPath(path string) bool {
 	}
 	return len(segments) == 5 && segments[0] == "api" && segments[1] == "v1" &&
 		segments[2] == "managed-hosts" && segments[3] != "" && segments[4] == "terminal-sessions"
+}
+
+func isTerminalConnectPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "terminal-sessions" &&
+		strings.HasSuffix(segments[3], ":connect") &&
+		strings.TrimSuffix(segments[3], ":connect") != ""
 }
 
 func isExternalBuildHookPath(path string) bool {

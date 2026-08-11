@@ -2,7 +2,7 @@
 
 OwnDock Agent 适合控制面无法主动访问的内网主机。主机上的 Agent 后续会主动向 OwnDock Server 建立出站连接；管理员不需要为了部署而把 Docker API 或 SSH 端口暴露到公网。
 
-当前已实现首次接入身份和双端控制连接：Owner 创建一次性接入凭据，Agent 在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。兑换时提交的 capabilities 会写入 Agent Identity，成为该身份的能力授权上限；后续 mTLS hello 只能声明其子集，不能通过重连自行增加部署权限。`owndock-agent` 可以使用已落盘的证书通过独立 TLS 1.3 端口完成身份校验、`v1` 协商、心跳和安全重连，Server 据此维护 `online/offline`；类型化控制流可执行本机 Docker probe 和两阶段 Deployment，双端近期缓存只保留命令指纹与安全结果。自动生成私钥、兑换 enrollment 并安装配置的发行安装器以及证书轮换仍未实现；真实双主机、断线和网络分区系统验收也仍待完成。
+当前已实现首次接入身份、双端控制连接和认证证书轮换：Owner 创建一次性接入凭据，Agent 在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。兑换时提交的 capabilities 会写入 Agent Identity，成为该身份的能力授权上限；后续 mTLS hello 只能声明其子集，不能通过重连自行增加权限。`owndock-agent` 可以使用已落盘的证书通过独立 TLS 1.3 端口完成身份校验、`v1` 协商、心跳和安全重连，Server 据此维护 `online/offline`；受控协议可执行本机 Docker probe、两阶段 Deployment、Runtime Inventory，以及分别授权的 `terminal.container` 和 `terminal.host` 临时会话。证书到期前由 Agent 本地生成新私钥和 CSR，以可恢复的幂等请求轮换，并在新证书 hello 成功后立即清除旧证书。自动生成首次私钥、兑换 enrollment 并安装配置的发行安装器仍未实现；真实双主机、断线、轮换故障注入和网络分区系统验收也仍待完成。
 
 ## 通俗理解
 
@@ -48,7 +48,7 @@ sequenceDiagram
 
 完整字段和错误码以 [OpenAPI](../api/openapi.yaml) 为准。
 
-当前安装步骤仍需要管理员或安装脚本把兑换得到的 CA、Agent 证书和本机私钥安全写入主机，然后填写 Agent 配置；正式自动化安装器尚未交付。进程构建和运行配置见 [Agent 运行与配置](agent.md)。
+当前安装步骤仍需要管理员或安装脚本把兑换得到的 CA、Agent 证书和本机私钥安全写入主机，然后填写 Agent 配置；正式自动化安装器尚未交付。推荐把 Agent 证书与私钥组合为同一个 `0600` identity bundle，并让两个配置路径都指向它，这样后续轮换可以一次原子替换证书/密钥对，不会因进程崩溃只更新一半。进程构建和运行配置见 [Agent 运行与配置](agent.md)。
 
 ## Server 配置
 
@@ -98,6 +98,6 @@ server:
 - CSR 必须自签名有效，并使用 RSA 2048 位以上、ECDSA P-256 以上或 Ed25519 公钥；
 - 签发证书只有 `clientAuth` 用途，不可充当 Server 证书；
 - 同一 Host 只能激活一个首次接入身份；重复请求依赖 MongoDB 事务和条件更新拒绝；
-- Host 禁用后的数据库吊销、当前单实例连接取消以及重连/heartbeat 身份检查已经实现；多控制面实例跨进程断流和证书安全轮换仍未实现；
-- enrollment 保存的 capabilities 是身份授权上限；hello 能力必须是其子集，Server 路由还会在每次命令入队前检查对应 capability；
+- Host 禁用后的数据库吊销、当前单实例连接取消以及重连/heartbeat 身份检查已经实现；证书安全轮换已实现本地 pending 恢复、Server 幂等响应、最多 10 分钟旧证书普通连接过渡和新 hello 确认；窗口结束后，仍有效的旧证书只能取回完全匹配的 pending 响应。仍需多控制面实例跨进程断流与真实故障系统验收；
+- enrollment 保存的 capabilities 是身份授权上限；hello 能力必须是其子集，Server 路由还会在每次命令或终端会话入队前检查对应 capability；
 - API、Access Log、Trace、审计和测试产物不得记录原始 token、私钥或 CSR 私钥材料。

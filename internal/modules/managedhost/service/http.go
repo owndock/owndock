@@ -157,16 +157,24 @@ func (s *HTTP) collection(
 		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 	case http.MethodPost:
 		var request struct {
-			Name           string             `json:"name"`
-			ConnectionMode runtimeaccess.Mode `json:"connection_mode"`
-			DirectSSHRef   string             `json:"direct_ssh_ref"`
+			Name                   string             `json:"name"`
+			ConnectionMode         runtimeaccess.Mode `json:"connection_mode"`
+			DirectSSHRef           string             `json:"direct_ssh_ref"`
+			DirectSSHAddress       string             `json:"direct_ssh_address"`
+			DirectSSHUser          string             `json:"direct_ssh_user"`
+			DirectSSHHostKeySHA256 string             `json:"direct_ssh_host_key_sha256"`
 		}
 		if !decodeRequest(w, r, &request) {
 			return
 		}
 		item, err := s.useCase.Create(
 			r.Context(), principal, request.Name, request.ConnectionMode,
-			request.DirectSSHRef, httpx.RequestIDFromContext(r.Context()),
+			biz.DirectSSHConfiguration{
+				Address: request.DirectSSHAddress, User: request.DirectSSHUser,
+				HostKeySHA256: request.DirectSSHHostKeySHA256,
+				CredentialRef: request.DirectSSHRef,
+			},
+			httpx.RequestIDFromContext(r.Context()),
 		)
 		if writeError(w, r, err) {
 			return
@@ -243,6 +251,9 @@ type hostResponse struct {
 	AgentInstanceID           string             `json:"agent_instance_id,omitempty"`
 	AgentCertificateExpiresAt *time.Time         `json:"agent_certificate_expires_at,omitempty"`
 	DirectSSHRef              string             `json:"direct_ssh_ref,omitempty"`
+	DirectSSHAddress          string             `json:"direct_ssh_address,omitempty"`
+	DirectSSHUser             string             `json:"direct_ssh_user,omitempty"`
+	DirectSSHHostKeySHA256    string             `json:"direct_ssh_host_key_sha256,omitempty"`
 	LastSeenAt                *time.Time         `json:"last_seen_at,omitempty"`
 	AgentVersion              string             `json:"agent_version,omitempty"`
 	ProtocolVersion           string             `json:"protocol_version,omitempty"`
@@ -258,7 +269,9 @@ func hostResponseFromDomain(item biz.ManagedHost) hostResponse {
 		Status: item.Status, ConnectionMode: item.ConnectionMode,
 		AgentIdentityID: item.AgentIdentityID, AgentInstanceID: item.AgentInstanceID,
 		DirectSSHRef: item.DirectSSHRef, AgentVersion: item.AgentVersion,
-		ProtocolVersion: item.ProtocolVersion, Capabilities: item.Capabilities,
+		DirectSSHAddress: item.DirectSSHAddress, DirectSSHUser: item.DirectSSHUser,
+		DirectSSHHostKeySHA256: item.DirectSSHHostKeySHA256,
+		ProtocolVersion:        item.ProtocolVersion, Capabilities: item.Capabilities,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
 	if !item.AgentCertificateExpiresAt.IsZero() {

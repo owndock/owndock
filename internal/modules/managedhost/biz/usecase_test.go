@@ -23,18 +23,128 @@ func (r *repositoryStub) AuthenticateAgent(
 	now time.Time,
 ) (AgentIdentity, error) {
 	for _, identity := range r.identities {
-		if identity.ID == certificate.IdentityID &&
-			identity.OrganizationID == certificate.OrganizationID &&
-			identity.ManagedHostID == certificate.ManagedHostID &&
-			identity.InstanceID == certificate.InstanceID &&
-			identity.CertificateSerial == certificate.CertificateSerial &&
+		if identity.ID != certificate.IdentityID ||
+			identity.OrganizationID != certificate.OrganizationID ||
+			identity.ManagedHostID != certificate.ManagedHostID ||
+			identity.InstanceID != certificate.InstanceID ||
+			!identity.RevokedAt.IsZero() {
+			continue
+		}
+		if identity.CertificateSerial == certificate.CertificateSerial &&
 			identity.CertificateSHA256 == certificate.CertificateSHA256 &&
-			identity.CertificateExpires.After(now) &&
-			identity.RevokedAt.IsZero() {
+			identity.CertificateExpires.After(now) {
 			return identity, nil
+		}
+		if identity.PreviousCertificateSerial == certificate.CertificateSerial &&
+			identity.PreviousCertificateSHA256 == certificate.CertificateSHA256 &&
+			identity.PreviousCertificateExpires.After(now) &&
+			identity.PreviousCertificateValidUntil.After(now) {
+			matched := identity
+			matched.CertificateSerial = identity.PreviousCertificateSerial
+			matched.CertificateSHA256 = identity.PreviousCertificateSHA256
+			matched.CertificateExpires = identity.PreviousCertificateExpires
+			return matched, nil
 		}
 	}
 	return AgentIdentity{}, ErrInvalidAgentIdentity
+}
+
+func (r *repositoryStub) AuthenticateAgentCertificateRotation(
+	ctx context.Context,
+	certificate AgentCertificateIdentity,
+	rotationID string,
+	csrHash string,
+	now time.Time,
+) (AgentIdentity, error) {
+	identity, err := r.AuthenticateAgent(ctx, certificate, now)
+	if err == nil {
+		return identity, nil
+	}
+	for _, candidate := range r.identities {
+		if candidate.ID == certificate.IdentityID &&
+			candidate.OrganizationID == certificate.OrganizationID &&
+			candidate.ManagedHostID == certificate.ManagedHostID &&
+			candidate.InstanceID == certificate.InstanceID &&
+			candidate.PreviousCertificateSerial == certificate.CertificateSerial &&
+			candidate.PreviousCertificateSHA256 == certificate.CertificateSHA256 &&
+			candidate.PreviousCertificateExpires.After(now) &&
+			candidate.PendingRotationID == rotationID &&
+			candidate.PendingRotationCSRHash == csrHash && candidate.RevokedAt.IsZero() {
+			return candidate, nil
+		}
+	}
+	return AgentIdentity{}, ErrInvalidAgentIdentity
+}
+
+func (r *repositoryStub) RotateAgentCertificate(
+	_ context.Context,
+	rotation AgentCertificateRotation,
+	now time.Time,
+) (IssuedCertificate, bool, error) {
+	for index := range r.identities {
+		identity := &r.identities[index]
+		if identity.ID != rotation.Presented.IdentityID ||
+			identity.OrganizationID != rotation.Presented.OrganizationID ||
+			identity.ManagedHostID != rotation.Presented.ManagedHostID ||
+			identity.InstanceID != rotation.Presented.InstanceID {
+			continue
+		}
+		if identity.PendingRotationID != "" {
+			if identity.PendingRotationID != rotation.ID ||
+				identity.PendingRotationCSRHash != rotation.CSRHash {
+				return IssuedCertificate{}, false, ErrInvalidAgentIdentity
+			}
+			return IssuedCertificate{
+				CertificatePEM:   append([]byte(nil), identity.PendingCertificatePEM...),
+				CACertificatePEM: append([]byte(nil), identity.PendingCACertificatePEM...),
+				Serial:           identity.CertificateSerial, SHA256: identity.CertificateSHA256,
+				ExpiresAt: identity.CertificateExpires,
+			}, false, nil
+		}
+		if identity.CertificateSerial != rotation.Presented.CertificateSerial ||
+			identity.CertificateSHA256 != rotation.Presented.CertificateSHA256 ||
+			!identity.CertificateExpires.After(now) {
+			return IssuedCertificate{}, false, ErrInvalidAgentIdentity
+		}
+		identity.PreviousCertificateSerial = identity.CertificateSerial
+		identity.PreviousCertificateSHA256 = identity.CertificateSHA256
+		identity.PreviousCertificateExpires = identity.CertificateExpires
+		identity.PreviousCertificateValidUntil = rotation.PreviousValidUntil
+		identity.CertificateSerial = rotation.Certificate.Serial
+		identity.CertificateSHA256 = rotation.Certificate.SHA256
+		identity.CertificateExpires = rotation.Certificate.ExpiresAt
+		identity.PendingRotationID = rotation.ID
+		identity.PendingRotationCSRHash = rotation.CSRHash
+		identity.PendingCertificatePEM = append([]byte(nil), rotation.Certificate.CertificatePEM...)
+		identity.PendingCACertificatePEM = append([]byte(nil), rotation.Certificate.CACertificatePEM...)
+		return rotation.Certificate, true, nil
+	}
+	return IssuedCertificate{}, false, ErrInvalidAgentIdentity
+}
+
+func (r *repositoryStub) ConfirmAgentCertificate(
+	_ context.Context,
+	certificate AgentCertificateIdentity,
+	_ time.Time,
+) (bool, error) {
+	for index := range r.identities {
+		identity := &r.identities[index]
+		if identity.ID == certificate.IdentityID &&
+			identity.CertificateSerial == certificate.CertificateSerial &&
+			identity.CertificateSHA256 == certificate.CertificateSHA256 &&
+			identity.PendingRotationID != "" {
+			identity.PreviousCertificateSerial = ""
+			identity.PreviousCertificateSHA256 = ""
+			identity.PreviousCertificateExpires = time.Time{}
+			identity.PreviousCertificateValidUntil = time.Time{}
+			identity.PendingRotationID = ""
+			identity.PendingRotationCSRHash = ""
+			identity.PendingCertificatePEM = nil
+			identity.PendingCACertificatePEM = nil
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (r *repositoryStub) ConnectAgent(
@@ -276,7 +386,7 @@ func TestCreateManagedHostIsOrganizationScopedAndAudited(t *testing.T) {
 	}
 	item, err := useCase.Create(
 		t.Context(), owner, "Production Host", runtimeaccess.ModeDirectDocker,
-		"", "request-1",
+		DirectSSHConfiguration{}, "request-1",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -301,7 +411,8 @@ func TestMaintainerCanReadButCannotCreateManagedHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := useCase.Create(
-		t.Context(), maintainer, "Denied Host", runtimeaccess.ModeAgent, "", "",
+		t.Context(), maintainer, "Denied Host", runtimeaccess.ModeAgent,
+		DirectSSHConfiguration{}, "",
 	); err != security.ErrForbidden {
 		t.Fatalf("create error = %v", err)
 	}
@@ -438,6 +549,107 @@ func TestInvalidAgentMetadataIsRejectedBeforeCertificateSigning(t *testing.T) {
 	}
 	if issuer.calls != 0 {
 		t.Fatalf("certificate issuer calls = %d, want 0", issuer.calls)
+	}
+}
+
+func TestAgentCertificateRotationIsAuthenticatedIdempotentAndKeepsShortFallback(t *testing.T) {
+	now := time.Unix(500, 0).UTC()
+	repository := &repositoryStub{
+		items: []ManagedHost{{
+			ID: "host-1", OrganizationID: "organization-1",
+			Status: StatusOnline, ConnectionMode: runtimeaccess.ModeAgent,
+			AgentIdentityID: "identity-1", AgentInstanceID: "instance-1",
+		}},
+		identities: []AgentIdentity{{
+			ID: "identity-1", OrganizationID: "organization-1",
+			ManagedHostID: "host-1", InstanceID: "instance-1",
+			CertificateSerial: "old-serial", CertificateSHA256: "old-fingerprint",
+			CertificateExpires: now.Add(time.Hour),
+			Capabilities:       []string{"runtime.probe"},
+		}},
+	}
+	issuer := &countingCertificateIssuerStub{}
+	audits := &auditStub{}
+	nextID := 0
+	useCase := NewUseCase(
+		repository, transaction.Passthrough{}, audits,
+		func() (string, error) {
+			nextID++
+			return "audit-" + time.Unix(int64(nextID), 0).Format("150405"), nil
+		},
+		func() time.Time { return now },
+	).WithEnrollment(
+		repository, enrollmentTokensStub{}, issuer, 15*time.Minute,
+	).WithAgentControl(repository, nil, []string{"v1"})
+	presented := AgentCertificateIdentity{
+		OrganizationID: "organization-1", ManagedHostID: "host-1",
+		IdentityID: "identity-1", InstanceID: "instance-1",
+		CertificateSerial: "old-serial", CertificateSHA256: "old-fingerprint",
+	}
+	first, err := useCase.RotateAgentCertificate(
+		t.Context(), presented, "rotation-1", []byte("signed-csr"), "request-1",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := repository.identities[0]
+	if first.Identity.CertificateSerial != "serial" ||
+		identity.CertificateSerial != "serial" ||
+		identity.PreviousCertificateSerial != "old-serial" ||
+		identity.PendingRotationID != "rotation-1" ||
+		!identity.PreviousCertificateValidUntil.Equal(now.Add(agentCertificateRotationGrace)) ||
+		len(audits.events) != 1 || audits.events[0].Action != "agent_certificate.rotate" {
+		t.Fatalf("credentials=%+v identity=%+v audits=%+v", first, identity, audits.events)
+	}
+	retried, err := useCase.RotateAgentCertificate(
+		t.Context(), presented, "rotation-1", []byte("signed-csr"), "request-2",
+	)
+	if err != nil || string(retried.CertificatePEM) != "certificate" ||
+		len(audits.events) != 1 {
+		t.Fatalf("retry=%+v error=%v audits=%+v", retried, err, audits.events)
+	}
+	if _, err := useCase.RotateAgentCertificate(
+		t.Context(), presented, "rotation-2", []byte("another-csr"), "request-3",
+	); err != ErrInvalidAgentIdentity {
+		t.Fatalf("conflicting retry error = %v", err)
+	}
+	if _, err := repository.AuthenticateAgent(t.Context(), presented, now.Add(9*time.Minute)); err != nil {
+		t.Fatalf("old certificate during grace error = %v", err)
+	}
+	if _, err := repository.AuthenticateAgent(t.Context(), presented, now.Add(11*time.Minute)); err != ErrInvalidAgentIdentity {
+		t.Fatalf("old certificate after grace error = %v", err)
+	}
+	now = now.Add(11 * time.Minute)
+	recovered, err := useCase.RotateAgentCertificate(
+		t.Context(), presented, "rotation-1", []byte("signed-csr"), "request-recovery",
+	)
+	if err != nil || string(recovered.CertificatePEM) != "certificate" || len(audits.events) != 1 {
+		t.Fatalf("late recovery=%+v error=%v audits=%+v", recovered, err, audits.events)
+	}
+	if _, err := useCase.RotateAgentCertificate(
+		t.Context(), presented, "rotation-1", []byte("different-csr"), "request-conflict",
+	); err != ErrInvalidAgentIdentity {
+		t.Fatalf("late conflicting recovery error = %v", err)
+	}
+	newCertificate := AgentCertificateIdentity{
+		OrganizationID: "organization-1", ManagedHostID: "host-1",
+		IdentityID: "identity-1", InstanceID: "instance-1",
+		CertificateSerial: "serial", CertificateSHA256: "fingerprint",
+	}
+	if _, err := useCase.OpenAgentSession(t.Context(), newCertificate, AgentHello{
+		OrganizationID: "organization-1", ManagedHostID: "host-1",
+		IdentityID: "identity-1", InstanceID: "instance-1",
+		BootID: "boot-rotated", AgentVersion: "1.0.0",
+		ProtocolVersion: "v1", Capabilities: []string{"runtime.probe"},
+	}, "request-4"); err != nil {
+		t.Fatal(err)
+	}
+	if repository.identities[0].PendingRotationID != "" ||
+		repository.identities[0].PreviousCertificateSerial != "" {
+		t.Fatalf("confirmed rotation was not cleaned: %+v", repository.identities[0])
+	}
+	if _, err := repository.AuthenticateAgent(t.Context(), presented, now.Add(time.Minute)); err != ErrInvalidAgentIdentity {
+		t.Fatalf("old certificate after confirmation error = %v", err)
 	}
 }
 

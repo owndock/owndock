@@ -1,6 +1,7 @@
 package biz
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -118,6 +119,196 @@ func TestUseCaseConsumesTerminalTicketExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestUseCaseConnectContainerConsumesTicketBeforeOpeningStream(t *testing.T) {
+	useCase, sessions, audits := newTestUseCase(t)
+	gateway := &terminalContainerGatewayStub{stream: &terminalStreamStub{}}
+	useCase.WithContainerGateway(gateway)
+	principal := terminalPrincipal(security.RoleMaintainer, "maintainer-1")
+	credential, err := useCase.CreateContainerSession(
+		context.Background(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, stream, err := useCase.ConnectContainer(
+		context.Background(), principal, credential.Session.ID, credential.Ticket,
+		"request-connect", TerminalSize{Columns: 100, Rows: 40},
+	)
+	if err != nil || stream == nil || connected.Status != StatusOpen || gateway.opens != 1 {
+		t.Fatalf("connected = %+v, stream = %v, opens = %d, error = %v", connected, stream, gateway.opens, err)
+	}
+	stored := sessions.items[credential.Session.ID]
+	if stored.Status != StatusOpen || stored.TicketHash != "" || len(audits.events) != 2 ||
+		audits.events[1].Action != "terminal_session.connect" {
+		t.Fatalf("stored = %+v, audits = %+v", stored, audits.events)
+	}
+}
+
+func TestUseCaseConnectContainerPersistsSafeFailure(t *testing.T) {
+	useCase, sessions, audits := newTestUseCase(t)
+	useCase.WithContainerGateway(&terminalContainerGatewayStub{err: ErrStreamUnavailable})
+	principal := terminalPrincipal(security.RoleMaintainer, "maintainer-1")
+	credential, err := useCase.CreateContainerSession(
+		context.Background(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, stream, err := useCase.ConnectContainer(
+		context.Background(), principal, credential.Session.ID, credential.Ticket,
+		"request-connect", DefaultTerminalSize(),
+	)
+	if !errors.Is(err, ErrStreamUnavailable) || stream != nil {
+		t.Fatalf("stream = %v, error = %v", stream, err)
+	}
+	stored := sessions.items[credential.Session.ID]
+	if stored.Status != StatusFailed || stored.Active ||
+		stored.CloseReason != CloseReasonConnectionFailed ||
+		stored.SafeErrorCode != "terminal_connection_failed" || len(audits.events) != 3 ||
+		audits.events[2].Action != "terminal_session.fail" {
+		t.Fatalf("stored = %+v, audits = %+v", stored, audits.events)
+	}
+}
+
+func TestUseCaseConnectContainerWithTicketRevalidatesBoundLoginSession(t *testing.T) {
+	useCase, _, _ := newTestUseCase(t)
+	useCase.WithContainerGateway(&terminalContainerGatewayStub{stream: &terminalStreamStub{}})
+	resolver := &terminalPrincipalResolverStub{principal: terminalPrincipal(
+		security.RoleMaintainer,
+		"maintainer-1",
+	)}
+	useCase.WithPrincipalResolver(resolver)
+	credential, err := useCase.CreateContainerSession(
+		context.Background(), resolver.principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, stream, err := useCase.ConnectContainerWithTicket(
+		context.Background(), credential.Session.ID, credential.Ticket,
+		"request-connect", DefaultTerminalSize(),
+	)
+	if err != nil || connected.Status != StatusOpen || stream == nil || resolver.calls != 1 {
+		t.Fatalf("connected = %+v, stream = %v, calls = %d, error = %v", connected, stream, resolver.calls, err)
+	}
+	if resolver.organizationID != resolver.principal.OrganizationID ||
+		resolver.userID != resolver.principal.UserID ||
+		resolver.sessionID != resolver.principal.SessionID {
+		t.Fatalf("resolver scope = %q/%q/%q", resolver.organizationID, resolver.userID, resolver.sessionID)
+	}
+}
+
+func TestUseCaseConnectsHostTicketThroughFixedHostGateway(t *testing.T) {
+	useCase, sessions, audits := newTestUseCase(t)
+	gateway := &terminalHostGatewayStub{stream: &terminalStreamStub{}}
+	useCase.WithHostGateway(gateway)
+	resolver := &terminalPrincipalResolverStub{principal: terminalPrincipal(
+		security.RoleOwner,
+		"owner-1",
+	)}
+	useCase.WithPrincipalResolver(resolver)
+	credential, err := useCase.CreateHostSession(
+		t.Context(), resolver.principal, "host-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, stream, err := useCase.ConnectWithTicket(
+		t.Context(), credential.Session.ID, credential.Ticket,
+		"request-connect", TerminalSize{Columns: 100, Rows: 40},
+	)
+	if err != nil || stream == nil || connected.Kind != KindHost ||
+		gateway.opens != 1 || gateway.target.Kind != KindHost ||
+		gateway.target.ManagedHostID != "host-1" {
+		t.Fatalf(
+			"connected = %+v, gateway = %+v, stream = %v, error = %v",
+			connected, gateway, stream, err,
+		)
+	}
+	stored := sessions.items[credential.Session.ID]
+	if stored.Status != StatusOpen || stored.TicketHash != "" ||
+		len(audits.events) != 2 || audits.events[1].Action != "terminal_session.connect" {
+		t.Fatalf("stored = %+v, audits = %+v", stored, audits.events)
+	}
+}
+
+func TestUseCaseReviewsExplicitlyTerminatedConnectedSession(t *testing.T) {
+	useCase, _, _ := newTestUseCase(t)
+	useCase.WithContainerGateway(&terminalContainerGatewayStub{
+		stream: &terminalStreamStub{},
+	})
+	resolver := &terminalPrincipalResolverStub{principal: terminalPrincipal(
+		security.RoleMaintainer,
+		"maintainer-1",
+	)}
+	useCase.WithPrincipalResolver(resolver)
+	credential, err := useCase.CreateContainerSession(
+		t.Context(), resolver.principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, _, err := useCase.ConnectContainerWithTicket(
+		t.Context(), credential.Session.ID, credential.Ticket,
+		"request-connect", DefaultTerminalSize(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	review, err := useCase.ReviewConnectedSession(t.Context(), connected)
+	if err != nil || review.Terminate {
+		t.Fatalf("initial review = %+v, error = %v", review, err)
+	}
+	if _, err := useCase.TerminateSession(
+		t.Context(), resolver.principal, connected.ID, "request-terminate",
+	); err != nil {
+		t.Fatal(err)
+	}
+	review, err = useCase.ReviewConnectedSession(t.Context(), connected)
+	if err != nil || !review.Terminate ||
+		review.Reason != CloseReasonUserRequested || review.GracePeriod != 0 {
+		t.Fatalf("terminated review = %+v, error = %v", review, err)
+	}
+}
+
+func TestUseCaseReviewsRevokedLoginWithPolicyGrace(t *testing.T) {
+	useCase, _, _ := newTestUseCase(t)
+	useCase.WithContainerGateway(&terminalContainerGatewayStub{
+		stream: &terminalStreamStub{},
+	})
+	resolver := &terminalPrincipalResolverStub{principal: terminalPrincipal(
+		security.RoleMaintainer,
+		"maintainer-1",
+	)}
+	useCase.WithPrincipalResolver(resolver)
+	credential, err := useCase.CreateContainerSession(
+		t.Context(), resolver.principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, _, err := useCase.ConnectContainerWithTicket(
+		t.Context(), credential.Session.ID, credential.Ticket,
+		"request-connect", DefaultTerminalSize(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.err = security.ErrUnauthenticated
+	review, err := useCase.ReviewConnectedSession(t.Context(), connected)
+	if err != nil || !review.Terminate ||
+		review.Reason != CloseReasonPermissionRevoked ||
+		review.GracePeriod != DefaultRevocationGrace {
+		t.Fatalf("revoked review = %+v, error = %v", review, err)
+	}
+}
+
 func newTestUseCase(t *testing.T) (*UseCase, *terminalSessionStore, *terminalAuditStore) {
 	t.Helper()
 	sequence := 0
@@ -161,6 +352,13 @@ type terminalSessionStore struct{ items map[string]TerminalSession }
 func (s *terminalSessionStore) GetSession(_ context.Context, organizationID, sessionID string) (TerminalSession, error) {
 	item, ok := s.items[sessionID]
 	if !ok || item.OrganizationID != organizationID {
+		return TerminalSession{}, ErrSessionNotFound
+	}
+	return item, nil
+}
+func (s *terminalSessionStore) GetSessionForConnect(_ context.Context, sessionID string) (TerminalSession, error) {
+	item, ok := s.items[sessionID]
+	if !ok || item.Status != StatusPending || !item.Active {
 		return TerminalSession{}, ErrSessionNotFound
 	}
 	return item, nil
@@ -238,4 +436,63 @@ type terminalAuditStore struct{ events []sharedaudit.Event }
 func (s *terminalAuditStore) Record(_ context.Context, event sharedaudit.Event) error {
 	s.events = append(s.events, event)
 	return nil
+}
+
+type terminalContainerGatewayStub struct {
+	stream TerminalStream
+	err    error
+	opens  int
+}
+
+type terminalHostGatewayStub struct {
+	stream TerminalStream
+	err    error
+	opens  int
+	target Target
+}
+
+func (g *terminalHostGatewayStub) OpenHost(
+	_ context.Context,
+	_ string,
+	target Target,
+	_ TerminalSize,
+) (TerminalStream, error) {
+	g.opens++
+	g.target = target
+	return g.stream, g.err
+}
+
+func (g *terminalContainerGatewayStub) OpenContainer(
+	context.Context,
+	string,
+	Target,
+	TerminalSize,
+) (TerminalStream, error) {
+	g.opens++
+	return g.stream, g.err
+}
+
+type terminalStreamStub struct{ bytes.Buffer }
+
+func (*terminalStreamStub) Close() error { return nil }
+func (*terminalStreamStub) Resize(context.Context, TerminalSize) error {
+	return nil
+}
+
+type terminalPrincipalResolverStub struct {
+	principal      security.Principal
+	err            error
+	calls          int
+	organizationID string
+	userID         string
+	sessionID      string
+}
+
+func (r *terminalPrincipalResolverStub) ResolveTerminalPrincipal(
+	_ context.Context,
+	organizationID, userID, sessionID string,
+) (security.Principal, error) {
+	r.calls++
+	r.organizationID, r.userID, r.sessionID = organizationID, userID, sessionID
+	return r.principal, r.err
 }

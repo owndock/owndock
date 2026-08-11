@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -25,8 +26,86 @@ import (
 	"github.com/owndock/owndock/internal/shared/transaction"
 )
 
+func commandCapabilities() []string {
+	capabilities := agentprotocol.SupportedCapabilities()
+	result := capabilities[:0]
+	for _, capability := range capabilities {
+		if capability != agentprotocol.CapabilityTerminalContainer &&
+			capability != agentprotocol.CapabilityTerminalHost {
+			result = append(result, capability)
+		}
+	}
+	return result
+}
+
 type conformanceExecutor struct {
-	calls atomic.Int64
+	calls             atomic.Int64
+	containerTerminal *conformanceTerminalStream
+	hostTerminal      *conformanceTerminalStream
+	opens             chan agentprotocol.TerminalOpen
+}
+
+func (e *conformanceExecutor) OpenContainerTerminal(
+	_ context.Context,
+	open agentprotocol.TerminalOpen,
+) (agentprotocol.TerminalStream, error) {
+	e.opens <- open
+	return e.containerTerminal, nil
+}
+
+func (e *conformanceExecutor) OpenHostTerminal(
+	_ context.Context,
+	open agentprotocol.TerminalOpen,
+) (agentprotocol.TerminalStream, error) {
+	e.opens <- open
+	return e.hostTerminal, nil
+}
+
+type conformanceTerminalStream struct {
+	input   chan []byte
+	output  chan []byte
+	resizes chan [2]uint16
+	closed  chan struct{}
+	once    sync.Once
+}
+
+func newConformanceTerminalStream() *conformanceTerminalStream {
+	return &conformanceTerminalStream{
+		input: make(chan []byte, 1), output: make(chan []byte, 1),
+		resizes: make(chan [2]uint16, 1), closed: make(chan struct{}),
+	}
+}
+
+func (s *conformanceTerminalStream) Read(payload []byte) (int, error) {
+	select {
+	case value := <-s.output:
+		return copy(payload, value), nil
+	case <-s.closed:
+		return 0, io.EOF
+	}
+}
+
+func (s *conformanceTerminalStream) Write(payload []byte) (int, error) {
+	copyOfPayload := append([]byte(nil), payload...)
+	select {
+	case s.input <- copyOfPayload:
+		return len(payload), nil
+	case <-s.closed:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (s *conformanceTerminalStream) Resize(
+	_ context.Context,
+	columns, rows uint16,
+) error {
+	s.resizes <- [2]uint16{columns, rows}
+	return nil
+}
+
+func (s *conformanceTerminalStream) Close() error {
+	s.once.Do(func() { close(s.closed) })
+	return nil
 }
 
 func (e *conformanceExecutor) Execute(
@@ -97,7 +176,11 @@ func TestAgentClientAndServerStreamConformance(t *testing.T) {
 	))
 	defer server.Close()
 
-	executor := &conformanceExecutor{}
+	executor := &conformanceExecutor{
+		containerTerminal: newConformanceTerminalStream(),
+		hostTerminal:      newConformanceTerminalStream(),
+		opens:             make(chan agentprotocol.TerminalOpen, 1),
+	}
 	client, err := agentcontrol.NewClient(
 		server.Client(),
 		executor,
@@ -115,11 +198,14 @@ func TestAgentClientAndServerStreamConformance(t *testing.T) {
 			ServerSilenceTimeout:  4 * time.Second,
 			MaxFrameBytes:         64 * 1024,
 			MaxConcurrentCommands: 2,
+			Capabilities:          agentprotocol.SupportedCapabilities(),
 		},
 	)
 	if err != nil {
 		t.Fatal(err)
 	}
+	client.WithContainerTerminal(executor)
+	client.WithHostTerminal(executor)
 	ctx, cancel := context.WithCancel(t.Context())
 	clientDone := make(chan error, 1)
 	go func() { clientDone <- client.Run(ctx) }()
@@ -192,6 +278,120 @@ func TestAgentClientAndServerStreamConformance(t *testing.T) {
 			err,
 			executor.calls.Load(),
 		)
+	}
+	terminalResult := make(chan agentprotocol.TerminalStream, 1)
+	terminalErrors := make(chan error, 1)
+	terminalRequest := agentprotocol.TerminalOpen{
+		Kind:         agentprotocol.TerminalKindContainer,
+		DeploymentID: "deployment-1", ProjectID: "project-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-1", ContainerName: "owndock-container-1",
+		CutoverSequence: 1, Columns: 120, Rows: 30,
+	}
+	go func() {
+		terminalStream, terminalErr := registry.OpenTerminal(
+			t.Context(), "host-1", "terminal-session-1", terminalRequest,
+		)
+		terminalResult <- terminalStream
+		terminalErrors <- terminalErr
+	}()
+	select {
+	case got := <-executor.opens:
+		if got != terminalRequest {
+			t.Fatalf("Agent terminal open = %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive terminal open")
+	}
+	terminalStream := <-terminalResult
+	if terminalErr := <-terminalErrors; terminalErr != nil {
+		t.Fatal(terminalErr)
+	}
+	if _, err := terminalStream.Write([]byte("pwd\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case input := <-executor.containerTerminal.input:
+		if string(input) != "pwd\n" {
+			t.Fatalf("Agent terminal input = %q", input)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive terminal input")
+	}
+	if err := terminalStream.Resize(t.Context(), 132, 43); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case size := <-executor.containerTerminal.resizes:
+		if size != [2]uint16{132, 43} {
+			t.Fatalf("Agent terminal resize = %v", size)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive terminal resize")
+	}
+	executor.containerTerminal.output <- []byte("/workspace\n")
+	buffer := make([]byte, 32)
+	read, err := terminalStream.Read(buffer)
+	if err != nil || string(buffer[:read]) != "/workspace\n" {
+		t.Fatalf("Agent terminal output = %q, error = %v", buffer[:read], err)
+	}
+	if err := terminalStream.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	hostResult := make(chan agentprotocol.TerminalStream, 1)
+	hostErrors := make(chan error, 1)
+	hostRequest := agentprotocol.TerminalOpen{
+		Kind: agentprotocol.TerminalKindHost, Columns: 100, Rows: 40,
+	}
+	go func() {
+		hostStream, hostErr := registry.OpenTerminal(
+			t.Context(), "host-1", "host-terminal-session-1", hostRequest,
+		)
+		hostResult <- hostStream
+		hostErrors <- hostErr
+	}()
+	select {
+	case got := <-executor.opens:
+		if got != hostRequest {
+			t.Fatalf("Agent host terminal open = %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive host terminal open")
+	}
+	hostStream := <-hostResult
+	if hostErr := <-hostErrors; hostErr != nil {
+		t.Fatal(hostErr)
+	}
+	if _, err := hostStream.Write([]byte("whoami\n")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case input := <-executor.hostTerminal.input:
+		if string(input) != "whoami\n" {
+			t.Fatalf("Agent host terminal input = %q", input)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive host terminal input")
+	}
+	if err := hostStream.Resize(t.Context(), 140, 50); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case size := <-executor.hostTerminal.resizes:
+		if size != [2]uint16{140, 50} {
+			t.Fatalf("Agent host terminal resize = %v", size)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Agent did not receive host terminal resize")
+	}
+	executor.hostTerminal.output <- []byte("owndock-terminal\n")
+	read, err = hostStream.Read(buffer)
+	if err != nil || string(buffer[:read]) != "owndock-terminal\n" {
+		t.Fatalf("Agent host terminal output = %q, error = %v", buffer[:read], err)
+	}
+	if err := hostStream.Close(); err != nil {
+		t.Fatal(err)
 	}
 	cancel()
 	select {
@@ -489,7 +689,7 @@ func runRuntimeInventoryReconnectScenario(t *testing.T, loseSnapshot bool) {
 			CertificateSerial:  "2a",
 			CertificateSHA256:  hex.EncodeToString(fingerprint[:]),
 			CertificateExpires: time.Now().Add(time.Hour),
-			Capabilities:       agentprotocol.SupportedCapabilities(),
+			Capabilities:       commandCapabilities(),
 		},
 		host: biz.ManagedHost{
 			ID: "host-1", OrganizationID: "organization-1",

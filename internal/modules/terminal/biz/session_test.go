@@ -13,7 +13,7 @@ func TestTerminalSessionLifecycleAndTicketRedaction(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	policy := DefaultProjectPolicy("organization-1", "project-1")
 	session, err := NewTerminalSession(
-		"session-1", "user-1", strings.Repeat("a", 64), "192.0.2.10",
+		"session-1", "user-1", "login-session-1", strings.Repeat("a", 64), "192.0.2.10",
 		"OwnDock-Web/1.0", "request-1",
 		Target{
 			Kind: KindContainer, OrganizationID: "organization-1", ProjectID: "project-1",
@@ -52,7 +52,7 @@ func TestTerminalSessionLifecycleAndTicketRedaction(t *testing.T) {
 func TestPendingTerminalSessionTerminationInvalidatesTicket(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	session, err := NewTerminalSession(
-		"session-1", "owner-1", strings.Repeat("b", 64), "192.0.2.10",
+		"session-1", "owner-1", "login-session-1", strings.Repeat("b", 64), "192.0.2.10",
 		"Browser/1.0", "request-1",
 		Target{Kind: KindHost, OrganizationID: "organization-1", ManagedHostID: "host-1", ConnectionMode: runtimeaccess.ModeAgent},
 		DefaultOrganizationPolicy("organization-1"), now,
@@ -80,7 +80,7 @@ func TestTerminalSessionRejectsUnsafeClientMetadata(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			_, err := NewTerminalSession(
-				"session-1", "owner-1", strings.Repeat("c", 64), test.clientIP,
+				"session-1", "owner-1", "login-session-1", strings.Repeat("c", 64), test.clientIP,
 				test.userAgent, test.requestID, baseTarget,
 				DefaultOrganizationPolicy("organization-1"), time.Now(),
 			)

@@ -85,9 +85,21 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var first agentFrame
 	if err := decodeAgentFrame(scanner.Bytes(), &first); err != nil ||
 		first.Type != "hello" || first.Sequence == 0 || first.Hello == nil ||
-		first.CommandResult != nil {
+		first.CommandResult != nil || first.Terminal != nil {
 		httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_agent_hello")
 		return
+	}
+	if capabilityPresent(
+		first.Hello.Capabilities,
+		agentprotocol.CapabilityTerminalContainer,
+	) || capabilityPresent(
+		first.Hello.Capabilities,
+		agentprotocol.CapabilityTerminalHost,
+	) {
+		if s.maxFrameBytes < agentprotocol.MinimumTerminalFrameBytes {
+			httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_agent_hello")
+			return
+		}
 	}
 	session, err := s.useCase.OpenAgentSession(
 		r.Context(),
@@ -115,6 +127,7 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		session.Capabilities,
 		cancel,
 	)
+	terminalFrames := s.registry.TerminalFrames(session.ManagedHostID, session.ID)
 	defer func() {
 		cancel()
 		s.registry.Unregister(session.ManagedHostID, session.ID)
@@ -170,8 +183,7 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			frame := read.frame
-			if read.err != nil || frame.Sequence <= lastAgentSequence ||
-				frame.Hello != nil {
+			if read.err != nil || frame.Sequence <= lastAgentSequence || frame.Hello != nil {
 				serverSequence++
 				_ = writeFrame(serverFrame{
 					Type: "error", Sequence: serverSequence,
@@ -182,7 +194,7 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			lastAgentSequence = frame.Sequence
 			switch frame.Type {
 			case "heartbeat":
-				if frame.CommandResult != nil {
+				if frame.CommandResult != nil || frame.Terminal != nil {
 					serverSequence++
 					_ = writeFrame(serverFrame{
 						Type: "error", Sequence: serverSequence,
@@ -209,7 +221,7 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			case "command_result":
-				if frame.CommandResult == nil {
+				if frame.CommandResult == nil || frame.Terminal != nil {
 					serverSequence++
 					_ = writeFrame(serverFrame{
 						Type: "error", Sequence: serverSequence,
@@ -237,6 +249,27 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}); err != nil {
 					return
 				}
+			case "terminal":
+				if frame.Terminal == nil || frame.CommandResult != nil {
+					serverSequence++
+					_ = writeFrame(serverFrame{
+						Type: "error", Sequence: serverSequence,
+						Code: "invalid_agent_frame",
+					})
+					return
+				}
+				if err := s.registry.CompleteTerminalFrame(
+					session.ManagedHostID,
+					session.ID,
+					*frame.Terminal,
+				); err != nil && !errors.Is(err, biz.ErrAgentBackpressure) {
+					serverSequence++
+					_ = writeFrame(serverFrame{
+						Type: "error", Sequence: serverSequence,
+						Code: "invalid_terminal_frame",
+					})
+					return
+				}
 			default:
 				serverSequence++
 				_ = writeFrame(serverFrame{
@@ -262,6 +295,17 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}); err != nil {
 				return
 			}
+		case terminalFrame, open := <-terminalFrames:
+			if !open {
+				return
+			}
+			serverSequence++
+			if err := writeFrame(serverFrame{
+				Type: "terminal", Sequence: serverSequence,
+				Terminal: &terminalFrame,
+			}); err != nil {
+				return
+			}
 		case <-streamContext.Done():
 			return
 		}
@@ -269,10 +313,11 @@ func (s *AgentStream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type agentFrame struct {
-	Type          string              `json:"type"`
-	Sequence      uint64              `json:"sequence"`
-	Hello         *agentHello         `json:"hello,omitempty"`
-	CommandResult *agentCommandResult `json:"command_result,omitempty"`
+	Type          string                       `json:"type"`
+	Sequence      uint64                       `json:"sequence"`
+	Hello         *agentHello                  `json:"hello,omitempty"`
+	CommandResult *agentCommandResult          `json:"command_result,omitempty"`
+	Terminal      *agentprotocol.TerminalFrame `json:"terminal,omitempty"`
 }
 
 type agentHello struct {
@@ -287,17 +332,27 @@ type agentHello struct {
 }
 
 type serverFrame struct {
-	Type                     string         `json:"type"`
-	Sequence                 uint64         `json:"sequence"`
-	SessionID                string         `json:"session_id,omitempty"`
-	ProtocolVersion          string         `json:"protocol_version,omitempty"`
-	HeartbeatIntervalSeconds int64          `json:"heartbeat_interval_seconds,omitempty"`
-	MaxFrameBytes            int            `json:"max_frame_bytes,omitempty"`
-	AcknowledgedSequence     uint64         `json:"acknowledged_sequence,omitempty"`
-	ServerTime               time.Time      `json:"server_time,omitzero"`
-	Code                     string         `json:"code,omitempty"`
-	CommandID                string         `json:"command_id,omitempty"`
-	Command                  *serverCommand `json:"command,omitempty"`
+	Type                     string                       `json:"type"`
+	Sequence                 uint64                       `json:"sequence"`
+	SessionID                string                       `json:"session_id,omitempty"`
+	ProtocolVersion          string                       `json:"protocol_version,omitempty"`
+	HeartbeatIntervalSeconds int64                        `json:"heartbeat_interval_seconds,omitempty"`
+	MaxFrameBytes            int                          `json:"max_frame_bytes,omitempty"`
+	AcknowledgedSequence     uint64                       `json:"acknowledged_sequence,omitempty"`
+	ServerTime               time.Time                    `json:"server_time,omitzero"`
+	Code                     string                       `json:"code,omitempty"`
+	CommandID                string                       `json:"command_id,omitempty"`
+	Command                  *serverCommand               `json:"command,omitempty"`
+	Terminal                 *agentprotocol.TerminalFrame `json:"terminal,omitempty"`
+}
+
+func capabilityPresent(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 type agentCommandResult struct {

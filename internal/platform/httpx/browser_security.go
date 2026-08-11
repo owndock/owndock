@@ -58,6 +58,13 @@ func BrowserCORS(allowedOrigins []string) func(http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			// Terminal WebSocket handshakes use a stricter same-origin policy in
+			// their dedicated transport. REST CORS allowlists are intentionally
+			// not reused for this ambient-cookie boundary.
+			if isTerminalWebSocketHandshake(r) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			originValues := r.Header.Values("Origin")
 			if len(originValues) == 0 {
 				next.ServeHTTP(w, r)
@@ -94,6 +101,25 @@ func BrowserCORS(allowedOrigins []string) func(http.Handler) http.Handler {
 			w.WriteHeader(http.StatusNoContent)
 		})
 	}
+}
+
+func isTerminalWebSocketHandshake(r *http.Request) bool {
+	return r.Method == http.MethodGet &&
+		strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") &&
+		headerContainsToken(r.Header.Values("Connection"), "upgrade") &&
+		strings.HasPrefix(r.URL.Path, "/api/v1/terminal-sessions/") &&
+		strings.HasSuffix(r.URL.Path, ":connect")
+}
+
+func headerContainsToken(values []string, expected string) bool {
+	for _, value := range values {
+		for _, token := range strings.Split(value, ",") {
+			if strings.EqualFold(strings.TrimSpace(token), expected) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func setBrowserSecurityHeaders(header http.Header) {

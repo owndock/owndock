@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能使用已签发的机器证书连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块和有界 Event 续读。Server 已有默认关闭的 Inventory 全量与 Event Worker；Inventory 已覆盖重连、快照丢失、背压、多 Server 调度门禁、Docker 时间游标和失败不推进游标。自动安装、证书轮换和部署/终端的真实多主机故障系统验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能使用已签发的机器证书连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持证书到期前自动轮换、响应丢失恢复和短时双证书过渡。自动安装，以及部署、Inventory、轮换和终端的真实多主机故障系统验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -63,8 +63,8 @@ control:
   instance_id: installation-1
   boot_id_file: /proc/sys/kernel/random/boot_id
   ca_certificate_file: /etc/owndock/agent-ca.pem
-  client_certificate_file: /etc/owndock/agent.pem
-  client_private_key_file: /etc/owndock/agent-key.pem
+  client_certificate_file: /etc/owndock/agent-identity.pem
+  client_private_key_file: /etc/owndock/agent-identity.pem
   handshake_timeout: 10s
   server_silence_timeout: 45s
   reconnect_minimum: 1s
@@ -82,6 +82,20 @@ control:
     - runtime.inventory.chunk
     - runtime.inventory.release
     - runtime.inventory.events
+    - terminal.container
+    - terminal.host
+
+host_terminal:
+  enabled: true
+  user: owndock-terminal
+  shell: /bin/sh
+  termination_grace: 5s
+
+certificate_rotation:
+  enabled: true
+  renew_before: 168h
+  retry_delay: 15m
+  request_timeout: 30s
 
 runtime:
   docker_socket: /var/run/docker.sock
@@ -103,7 +117,9 @@ runtime:
 - `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不淘汰旧水位；删除 Application/Environment/Runtime Target 时的生命周期感知回收尚未实现；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
-- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，并要求 `max_frame_bytes >= 65536`。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
+- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
+- 启用 `certificate_rotation` 时，`client_certificate_file` 与 `client_private_key_file` 必须指向同一个 `0600` PEM identity bundle。Agent 默认在到期前 7 天生成新密钥和 CSR；失败按 `retry_delay` 重试，单次请求受 `request_timeout` 限制。轮换写入器会在同目录创建受限临时文件，验证本机 CA、固定 SPIFFE Agent 身份、clientAuth、有效期和密钥配对后，以一次 rename 替换整个 bundle，并 fsync 文件与目录；无效或属于其他 Host/instance 的证书不会覆盖现有身份。每次新的 TLS 握手都会重新打开 bundle 并重复普通文件、禁止 symlink 和权限检查，因此替换后可以主动重连而不必重启 Agent。
+- 新 CSR、私钥和 rotation ID 会先保存到 bundle 旁的 `0600` pending 文件。请求成功但响应丢失或 Agent 重启时会复用同一请求；新证书安装成功后才删除 pending 文件。Server 最多允许旧证书继续建立普通连接 10 分钟，并在新证书首次完成 hello 后立即撤销旧证书的过渡资格。超过 10 分钟后，仍有效的旧证书只能凭原 rotation ID/CSR hash 取回已保存响应，不能建立控制流或发起新轮换。
 
 运行：
 
@@ -165,6 +181,12 @@ sequenceDiagram
         S-->>A: release
         Note over A,C: Inventory 不写入磁盘结果缓存
     end
+    opt 用户打开 Agent 模式容器终端
+        S-->>A: terminal OPEN(固定目标 + cutover + cols/rows)
+        A->>D: 再次推导容器名、核对标签并启动固定 shell
+        A-->>S: READY；随后双向传输有界 TTY 帧
+        Note over A,C: 终端 payload 不写磁盘缓存、日志或审计
+    end
     alt 网络断开或 Server 暂时不可用
         A->>A: 有上限的指数退避 + jitter
         A->>S: 使用同一机器证书重新连接
@@ -173,14 +195,36 @@ sequenceDiagram
     end
 ```
 
+证书轮换不会把私钥上传到 Server：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as owndock-agent
+    participant F as 本机 identity bundle
+    participant S as OwnDock Server
+    participant M as MongoDB
+
+    A->>F: 保存 rotation ID + 新私钥 + CSR（0600）
+    A->>S: 旧证书 mTLS + rotate(rotation ID, CSR)
+    S->>M: 原子保存新证书、旧证书宽限和 pending 响应
+    S-->>A: 新证书（响应可安全重放）
+    A->>A: 用本机 CA 校验证书、身份和密钥配对
+    A->>F: fsync + rename 原子替换 bundle
+    A->>F: 删除 pending 文件并 fsync 目录
+    A->>S: 使用新证书立即重连并发送 hello
+    S->>M: 确认新证书，立即清除旧证书和 pending 响应
+    Note over A,S: 10 分钟后旧证书仍只能取回完全相同的 pending 响应
+```
+
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)。
 
 ## 当前不能做什么
 
-- 不能自动生成私钥、兑换 enrollment 并安装证书；
-- 不能自动轮换即将过期的 Agent 证书；
+- 不能自动完成首次私钥生成、enrollment 兑换、配置落盘和系统服务安装；
+- 自动证书轮换已经有代码级竞态和响应丢失恢复测试，但尚未完成真实双主机、跨控制面实例、进程崩溃点和升级/回滚系统验收；
 - 尚未完成双主机选址、断线、网络分区和旧命令延迟到达的系统验收；
-- 不能进入容器终端或主机终端；
+- 容器和主机终端已支持 Agent 模式，但仍需真实远程 Linux、两主机和浏览器故障矩阵验收；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
 - Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标和两个 Runner 竞争；Project/Host 权限查询 API 已实现，真实双主机断线/洪峰系统验收尚未完成。
 

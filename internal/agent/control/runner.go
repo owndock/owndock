@@ -2,6 +2,7 @@ package agentcontrol
 
 import (
 	"context"
+	"errors"
 	"math/rand/v2"
 	"time"
 )
@@ -67,6 +68,11 @@ func (r *Runner) Run(ctx context.Context) error {
 		}
 		if IsPermanent(err) {
 			return err
+		}
+		if errors.Is(err, ErrReconnectRequested) {
+			delay = r.config.MinimumDelay
+			attempt = 0
+			continue
 		}
 		attempt++
 		if r.now().Sub(startedAt) >= r.config.StableAfter {

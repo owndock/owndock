@@ -55,7 +55,7 @@ func NewAgentServer(
 		return nil, fmt.Errorf("Agent client certificate authority is invalid")
 	}
 	mux := http.NewServeMux()
-	mux.Handle("/api/v1/agent/connect", handler)
+	mux.Handle("/api/v1/agent/", handler)
 	return &AgentServer{
 		server: &http.Server{
 			Addr: cfg.Address, Handler: mux,

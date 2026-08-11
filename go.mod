@@ -3,7 +3,9 @@ module github.com/owndock/owndock
 go 1.26.5
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/containerd/errdefs v1.0.0
+	github.com/creack/pty v1.1.24
 	github.com/distribution/reference v0.6.0
 	github.com/docker/cli v29.5.3+incompatible
 	github.com/felixge/httpsnoop v1.0.4

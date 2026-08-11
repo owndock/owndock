@@ -10,12 +10,14 @@ import (
 	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
 	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
+	"github.com/owndock/owndock/internal/shared/runtimeidentity"
 	"github.com/owndock/owndock/internal/shared/security"
 )
 
 type controlStore interface {
 	ProjectExists(context.Context, string, string) (bool, error)
 	GetRuntimeTarget(context.Context, string, string) (controlbiz.RuntimeTarget, error)
+	RuntimeTargetExecution(context.Context, string, string) (runtimeaccess.Connection, error)
 	EnvironmentStage(context.Context, string, string) (string, error)
 	ResolveProjectRole(context.Context, string, string, string) (security.Role, error)
 }
@@ -96,12 +98,35 @@ func (r *TargetResolver) ResolveContainer(
 	if err != nil {
 		return terminalbiz.Target{}, err
 	}
+	connection, err := r.control.RuntimeTargetExecution(ctx, projectID, runtimeTarget.ID)
+	if errors.Is(err, controlbiz.ErrNotFound) {
+		return terminalbiz.Target{}, terminalbiz.ErrTargetUnavailable
+	}
+	if err != nil || connection.Validate() != nil ||
+		connection.Mode != runtimeTarget.ConnectionMode ||
+		connection.ManagedHostID != runtimeTarget.ManagedHostID {
+		if err != nil {
+			return terminalbiz.Target{}, err
+		}
+		return terminalbiz.Target{}, terminalbiz.ErrTargetUnavailable
+	}
+	containerName, err := runtimeidentity.ContainerName(
+		deployment.ProjectID,
+		deployment.ApplicationID,
+		deployment.EnvironmentID,
+		deployment.RuntimeTargetID,
+	)
+	if err != nil {
+		return terminalbiz.Target{}, terminalbiz.ErrTargetUnavailable
+	}
 	return terminalbiz.Target{
 		Kind: terminalbiz.KindContainer, OrganizationID: organizationID, ProjectID: projectID,
+		ApplicationID: deployment.ApplicationID, EnvironmentID: deployment.EnvironmentID,
 		ManagedHostID: host.ID, RuntimeTargetID: runtimeTarget.ID, DeploymentID: deployment.ID,
 		RunningInstanceID:  deployment.ID + ":" + strconv.FormatUint(deployment.CutoverSequence, 10),
-		InstanceGeneration: deployment.CutoverSequence, EnvironmentStage: stage,
-		ConnectionMode: runtimeTarget.ConnectionMode,
+		InstanceGeneration: deployment.CutoverSequence, ContainerName: containerName,
+		EnvironmentStage: stage, ConnectionMode: runtimeTarget.ConnectionMode,
+		Connection: connection,
 	}, nil
 }
 
@@ -121,6 +146,9 @@ func (r *TargetResolver) ResolveHost(
 	return terminalbiz.Target{
 		Kind: terminalbiz.KindHost, OrganizationID: organizationID,
 		ManagedHostID: host.ID, ConnectionMode: host.ConnectionMode,
+		SSHAddress: host.DirectSSHAddress, SSHUser: host.DirectSSHUser,
+		SSHHostKeySHA256: host.DirectSSHHostKeySHA256,
+		SSHCredentialRef: host.DirectSSHRef,
 	}, nil
 }
 
@@ -140,7 +168,8 @@ func hostTerminalAvailable(host managedhostbiz.ManagedHost) bool {
 		return false
 	}
 	if host.ConnectionMode == runtimeaccess.ModeDirectDocker {
-		return host.DirectSSHRef != ""
+		return host.DirectSSHRef != "" && host.DirectSSHAddress != "" &&
+			host.DirectSSHUser != "" && host.DirectSSHHostKeySHA256 != ""
 	}
 	return true
 }

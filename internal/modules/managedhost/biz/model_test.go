@@ -10,7 +10,11 @@ import (
 func TestNewManagedHostEnforcesMutuallyExclusiveConnectionFields(t *testing.T) {
 	direct, err := NewManagedHost(
 		"host-1", "organization-1", "Production Host",
-		runtimeaccess.ModeDirectDocker, "secret://production-ssh",
+		runtimeaccess.ModeDirectDocker, DirectSSHConfiguration{
+			Address: "host.example.com:22", User: "owndock",
+			HostKeySHA256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			CredentialRef: "secret://production-ssh",
+		},
 		"owner-1", time.Unix(1, 0),
 	)
 	if err != nil || direct.Status != StatusOffline {
@@ -18,15 +22,27 @@ func TestNewManagedHostEnforcesMutuallyExclusiveConnectionFields(t *testing.T) {
 	}
 	agent, err := NewManagedHost(
 		"host-2", "organization-1", "Private Host",
-		runtimeaccess.ModeAgent, "", "owner-1", time.Unix(1, 0),
+		runtimeaccess.ModeAgent, DirectSSHConfiguration{}, "owner-1", time.Unix(1, 0),
 	)
 	if err != nil || agent.Status != StatusEnrolling {
 		t.Fatalf("agent host = %+v, error = %v", agent, err)
 	}
 	if _, err := NewManagedHost(
 		"host-3", "organization-1", "Invalid Host",
-		runtimeaccess.ModeAgent, "secret://ssh", "owner-1", time.Now(),
+		runtimeaccess.ModeAgent, DirectSSHConfiguration{
+			Address: "host.example.com:22", User: "root",
+			HostKeySHA256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+			CredentialRef: "secret://ssh",
+		}, "owner-1", time.Now(),
 	); err != ErrInvalidHost {
 		t.Fatalf("agent host with direct SSH error = %v", err)
+	}
+	if _, err := NewManagedHost(
+		"host-4", "organization-1", "Incomplete Direct Host",
+		runtimeaccess.ModeDirectDocker, DirectSSHConfiguration{
+			CredentialRef: "secret://ssh",
+		}, "owner-1", time.Now(),
+	); err != ErrInvalidHost {
+		t.Fatalf("incomplete direct SSH error = %v", err)
 	}
 }

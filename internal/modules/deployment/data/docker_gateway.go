@@ -16,12 +16,13 @@ import (
 	"github.com/owndock/owndock/internal/adapters/dockerengine"
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
+	"github.com/owndock/owndock/internal/shared/runtimeidentity"
 )
 
 const (
-	deploymentLabel      = "net.owndock.deployment_id"
-	fencingLabel         = "net.owndock.fencing_token"
-	cutoverSequenceLabel = "net.owndock.cutover_sequence"
+	deploymentLabel      = runtimeidentity.DeploymentIDLabel
+	fencingLabel         = runtimeidentity.FencingTokenLabel
+	cutoverSequenceLabel = runtimeidentity.CutoverSequenceLabel
 )
 
 type dockerEngine interface {
@@ -348,12 +349,12 @@ func dockerCreateOptions(plan biz.ExecutionPlan, name string) mobyclient.Contain
 	config := &container.Config{
 		Env: plan.Environment, ExposedPorts: exposedPorts,
 		Labels: map[string]string{
-			deploymentLabel:              plan.DeploymentID,
-			fencingLabel:                 strconv.FormatUint(plan.FencingToken, 10),
-			cutoverSequenceLabel:         strconv.FormatUint(plan.CutoverSequence, 10),
-			"net.owndock.project_id":     plan.ProjectID,
-			"net.owndock.application_id": plan.ApplicationID,
-			"net.owndock.environment_id": plan.EnvironmentID,
+			deploymentLabel:                    plan.DeploymentID,
+			fencingLabel:                       strconv.FormatUint(plan.FencingToken, 10),
+			cutoverSequenceLabel:               strconv.FormatUint(plan.CutoverSequence, 10),
+			runtimeidentity.ProjectIDLabel:     plan.ProjectID,
+			runtimeidentity.ApplicationIDLabel: plan.ApplicationID,
+			runtimeidentity.EnvironmentIDLabel: plan.EnvironmentID,
 		},
 	}
 	if health := plan.RuntimeSpec.HealthCheck; health != nil {

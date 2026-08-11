@@ -454,6 +454,15 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "reject terminal WebSocket without Origin", method: http.MethodGet,
+			target: "/api/v1/terminal-sessions/terminal-session-1:connect",
+			headers: map[string]string{
+				"Connection": "Upgrade", "Upgrade": "websocket",
+				"Cookie": "__Secure-owndock_terminal_ticket=one-time-ticket",
+			},
+			wantStatus: http.StatusForbidden,
+		},
+		{
 			name: "logout", method: http.MethodPost, target: "/api/v1/auth/logout",
 			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
 		},

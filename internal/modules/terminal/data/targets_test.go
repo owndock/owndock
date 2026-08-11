@@ -23,7 +23,8 @@ func TestTargetResolverFixesContainerToCurrentSuccessfulCutover(t *testing.T) {
 	}
 	if target.DeploymentID != "deployment-1" || target.RunningInstanceID != "deployment-1:7" ||
 		target.InstanceGeneration != 7 || target.EnvironmentStage != "production" ||
-		target.ManagedHostID != "host-1" {
+		target.ManagedHostID != "host-1" || target.ContainerName == "" ||
+		target.Connection.Mode != runtimeaccess.ModeDirectDocker {
 		t.Fatalf("target = %+v", target)
 	}
 }
@@ -64,6 +65,11 @@ func (targetControlStub) GetRuntimeTarget(context.Context, string, string) (cont
 		ConnectionMode: runtimeaccess.ModeDirectDocker, Status: controlbiz.RuntimeTargetStatusReady,
 	}, nil
 }
+func (targetControlStub) RuntimeTargetExecution(context.Context, string, string) (runtimeaccess.Connection, error) {
+	return runtimeaccess.NewDirectDocker(
+		"host-1", "tcp://docker.example.com:2376", "docker.example.com", "secret://runtime-target",
+	)
+}
 func (targetControlStub) EnvironmentStage(context.Context, string, string) (string, error) {
 	return "production", nil
 }
@@ -94,5 +100,7 @@ func (s targetHostStub) Get(context.Context, string, string) (managedhostbiz.Man
 	return managedhostbiz.ManagedHost{
 		ID: "host-1", OrganizationID: "organization-1", Status: managedhostbiz.StatusOffline,
 		ConnectionMode: runtimeaccess.ModeDirectDocker, DirectSSHRef: s.directSSHRef,
+		DirectSSHAddress: "host.example.com:22", DirectSSHUser: "owndock",
+		DirectSSHHostKeySHA256: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 	}, nil
 }

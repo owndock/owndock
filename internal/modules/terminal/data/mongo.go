@@ -97,6 +97,27 @@ func (r *MongoRepository) GetSession(ctx context.Context, organizationID, sessio
 	return session, nil
 }
 
+func (r *MongoRepository) GetSessionForConnect(
+	ctx context.Context,
+	sessionID string,
+) (biz.TerminalSession, error) {
+	var document sessionDocument
+	if err := r.sessions.FindOne(ctx, bson.D{
+		{Key: "_id", Value: sessionID},
+		{Key: "status", Value: biz.StatusPending},
+		{Key: "active", Value: true},
+	}).Decode(&document); err == mongo.ErrNoDocuments {
+		return biz.TerminalSession{}, biz.ErrSessionNotFound
+	} else if err != nil {
+		return biz.TerminalSession{}, fmt.Errorf("find terminal session for connect: %w", err)
+	}
+	session := document.domain()
+	if err := validateStoredSession(session); err != nil {
+		return biz.TerminalSession{}, fmt.Errorf("decode terminal session for connect: %w", err)
+	}
+	return session, nil
+}
+
 func (r *MongoRepository) CreateSession(ctx context.Context, session biz.TerminalSession) (biz.TerminalSession, error) {
 	if err := session.Validate(); err != nil || session.UserConcurrencySlot < 1 || session.TargetConcurrencySlot < 1 {
 		return biz.TerminalSession{}, biz.ErrInvalidSession
@@ -242,44 +263,46 @@ func (document policyDocument) domain() biz.AccessPolicy {
 }
 
 type sessionDocument struct {
-	ID                    string             `bson:"_id"`
-	OrganizationID        string             `bson:"organization_id"`
-	ProjectID             string             `bson:"project_id,omitempty"`
-	Kind                  biz.Kind           `bson:"kind"`
-	ActorID               string             `bson:"actor_id"`
-	ManagedHostID         string             `bson:"managed_host_id"`
-	RuntimeTargetID       string             `bson:"runtime_target_id,omitempty"`
-	DeploymentID          string             `bson:"deployment_id,omitempty"`
-	RunningInstanceID     string             `bson:"running_instance_id,omitempty"`
-	InstanceGeneration    uint64             `bson:"instance_generation,omitempty"`
-	TargetScope           string             `bson:"target_scope"`
-	Status                biz.SessionStatus  `bson:"status"`
-	ConnectionMode        runtimeaccess.Mode `bson:"connection_mode"`
-	CreatedAt             time.Time          `bson:"created_at"`
-	ConnectedAt           time.Time          `bson:"connected_at,omitempty"`
-	LastActivityAt        time.Time          `bson:"last_activity_at"`
-	EndedAt               time.Time          `bson:"ended_at,omitempty"`
-	IdleDeadline          time.Time          `bson:"idle_deadline"`
-	MaximumDeadline       time.Time          `bson:"maximum_deadline"`
-	TicketHash            string             `bson:"ticket_hash,omitempty"`
-	TicketExpiresAt       time.Time          `bson:"ticket_expires_at"`
-	TicketConsumedAt      time.Time          `bson:"ticket_consumed_at,omitempty"`
-	ClientIP              string             `bson:"client_ip"`
-	UserAgent             string             `bson:"user_agent"`
-	RequestID             string             `bson:"request_id"`
-	CloseReason           biz.CloseReason    `bson:"close_reason,omitempty"`
-	SafeErrorCode         string             `bson:"safe_error_code,omitempty"`
-	UserConcurrencySlot   int                `bson:"user_concurrency_slot"`
-	TargetConcurrencySlot int                `bson:"target_concurrency_slot"`
-	Active                bool               `bson:"active"`
-	Version               uint64             `bson:"version"`
+	ID                      string             `bson:"_id"`
+	OrganizationID          string             `bson:"organization_id"`
+	ProjectID               string             `bson:"project_id,omitempty"`
+	Kind                    biz.Kind           `bson:"kind"`
+	ActorID                 string             `bson:"actor_id"`
+	AuthenticationSessionID string             `bson:"authentication_session_id"`
+	ManagedHostID           string             `bson:"managed_host_id"`
+	RuntimeTargetID         string             `bson:"runtime_target_id,omitempty"`
+	DeploymentID            string             `bson:"deployment_id,omitempty"`
+	RunningInstanceID       string             `bson:"running_instance_id,omitempty"`
+	InstanceGeneration      uint64             `bson:"instance_generation,omitempty"`
+	TargetScope             string             `bson:"target_scope"`
+	Status                  biz.SessionStatus  `bson:"status"`
+	ConnectionMode          runtimeaccess.Mode `bson:"connection_mode"`
+	CreatedAt               time.Time          `bson:"created_at"`
+	ConnectedAt             time.Time          `bson:"connected_at,omitempty"`
+	LastActivityAt          time.Time          `bson:"last_activity_at"`
+	EndedAt                 time.Time          `bson:"ended_at,omitempty"`
+	IdleDeadline            time.Time          `bson:"idle_deadline"`
+	MaximumDeadline         time.Time          `bson:"maximum_deadline"`
+	TicketHash              string             `bson:"ticket_hash,omitempty"`
+	TicketExpiresAt         time.Time          `bson:"ticket_expires_at"`
+	TicketConsumedAt        time.Time          `bson:"ticket_consumed_at,omitempty"`
+	ClientIP                string             `bson:"client_ip"`
+	UserAgent               string             `bson:"user_agent"`
+	RequestID               string             `bson:"request_id"`
+	CloseReason             biz.CloseReason    `bson:"close_reason,omitempty"`
+	SafeErrorCode           string             `bson:"safe_error_code,omitempty"`
+	UserConcurrencySlot     int                `bson:"user_concurrency_slot"`
+	TargetConcurrencySlot   int                `bson:"target_concurrency_slot"`
+	Active                  bool               `bson:"active"`
+	Version                 uint64             `bson:"version"`
 }
 
 func sessionDocumentFromDomain(session biz.TerminalSession) sessionDocument {
 	return sessionDocument{
 		ID: session.ID, OrganizationID: session.OrganizationID, ProjectID: session.ProjectID,
 		Kind: session.Kind, ActorID: session.ActorID, ManagedHostID: session.ManagedHostID,
-		RuntimeTargetID: session.RuntimeTargetID, DeploymentID: session.DeploymentID,
+		AuthenticationSessionID: session.AuthenticationSessionID,
+		RuntimeTargetID:         session.RuntimeTargetID, DeploymentID: session.DeploymentID,
 		RunningInstanceID: session.RunningInstanceID, InstanceGeneration: session.InstanceGeneration,
 		TargetScope: session.TargetScope(), Status: session.Status, ConnectionMode: session.ConnectionMode,
 		CreatedAt: session.CreatedAt, ConnectedAt: session.ConnectedAt, LastActivityAt: session.LastActivityAt,
@@ -296,7 +319,8 @@ func (document sessionDocument) domain() biz.TerminalSession {
 	return biz.TerminalSession{
 		ID: document.ID, OrganizationID: document.OrganizationID, ProjectID: document.ProjectID,
 		Kind: document.Kind, ActorID: document.ActorID, ManagedHostID: document.ManagedHostID,
-		RuntimeTargetID: document.RuntimeTargetID, DeploymentID: document.DeploymentID,
+		AuthenticationSessionID: document.AuthenticationSessionID,
+		RuntimeTargetID:         document.RuntimeTargetID, DeploymentID: document.DeploymentID,
 		RunningInstanceID: document.RunningInstanceID, InstanceGeneration: document.InstanceGeneration,
 		Status: document.Status, ConnectionMode: document.ConnectionMode, CreatedAt: document.CreatedAt,
 		ConnectedAt: document.ConnectedAt, LastActivityAt: document.LastActivityAt, EndedAt: document.EndedAt,

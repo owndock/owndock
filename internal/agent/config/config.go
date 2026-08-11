@@ -17,25 +17,32 @@ import (
 )
 
 const (
-	defaultHandshakeTimeout      = 10 * time.Second
-	defaultServerSilenceTimeout  = 45 * time.Second
-	defaultReconnectMinimum      = time.Second
-	defaultReconnectMaximum      = 30 * time.Second
-	defaultReconnectStableAfter  = time.Minute
-	defaultMaxFrameBytes         = 64 * 1024
-	defaultMaxConcurrentCommands = 4
-	defaultResultCacheSize       = 256
-	defaultCutoverWatermarkSize  = 16384
-	defaultBootIDFile            = "/proc/sys/kernel/random/boot_id"
-	defaultDockerSocket          = "/var/run/docker.sock"
-	defaultStateDirectory        = "/var/lib/owndock-agent"
+	defaultHandshakeTimeout       = 10 * time.Second
+	defaultServerSilenceTimeout   = 45 * time.Second
+	defaultReconnectMinimum       = time.Second
+	defaultReconnectMaximum       = 30 * time.Second
+	defaultReconnectStableAfter   = time.Minute
+	defaultMaxFrameBytes          = 64 * 1024
+	defaultMaxConcurrentCommands  = 4
+	defaultResultCacheSize        = 256
+	defaultCutoverWatermarkSize   = 16384
+	defaultBootIDFile             = "/proc/sys/kernel/random/boot_id"
+	defaultDockerSocket           = "/var/run/docker.sock"
+	defaultStateDirectory         = "/var/lib/owndock-agent"
+	defaultHostTerminalShell      = "/bin/sh"
+	defaultHostTerminationGrace   = 5 * time.Second
+	defaultRotationRenewBefore    = 7 * 24 * time.Hour
+	defaultRotationRetryDelay     = 15 * time.Minute
+	defaultRotationRequestTimeout = 30 * time.Second
 )
 
 var ErrInvalidConfig = errors.New("Agent configuration is invalid")
 
 type Config struct {
-	Control Control `json:"control"`
-	Runtime Runtime `json:"runtime"`
+	Control             Control             `json:"control"`
+	Runtime             Runtime             `json:"runtime"`
+	HostTerminal        HostTerminal        `json:"host_terminal"`
+	CertificateRotation CertificateRotation `json:"certificate_rotation"`
 }
 
 type Control struct {
@@ -63,6 +70,20 @@ type Runtime struct {
 	StateDirectory       string `json:"state_directory"`
 	ResultCacheSize      int    `json:"result_cache_size"`
 	CutoverWatermarkSize int    `json:"cutover_watermark_size"`
+}
+
+type HostTerminal struct {
+	Enabled          bool   `json:"enabled"`
+	User             string `json:"user"`
+	Shell            string `json:"shell"`
+	TerminationGrace string `json:"termination_grace"`
+}
+
+type CertificateRotation struct {
+	Enabled        bool   `json:"enabled"`
+	RenewBefore    string `json:"renew_before"`
+	RetryDelay     string `json:"retry_delay"`
+	RequestTimeout string `json:"request_timeout"`
 }
 
 func Load(path string) (Config, error) {
@@ -94,6 +115,15 @@ func Load(path string) (Config, error) {
 			StateDirectory:       defaultStateDirectory,
 			ResultCacheSize:      defaultResultCacheSize,
 			CutoverWatermarkSize: defaultCutoverWatermarkSize,
+		},
+		HostTerminal: HostTerminal{
+			Shell:            defaultHostTerminalShell,
+			TerminationGrace: defaultHostTerminationGrace.String(),
+		},
+		CertificateRotation: CertificateRotation{
+			RenewBefore:    defaultRotationRenewBefore.String(),
+			RetryDelay:     defaultRotationRetryDelay.String(),
+			RequestTimeout: defaultRotationRequestTimeout.String(),
 		},
 	}
 	if err := loader.Scan(&config); err != nil {
@@ -175,6 +205,38 @@ func (c Config) Validate() error {
 			ErrInvalidConfig,
 		)
 	}
+	if (capabilityEnabled(
+		c.Control.Capabilities,
+		agentprotocol.CapabilityTerminalContainer,
+	) || capabilityEnabled(
+		c.Control.Capabilities,
+		agentprotocol.CapabilityTerminalHost,
+	)) && c.Control.MaxFrameBytes < agentprotocol.MinimumTerminalFrameBytes {
+		return fmt.Errorf(
+			"%w: control.max_frame_bytes requires 65536 for terminal",
+			ErrInvalidConfig,
+		)
+	}
+	hostCapability := capabilityEnabled(
+		c.Control.Capabilities,
+		agentprotocol.CapabilityTerminalHost,
+	)
+	if hostCapability != c.HostTerminal.Enabled {
+		return fmt.Errorf(
+			"%w: terminal.host capability and host_terminal.enabled must match",
+			ErrInvalidConfig,
+		)
+	}
+	if hostCapability {
+		if !validSystemUser(c.HostTerminal.User) ||
+			!supportedHostShell(c.HostTerminal.Shell) {
+			return fmt.Errorf("%w: host_terminal identity", ErrInvalidConfig)
+		}
+		grace, graceErr := c.HostTerminal.TerminationGraceDuration()
+		if graceErr != nil || grace > 30*time.Second {
+			return fmt.Errorf("%w: host_terminal.termination_grace", ErrInvalidConfig)
+		}
+	}
 	if c.Runtime.ResultCacheSize < 1 ||
 		c.Runtime.ResultCacheSize > 4096 {
 		return fmt.Errorf("%w: runtime.result_cache_size", ErrInvalidConfig)
@@ -185,6 +247,19 @@ func (c Config) Validate() error {
 			"%w: runtime.cutover_watermark_size",
 			ErrInvalidConfig,
 		)
+	}
+	if c.CertificateRotation.Enabled {
+		if c.Control.ClientCertificateFile != c.Control.ClientPrivateKeyFile {
+			return fmt.Errorf("%w: certificate_rotation requires one identity bundle", ErrInvalidConfig)
+		}
+		renewBefore, renewErr := c.CertificateRotation.RenewBeforeDuration()
+		retryDelay, retryErr := c.CertificateRotation.RetryDelayDuration()
+		requestTimeout, timeoutErr := c.CertificateRotation.RequestTimeoutDuration()
+		if renewErr != nil || renewBefore < time.Hour || renewBefore > 30*24*time.Hour ||
+			retryErr != nil || retryDelay < time.Minute || retryDelay > 24*time.Hour ||
+			timeoutErr != nil || requestTimeout < time.Second || requestTimeout > 2*time.Minute {
+			return fmt.Errorf("%w: certificate_rotation durations", ErrInvalidConfig)
+		}
 	}
 	return nil
 }
@@ -233,6 +308,40 @@ func inventoryCapabilitiesEnabled(values []string) bool {
 	return false
 }
 
+func capabilityEnabled(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
+func validSystemUser(value string) bool {
+	if value == "" || len(value) > 32 || value[0] == '-' || value[0] == '.' {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func supportedHostShell(value string) bool {
+	switch value {
+	case "/bin/sh", "/bin/bash", "/bin/ash":
+		return true
+	default:
+		return false
+	}
+}
+
 func (c Control) HandshakeTimeoutDuration() (time.Duration, error) {
 	return parseDuration(c.HandshakeTimeout, defaultHandshakeTimeout)
 }
@@ -257,6 +366,22 @@ func (c Control) ReconnectStableAfterDuration() (time.Duration, error) {
 		c.ReconnectStableAfter,
 		defaultReconnectStableAfter,
 	)
+}
+
+func (c HostTerminal) TerminationGraceDuration() (time.Duration, error) {
+	return parseDuration(c.TerminationGrace, defaultHostTerminationGrace)
+}
+
+func (c CertificateRotation) RenewBeforeDuration() (time.Duration, error) {
+	return parseDuration(c.RenewBefore, defaultRotationRenewBefore)
+}
+
+func (c CertificateRotation) RetryDelayDuration() (time.Duration, error) {
+	return parseDuration(c.RetryDelay, defaultRotationRetryDelay)
+}
+
+func (c CertificateRotation) RequestTimeoutDuration() (time.Duration, error) {
+	return parseDuration(c.RequestTimeout, defaultRotationRequestTimeout)
 }
 
 func ReadBootID(path string) (string, error) {

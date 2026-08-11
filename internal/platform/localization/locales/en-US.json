@@ -1,6 +1,7 @@
 {
   "api_errors": {
   "agent_control_unavailable": "agent control is not currently available",
+  "agent_certificate_rotation_unavailable": "agent certificate rotation is not currently available",
   "agent_enrollment_not_allowed": "agent enrollment is not allowed",
   "agent_enrollment_unavailable": "agent enrollment is not currently available",
   "agent_protocol_unsupported": "agent protocol version is not supported",
@@ -80,11 +81,14 @@
   "source_repository_probe_unavailable": "source repository connectivity check is not currently available",
   "source_revision_unavailable": "source revision is not currently available",
   "terminal_access_denied": "terminal access policy denied the request",
+  "terminal_connection_failed": "terminal connection could not be established or was interrupted",
+  "terminal_message_too_large": "terminal message exceeded the allowed size",
   "terminal_resource_conflict": "terminal resource has changed",
   "terminal_resource_not_found": "terminal resource was not found",
   "terminal_session_limit_reached": "terminal session concurrency limit was reached",
   "terminal_target_unavailable": "terminal target is not currently available",
   "terminal_ticket_invalid": "terminal connection ticket is invalid or expired",
+  "terminal_unavailable": "terminal service is temporarily unavailable",
   "unauthenticated": "authentication is required",
   "unsupported_media_type": "content type must be application/json",
   "user_already_exists": "user already exists",

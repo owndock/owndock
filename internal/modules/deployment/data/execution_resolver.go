@@ -2,11 +2,11 @@ package data
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
+	"github.com/owndock/owndock/internal/shared/runtimeidentity"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
@@ -109,7 +109,15 @@ func (r *ExecutionResolver) ResolveExecution(
 	if err != nil {
 		return biz.ExecutionPlan{}, fmt.Errorf("resolve runtime target: %w", err)
 	}
-	sum := sha256.Sum256([]byte(deployment.CutoverScope()))
+	containerName, err := runtimeidentity.ContainerName(
+		deployment.ProjectID,
+		deployment.ApplicationID,
+		deployment.EnvironmentID,
+		deployment.RuntimeTargetID,
+	)
+	if err != nil {
+		return biz.ExecutionPlan{}, fmt.Errorf("resolve runtime container identity: %w", err)
+	}
 	return biz.ExecutionPlan{
 		DeploymentID: deployment.ID, WorkerID: deployment.Lease.Owner,
 		FencingToken:    deployment.Lease.Generation,
@@ -120,6 +128,6 @@ func (r *ExecutionResolver) ResolveExecution(
 		RegistryServer:   registryServer, RegistryUsername: registryUsername,
 		RegistryPasswordRef: registryPasswordRef,
 		RuntimeSpec:         runtimeSpec, EnvironmentBindings: environmentBindings,
-		ContainerName: fmt.Sprintf("owndock-%x", sum[:12]),
+		ContainerName: containerName,
 	}, nil
 }

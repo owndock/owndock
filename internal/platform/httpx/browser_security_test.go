@@ -81,6 +81,27 @@ func TestBrowserSecurityRejectsUntrustedOriginBeforeHandler(t *testing.T) {
 	}
 }
 
+func TestBrowserCORSDefersTerminalWebSocketOriginToDedicatedHandler(t *testing.T) {
+	called := false
+	handler := BrowserCORS(nil)(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusSwitchingProtocols)
+	}))
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"https://owndock.test/api/v1/terminal-sessions/session-1:connect",
+		nil,
+	)
+	request.Header.Set("Origin", "https://owndock.test")
+	request.Header.Set("Connection", "Upgrade")
+	request.Header.Set("Upgrade", "websocket")
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if !called || recorder.Code != http.StatusSwitchingProtocols {
+		t.Fatalf("called = %v, status = %d", called, recorder.Code)
+	}
+}
+
 func TestBrowserSecurityRejectsUnsafePreflight(t *testing.T) {
 	for _, test := range []struct {
 		name    string

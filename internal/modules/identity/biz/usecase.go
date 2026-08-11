@@ -605,6 +605,42 @@ func (u *UseCase) Authenticate(ctx context.Context, rawToken string) (security.P
 	return principal, nil
 }
 
+// ResolveTerminalPrincipal revalidates the login session that was bound to a
+// TerminalSession at creation. The terminal's one-time HttpOnly cookie is the
+// handshake credential; the normal Bearer token is never copied into the
+// WebSocket URL, subprotocol, or browser-visible storage.
+func (u *UseCase) ResolveTerminalPrincipal(
+	ctx context.Context,
+	organizationID, userID, sessionID string,
+) (security.Principal, error) {
+	if u.adminSessions == nil || strings.TrimSpace(organizationID) == "" ||
+		strings.TrimSpace(userID) == "" || strings.TrimSpace(sessionID) == "" {
+		return security.Principal{}, security.ErrUnauthenticated
+	}
+	user, err := u.adminSessions.GetOrganizationUser(ctx, organizationID, userID)
+	if err != nil {
+		return security.Principal{}, security.ErrUnauthenticated
+	}
+	sessions, err := u.adminSessions.ListSessions(ctx, userID, u.now().UTC())
+	if err != nil {
+		return security.Principal{}, security.ErrUnauthenticated
+	}
+	for _, session := range sessions {
+		if session.ID != sessionID || session.UserID != userID {
+			continue
+		}
+		principal := security.Principal{
+			UserID: user.ID, OrganizationID: user.OrganizationID, Email: user.Email,
+			Role: user.Role, SessionID: session.ID,
+		}
+		if principal.Valid() {
+			return principal, nil
+		}
+		break
+	}
+	return security.Principal{}, security.ErrUnauthenticated
+}
+
 func (u *UseCase) Logout(ctx context.Context, principal security.Principal, requestID string) error {
 	if !principal.Valid() {
 		return security.ErrUnauthenticated

@@ -14,17 +14,30 @@ import (
 
 const ticketCookieName = "__Secure-owndock_terminal_ticket"
 
-type HTTP struct{ useCase *biz.UseCase }
+type HTTP struct {
+	useCase *biz.UseCase
+	wss     *TerminalWSS
+}
 
-func NewHTTP(useCase *biz.UseCase) *HTTP { return &HTTP{useCase: useCase} }
+func NewHTTP(
+	useCase *biz.UseCase,
+	observers ...TerminalConnectionObserver,
+) *HTTP {
+	return &HTTP{useCase: useCase, wss: NewTerminalWSS(useCase, observers...)}
+}
 
 func (s *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" &&
+		segments[2] == "terminal-sessions" && strings.HasSuffix(segments[3], ":connect") {
+		s.wss.ServeHTTP(w, r, strings.TrimSuffix(segments[3], ":connect"))
+		return
+	}
 	principal, ok := security.PrincipalFromContext(r.Context())
 	if !ok {
 		writeError(w, r, security.ErrUnauthenticated)
 		return
 	}
-	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	switch {
 	case len(segments) == 5 && isProjectPrefix(segments) && segments[4] == "terminal-policy":
 		s.projectPolicy(w, r, principal, segments[3])

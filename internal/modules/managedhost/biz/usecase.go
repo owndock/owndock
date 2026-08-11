@@ -2,6 +2,8 @@ package biz
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"time"
 
@@ -21,6 +23,7 @@ type UseCase struct {
 	audit                   sharedaudit.Recorder
 	tokens                  EnrollmentTokens
 	issuer                  CertificateIssuer
+	certificateRotations    AgentCertificateRotationRepository
 	enrollmentTTL           time.Duration
 	agentConnections        AgentConnectionRepository
 	connectionCloser        AgentConnectionCloser
@@ -69,7 +72,92 @@ func (u *UseCase) WithEnrollment(
 	u.tokens = tokens
 	u.issuer = issuer
 	u.enrollmentTTL = enrollmentTTL
+	if rotations, ok := repository.(AgentCertificateRotationRepository); ok {
+		u.certificateRotations = rotations
+	}
 	return u
+}
+
+const agentCertificateRotationGrace = 10 * time.Minute
+
+func (u *UseCase) RotateAgentCertificate(
+	ctx context.Context,
+	presented AgentCertificateIdentity,
+	rotationID string,
+	csrPEM []byte,
+	requestID string,
+) (AgentCredentials, error) {
+	if u.issuer == nil || u.certificateRotations == nil {
+		return AgentCredentials{}, ErrAgentCertificateRotation
+	}
+	rotationID = strings.TrimSpace(rotationID)
+	if !validIdentitySegment(rotationID) || len(csrPEM) == 0 || len(csrPEM) > 16*1024 {
+		return AgentCredentials{}, ErrInvalidAgentIdentity
+	}
+	presented = normalizeCertificateIdentity(presented)
+	now := u.now().UTC()
+	csrDigest := sha256.Sum256(csrPEM)
+	csrHash := hex.EncodeToString(csrDigest[:])
+	identity, err := u.certificateRotations.AuthenticateAgentCertificateRotation(
+		ctx, presented, rotationID, csrHash, now,
+	)
+	if err != nil || identity.ID != presented.IdentityID ||
+		identity.OrganizationID != presented.OrganizationID ||
+		identity.ManagedHostID != presented.ManagedHostID ||
+		identity.InstanceID != presented.InstanceID || !identity.RevokedAt.IsZero() {
+		return AgentCredentials{}, ErrInvalidAgentIdentity
+	}
+	issued, err := u.issuer.Issue(ctx, AgentCertificateClaim{
+		OrganizationID: identity.OrganizationID,
+		ManagedHostID:  identity.ManagedHostID,
+		IdentityID:     identity.ID,
+		InstanceID:     identity.InstanceID,
+	}, csrPEM, now)
+	if err != nil {
+		return AgentCredentials{}, ErrInvalidAgentIdentity
+	}
+	rotation := AgentCertificateRotation{
+		ID: rotationID, CSRHash: csrHash,
+		Presented: presented, Certificate: issued,
+		PreviousValidUntil: now.Add(agentCertificateRotationGrace),
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return AgentCredentials{}, err
+	}
+	created := false
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		stored, storedCreated, rotateErr := u.certificateRotations.RotateAgentCertificate(
+			transactionContext, rotation, now,
+		)
+		if rotateErr != nil {
+			return rotateErr
+		}
+		issued, created = stored, storedCreated
+		if !created {
+			return nil
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: identity.OrganizationID,
+			ActorID: "agent:" + identity.ID,
+			Action:  "agent_certificate.rotate", ResourceType: "managed_host",
+			ResourceID: identity.ManagedHostID,
+			RequestID:  requestID, CreatedAt: now,
+		})
+	})
+	if err != nil {
+		return AgentCredentials{}, err
+	}
+	return AgentCredentials{
+		Identity: AgentIdentity{
+			ID: identity.ID, OrganizationID: identity.OrganizationID,
+			ManagedHostID: identity.ManagedHostID, InstanceID: identity.InstanceID,
+			CertificateSerial: issued.Serial, CertificateSHA256: issued.SHA256,
+			CertificateExpires: issued.ExpiresAt,
+		},
+		CertificatePEM:   issued.CertificatePEM,
+		CACertificatePEM: issued.CACertificatePEM,
+	}, nil
 }
 
 func (u *UseCase) List(
@@ -98,7 +186,8 @@ func (u *UseCase) Create(
 	principal security.Principal,
 	name string,
 	connectionMode runtimeaccess.Mode,
-	directSSHRef, requestID string,
+	directSSH DirectSSHConfiguration,
+	requestID string,
 ) (ManagedHost, error) {
 	if err := principal.Require(security.PermissionManagedHostWrite); err != nil {
 		return ManagedHost{}, err
@@ -114,7 +203,7 @@ func (u *UseCase) Create(
 	now := u.now().UTC()
 	item, err := NewManagedHost(
 		id, principal.OrganizationID, name, connectionMode,
-		directSSHRef, principal.UserID, now,
+		directSSH, principal.UserID, now,
 	)
 	if err != nil {
 		return ManagedHost{}, err

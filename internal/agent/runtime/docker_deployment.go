@@ -14,15 +14,16 @@ import (
 	mobyclient "github.com/moby/moby/client"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeidentity"
 )
 
 const (
-	deploymentLabel      = "net.owndock.deployment_id"
-	fencingLabel         = "net.owndock.fencing_token"
-	cutoverSequenceLabel = "net.owndock.cutover_sequence"
-	projectLabel         = "net.owndock.project_id"
-	applicationLabel     = "net.owndock.application_id"
-	environmentLabel     = "net.owndock.environment_id"
+	deploymentLabel      = runtimeidentity.DeploymentIDLabel
+	fencingLabel         = runtimeidentity.FencingTokenLabel
+	cutoverSequenceLabel = runtimeidentity.CutoverSequenceLabel
+	projectLabel         = runtimeidentity.ProjectIDLabel
+	applicationLabel     = runtimeidentity.ApplicationIDLabel
+	environmentLabel     = runtimeidentity.EnvironmentIDLabel
 )
 
 type dockerDeploymentEngine interface {

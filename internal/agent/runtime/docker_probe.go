@@ -35,6 +35,7 @@ type DockerExecutor struct {
 	newEngine           dockerProbeEngineFactory
 	newDeploymentEngine dockerDeploymentEngineFactory
 	newInventoryEngine  dockerInventoryEngineFactory
+	newTerminalEngine   dockerTerminalEngineFactory
 	cache               ResultCache
 	cutovers            CutoverStore
 	now                 func() time.Time
@@ -67,6 +68,7 @@ func NewDockerExecutor(
 		newEngine:           newLocalDockerProbeEngine,
 		newDeploymentEngine: newLocalDockerDeploymentEngine,
 		newInventoryEngine:  newLocalDockerInventoryEngine,
+		newTerminalEngine:   newLocalDockerTerminalEngine,
 		cache:               cache,
 		cutovers:            cutovers,
 		now:                 time.Now,

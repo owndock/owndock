@@ -91,7 +91,7 @@ func TestManagedHostHTTPCreateAndGet(t *testing.T) {
 	create := httptest.NewRecorder()
 	handler.ServeHTTP(create, authenticatedRequest(
 		http.MethodPost, "/api/v1/managed-hosts",
-		`{"name":"Production Host","connection_mode":"direct","direct_ssh_ref":"secret://production-ssh"}`,
+		`{"name":"Production Host","connection_mode":"direct","direct_ssh_address":"host.example.com:22","direct_ssh_user":"owndock","direct_ssh_host_key_sha256":"SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","direct_ssh_ref":"secret://production-ssh"}`,
 		security.RoleOwner,
 	))
 	if create.Code != http.StatusCreated ||

@@ -76,9 +76,9 @@ OwnDock Server 对所有 HTTP 响应设置以下浏览器安全头：
 
 API 的 CSP 不适用于独立 Web 前端。Web 仓库需要根据实际静态资源、字体和 API 地址配置自己的 CSP；直接复制 API 的 `default-src 'none'` 会让 Web 页面无法加载。`Strict-Transport-Security` 应由真正终止公网 TLS 的反向代理或负载均衡器设置，因为 Server 可能只看到代理后的内部 HTTP。
 
-## 与未来终端能力的区别
+## 与终端连接的区别
 
-终端连接属于高权限、长连接能力，不能复用普通 REST Bearer Token 作为 URL 参数。规划中的流程是：REST API 先创建固定目标的 `TerminalSession`，再下发一次性、短时、`Secure + HttpOnly + SameSite` 的专用 Cookie；WSS Upgrade 必须验证精确 Origin，并原子消费票据。
+终端连接属于高权限、长连接能力，不能复用普通 REST Bearer Token 作为 URL 参数。REST API 先创建固定目标的 `TerminalSession`，绑定当前登录会话 ID，再下发一次性、短时、`Secure + HttpOnly + SameSite` 的专用 Cookie；WSS Upgrade 验证严格同域 Origin、确认绑定的登录会话仍有效，并原子消费票据。
 
 ```mermaid
 flowchart LR
@@ -88,7 +88,7 @@ flowchart LR
     D --> E[再次校验 Origin / 权限 / 目标]
 ```
 
-这张图中的终端 Cookie 尚未实现。当前 `cors_allowed_origins` 只控制 REST API 的浏览器跨域读取，不能视为终端访问策略。
+浏览器原生 WebSocket 不能设置普通 `Authorization` Header，因此 Bearer Token 不会被复制到 URL、WebSocket 子协议或 JavaScript 参数。`cors_allowed_origins` 只控制 REST API 的浏览器跨域读取；Terminal WSS 使用自己的严格同域检查，不能把 REST 白名单视为终端访问策略。连接建立后，Server 还会周期复核权威会话、登录状态、当前角色、访问策略和固定目标；撤权会通知浏览器并按策略宽限关闭，管理员终止或目标失效会立即关闭。当前 direct 与 Agent 的容器、主机终端共用这条浏览器安全链路；主机地址、用户、Shell、命令、Host Key 和凭据都不能由浏览器覆盖。
 
 ## 上线检查
 
@@ -98,4 +98,4 @@ flowchart LR
 4. Web 不把 Token 写入 URL、日志、分析平台或长期浏览器存储。
 5. 使用浏览器验证允许 Origin 的 preflight 成功，未允许 Origin 返回 403。
 6. 检查响应不存在 `Access-Control-Allow-Credentials: true`。
-7. Web 前端单独验证 CSP；终端上线前单独完成 Cookie、Origin、重放和 WSS 安全验收。
+7. Web 前端单独验证 CSP；终端发布前继续完成 Agent/主机链路、完整浏览器矩阵和 WSS 故障安全验收。

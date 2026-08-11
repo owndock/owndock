@@ -71,6 +71,13 @@ func (u *UseCase) OpenAgentSession(
 		ConnectedAt:     now,
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if confirmer, ok := u.agentConnections.(AgentCertificateConfirmer); ok {
+			if _, confirmErr := confirmer.ConfirmAgentCertificate(
+				transactionContext, certificate, now,
+			); confirmErr != nil {
+				return confirmErr
+			}
+		}
 		if connectErr := u.agentConnections.ConnectAgent(
 			transactionContext, session, now,
 		); connectErr != nil {

@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test test-integration test-runtime-integration test-build-integration test-build-security build build-server build-agent build-build-worker docker-build-worker api-validate api-breaking check vuln run run-agent run-build-worker
+.PHONY: fmt fmt-check mod-verify vet test test-integration test-runtime-integration test-build-integration test-build-security test-terminal-security build build-server build-agent build-build-worker docker-build-worker api-validate api-breaking check vuln run run-agent run-build-worker
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
@@ -39,6 +39,12 @@ test-build-security:
 		-run TestMongoReplicaSetIntegration -count=1 -timeout=5m
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \
 		-run TestBuildKitRootlessMTLSRegistryIntegration -count=1 -timeout=5m
+
+test-terminal-security:
+	go test -race ./internal/modules/terminal/... ./internal/shared/terminalprotocol \
+		./internal/shared/agentprotocol ./internal/agent/control ./internal/agent/runtime \
+		./internal/modules/managedhost/data ./internal/modules/managedhost/service \
+		./internal/platform/observability -count=1
 
 build: build-server build-agent build-build-worker
 

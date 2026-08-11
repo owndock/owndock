@@ -97,7 +97,7 @@ Deployment 是把一个 Release 交付到 Environment 和 Runtime Target 的不�
 
 ### Terminal Session
 
-Terminal Session 是短期、可审计的受控操作，不是通用 Docker Proxy 或任意 SSH。容器会话固定到 Deployment 当前成功切流实例；主机会话固定到 Organization 的 Managed Host。策略控制角色、环境/目标范围、idle/max timeout 和并发。当前控制面与 REST 契约已经实现，实际 exec、PTY/SSH 与 WSS 仍在后续阶段，详见[安全终端会话](terminal-sessions.md)。
+Terminal Session 是短期、可审计的受控操作，不是通用 Docker Proxy 或任意 SSH。容器会话固定到 Deployment 当前成功切流实例；主机会话固定到 Organization 的 Managed Host。策略控制角色、环境/目标范围、idle/max timeout、撤权宽限和并发。当前已实现控制面、REST、同域 WSS、活动连接周期复核，以及 direct/Agent 两种连接模式的受限容器与主机终端；真实远程 Linux/SSH、多主机故障和完整浏览器验收仍在后续阶段，详见[安全终端会话](terminal-sessions.md)。
 
 ## 身份与权限
 

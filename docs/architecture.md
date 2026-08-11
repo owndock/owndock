@@ -68,7 +68,7 @@ Deployment `biz` 只定义 Execution Resolver、Credential Resolver、Executor �
 
 当前正式 API 可以登记 `direct` 或 `agent` Runtime Target；控制面 probe 与 Deployment Gateway 都通过按连接模式注册的 Router 分派。`data` 使用固定版本的 Moby API/Client 模块实现 direct Docker Gateway；Agent 首次 enrollment、CSR 证书签发和固定身份已经落地，Server 端独立 TLS 1.3 listener 支持 mTLS 数据库身份校验、`v1` hello/heartbeat、在线状态、单实例重连替换和禁用断流。enrollment 保存的 capabilities 是 Agent Identity 的授权上限，hello 只能声明其子集，连接 Registry 还会在每条命令入队前检查对应 capability。Registry 使用有界队列、相同命令等待复用、只保存 kind/指纹/安全结果的有界近期缓存和 deadline/断线收敛，协议不提供任意 Shell 或 Docker endpoint。`owndock-agent` 使用 TLS 1.3、严格帧校验、心跳和有上限的抖动退避主动连接 Server；它只接受本地绝对 Unix Socket 路径，可执行 runtime probe、digest 镜像准备、候选容器健康门禁、激活和安全取消。Agent 磁盘状态把可淘汰的安全结果缓存与不可淘汰的部署槽位水位分开，两者都使用受限目录、`0600`、fsync 和原子 rename；水位只保存稳定容器槽位、Deployment ID 与最高 cutover sequence，达到上限或损坏时失败关闭。部署命令使用严格的 `prepare/stage/activate/cancel` canonical wire；Agent 部署采用 `stage candidate → Server 重新验证 Mongo lease/cutover fence → activate stable name`，不能用一次远程 deploy 跨过控制面 fencing。Agent Control Server 启用时，composition root 会把 Agent prober 和 Agent Deployment Gateway 配套注册；未注册或能力不足不会静默回退到 direct。单机真实 Engine 已覆盖该两阶段路径，进程内双 Host 并发路由已覆盖不串 Target、单 Host 断开隔离和过期 fence 原 Host cancel，本机执行器回归覆盖重启、容器缺失和延迟旧命令；真实双主机、网络分区和故障注入仍待系统验收。`worker` 负责编排领取、心跳、状态机和审计。direct Runtime Target 只保存 `secret://alias`，mTLS PEM 在执行时从受约束环境变量解析，并在单次 Gateway 调用结束后尽力清零解析器返回的字节切片。
 
-Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent prober 与 Deployment Gateway 在 Agent Control Server 启用时配套注册，因此只有连接到可执行当前协议的 Agent 才能把 Target 探测为 `ready`；离线不会回退 direct。direct Host 可选保存外部 SSH 引用，但主机终端实现前不会读取该引用。
+Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent prober 与 Deployment Gateway 在 Agent Control Server 启用时配套注册，因此只有连接到可执行当前协议的 Agent 才能把 Target 探测为 `ready`；离线不会回退 direct。direct Host 的 SSH 地址、固定用户、SHA-256 Host Key 指纹和外部私钥引用采用全有或全无约束；私钥原文不进入 Host 文档。
 
 基础 Docker 适配器使用作用域稳定的容器名、Deployment 标签、同 Deployment 的 lease fencing token 和跨 Deployment 的 cutover sequence 实现幂等及安全取消。cutover sequence 由 MongoDB 在创建同一 Project/Application/Environment/Runtime Target 槽位的 Deployment 时单调分配，并写入 Docker 标签；因此较旧 Deployment 的延迟命令不能覆盖已激活的新版本。适配器会应用 Release 声明的端口、环境变量、资源限制和 Docker HEALTHCHECK：候选容器启动并进入 healthy 后，Worker 再验证 MongoDB 活跃租约、移除旧容器并把候选容器改为稳定名称。不健康候选会被清理且旧容器保持运行。该策略仍需在真实 Engine、入口路由和端口所有权场景中验证实际停机窗口。
 
@@ -76,7 +76,9 @@ Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host �
 
 `internal/modules/terminal` 已建立独立的 `biz/data/service` 边界。领域层拥有五项动作权限、Project/Organization 策略、TerminalSession 状态机和幂等终止；MongoDB adapter 通过部分唯一索引提供跨 Server 一致的每用户、每目标并发槽位。Terminal 不直接读取其他模块 collection，而是通过窄接口解析 Project、当前成功 Deployment、Runtime Target 和 Managed Host。
 
-创建容器会话只接受 Deployment ID，创建主机会话只接受路径中的 Managed Host ID。原始连接票据只返回一次，MongoDB 只保存 SHA-256 hash；HTTP 通过限定 connect path 的 Secure、HttpOnly、SameSite=Strict Cookie 下发，不把票据写进 JSON、URL、日志或 Trace。当前控制面/API 已实现，Docker exec、Agent PTY/direct SSH 和同域 WSS transport 仍是后续适配器，详见[安全终端会话](terminal-sessions.md)。
+创建容器会话只接受 Deployment ID，创建主机会话只接受路径中的 Managed Host ID。原始连接票据只返回一次，MongoDB 只保存 SHA-256 hash；HTTP 通过限定 connect path 的 Secure、HttpOnly、SameSite=Strict Cookie 下发，不把票据写进 JSON、URL、日志或 Trace。浏览器 WSS 使用独立的严格同域 Origin 边界，不复用 REST CORS 白名单；TerminalSession 绑定创建时的登录会话 ID，连接时实时确认该登录会话仍有效，再原子消费 ticket。
+
+`internal/shared/terminalprotocol` 固定浏览器侧 `owndock.terminal.v1` 的控制消息、二进制数据边界和消息/窗口/速率上限。WSS transport 先按容器/主机类型，再按 direct/Agent 连接模式选择受限 Gateway。容器路径共享 Deployment writer 的稳定容器身份契约，在 exec 前后和连接期间核对当前 Deployment/cutover sequence；Agent 使用独立的 `terminal.container` capability 并再次推导容器名。主机路径中，Agent 的 `terminal.host` OPEN 只传类型和窗口尺寸，本机配置固定系统身份与 Shell；direct SSH 使用 Host 上全量登记的地址、用户、SHA-256 Host Key 和外部私钥引用。两条主机路径都不接受浏览器提供命令、用户、环境、工作目录、sudo 密码或特权参数。活动 WSS 每 2 秒从权威存储复核会话、登录、角色、策略和固定目标；管理员终止与目标失效立即断流，权限撤销发送稳定通知并执行当前策略的宽限期。慢消费者、Agent 重连、容器替换或主机失效都会关闭会话，不恢复旧 PTY，详见[安全终端会话](terminal-sessions.md)。
 
 ## Runtime Inventory 边界
 
@@ -100,13 +102,13 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 指标标签和 Span 名称不得包含原始 URL、资源 ID、租户 ID 等无界值。业务模块需要增加手工 Span 时，应通过明确依赖获得 tracer，不能让 `biz` 依赖 exporter 或 SDK 实现。
 
-Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一的固定名称/结果轮询指标，记录次数、耗时与最近成功/错误时间；资源 ID 不进入 Prometheus 标签。只有领取任务后才创建固定名称的操作 Span，空轮询不制造 Trace。独立 Build Worker 另提供 `/livez`、MongoDB `/readyz` 和 `/metrics`，嵌入式 Worker 复用 Server 运维端点。指标语义、Span 安全属性和告警示例见 [Worker 可观测性与告警](worker-observability.md)。
+Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一的固定名称/结果轮询指标，记录次数、耗时与最近成功/错误时间；资源 ID 不进入 Prometheus 标签。只有领取任务后才创建固定名称的操作 Span，空轮询不制造 Trace。Terminal WSS 另记录固定 kind/mode/reason 维度的活动数、累计数、关闭次数和连接时长，不记录资源 ID、终端字节或底层错误。独立 Build Worker 另提供 `/livez`、MongoDB `/readyz` 和 `/metrics`，嵌入式 Worker 与 Terminal 复用 Server 运维端点。指标语义、Span 安全属性和告警示例见 [Worker 可观测性与告警](worker-observability.md)，终端专项边界见[终端安全验收](terminal-security-acceptance.md)。
 
 ## API 契约
 
 `api/openapi.yaml` 是发布前 HTTP 行为的机器可读契约，覆盖运维接口、首个正式产品切片和当前工程样例；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。正式切片 operation 已具备 Organization 所有权、内置角色授权、审计和 MongoDB 持久化，但在首个端到端部署用例完成前仍标记为 pre-release。Handler 显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
 
-REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session Cookie。浏览器跨域默认拒绝，只接受 `server.http.cors_allowed_origins` 中不含通配符的精确 HTTPS Origin；loopback HTTP 仅供本机开发。跨域响应不启用 credentials，预检方法和 Header 使用封闭集合。所有 `/api/` 响应 `no-store`，并设置 API 专用 CSP、nosniff、frame deny、no-referrer 和权限策略。独立 Web 前端需要配置适合自身资源的 CSP，公网 HSTS 由实际 TLS 终止层负责。未来 Terminal 的一次性 HttpOnly Cookie 与 WSS Origin 校验是独立安全边界，不能从 REST CORS 配置推导权限。完整客户规则见[浏览器接入 API](browser-api-security.md)。
+REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session Cookie。浏览器跨域默认拒绝，只接受 `server.http.cors_allowed_origins` 中不含通配符的精确 HTTPS Origin；loopback HTTP 仅供本机开发。跨域响应不启用 credentials，预检方法和 Header 使用封闭集合。所有 `/api/` 响应 `no-store`，并设置 API 专用 CSP、nosniff、frame deny、no-referrer 和权限策略。独立 Web 前端需要配置适合自身资源的 CSP，公网 HSTS 由实际 TLS 终止层负责。Terminal 的一次性 HttpOnly Cookie 与 WSS 严格同域 Origin 校验是独立安全边界，不能从 REST CORS 配置推导权限。完整客户规则见[浏览器接入 API](browser-api-security.md)。
 
 契约文件必须通过 oasdiff 严格校验，真实 Handler 的请求与响应必须通过 kin-openapi 契约测试。工程样例在产品接受前允许显式删除或重塑；正式 operation 则执行 breaking-change 门禁，不兼容变更进入新的 API 主版本并记录迁移窗口。
 

@@ -2,10 +2,14 @@ package biz
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
+	"net"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/secretref"
 )
@@ -16,6 +20,7 @@ var (
 	ErrEnrollmentUnavailable    = errors.New("agent enrollment is unavailable")
 	ErrAgentControlUnavailable  = errors.New("agent control is unavailable")
 	ErrAgentProtocolUnsupported = errors.New("agent protocol version is unsupported")
+	ErrAgentCertificateRotation = errors.New("agent certificate rotation is unavailable")
 	ErrAgentSessionInvalid      = errors.New("agent session is invalid")
 	ErrInvalidAgentIdentity     = errors.New("agent identity is invalid")
 	ErrInvalidEnrollment        = errors.New("agent enrollment is invalid")
@@ -55,6 +60,9 @@ type ManagedHost struct {
 	AgentBootID               string
 	AgentSessionID            string
 	DirectSSHRef              string
+	DirectSSHAddress          string
+	DirectSSHUser             string
+	DirectSSHHostKeySHA256    string
 	LastSeenAt                time.Time
 	AgentVersion              string
 	ProtocolVersion           string
@@ -84,18 +92,53 @@ type Enrollment struct {
 }
 
 type AgentIdentity struct {
+	ID                            string
+	OrganizationID                string
+	ManagedHostID                 string
+	InstanceID                    string
+	CertificateSerial             string
+	CertificateSHA256             string
+	CertificateExpires            time.Time
+	PreviousCertificateSerial     string
+	PreviousCertificateSHA256     string
+	PreviousCertificateExpires    time.Time
+	PreviousCertificateValidUntil time.Time
+	PendingRotationID             string
+	PendingRotationCSRHash        string
+	PendingCertificatePEM         []byte
+	PendingCACertificatePEM       []byte
+	AgentVersion                  string
+	ProtocolVersion               string
+	Capabilities                  []string
+	IssuedAt                      time.Time
+	RevokedAt                     time.Time
+}
+
+type AgentCertificateRotation struct {
 	ID                 string
-	OrganizationID     string
-	ManagedHostID      string
-	InstanceID         string
-	CertificateSerial  string
-	CertificateSHA256  string
-	CertificateExpires time.Time
-	AgentVersion       string
-	ProtocolVersion    string
-	Capabilities       []string
-	IssuedAt           time.Time
-	RevokedAt          time.Time
+	CSRHash            string
+	Presented          AgentCertificateIdentity
+	Certificate        IssuedCertificate
+	PreviousValidUntil time.Time
+}
+
+type AgentCertificateRotationRepository interface {
+	AuthenticateAgentCertificateRotation(
+		context.Context,
+		AgentCertificateIdentity,
+		string,
+		string,
+		time.Time,
+	) (AgentIdentity, error)
+	RotateAgentCertificate(
+		context.Context,
+		AgentCertificateRotation,
+		time.Time,
+	) (IssuedCertificate, bool, error)
+}
+
+type AgentCertificateConfirmer interface {
+	ConfirmAgentCertificate(context.Context, AgentCertificateIdentity, time.Time) (bool, error)
 }
 
 type EnrollmentRepository interface {
@@ -168,6 +211,8 @@ type AgentConnectionRegistry interface {
 	) <-chan AgentCommand
 	Unregister(string, string)
 	Complete(string, string, AgentCommandResult) error
+	TerminalFrames(string, string) <-chan agentprotocol.TerminalFrame
+	CompleteTerminalFrame(string, string, agentprotocol.TerminalFrame) error
 }
 
 type AgentCommandDispatcher interface {
@@ -216,17 +261,100 @@ type AgentCredentials struct {
 	CACertificatePEM []byte
 }
 
+type DirectSSHConfiguration struct {
+	Address       string
+	User          string
+	HostKeySHA256 string
+	CredentialRef string
+}
+
+func (c DirectSSHConfiguration) Empty() bool {
+	return c.Address == "" && c.User == "" && c.HostKeySHA256 == "" &&
+		c.CredentialRef == ""
+}
+
+func (c DirectSSHConfiguration) Validate() error {
+	if c.Empty() {
+		return nil
+	}
+	host, portValue, err := net.SplitHostPort(c.Address)
+	port, portErr := strconv.Atoi(portValue)
+	if err != nil || portErr != nil || host == "" || port < 1 || port > 65535 ||
+		!validSSHHost(host) || !validSSHUser(c.User) ||
+		!validSSHHostKeyFingerprint(c.HostKeySHA256) {
+		return ErrInvalidHost
+	}
+	if _, err := secretref.Alias(c.CredentialRef); err != nil {
+		return ErrInvalidHost
+	}
+	return nil
+}
+
+func validSSHHost(value string) bool {
+	if address := net.ParseIP(value); address != nil {
+		return true
+	}
+	if len(value) > 253 || strings.HasSuffix(value, ".") {
+		return false
+	}
+	for _, label := range strings.Split(value, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' ||
+			label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if character >= 'a' && character <= 'z' ||
+				character >= 'A' && character <= 'Z' ||
+				character >= '0' && character <= '9' || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func validSSHUser(value string) bool {
+	if value == "" || len(value) > 32 || value[0] == '-' || value[0] == '.' {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			character == '_' || character == '-' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validSSHHostKeyFingerprint(value string) bool {
+	if !strings.HasPrefix(value, "SHA256:") {
+		return false
+	}
+	decoded, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, "SHA256:"))
+	return err == nil && len(decoded) == 32
+}
+
 func NewManagedHost(
 	id, organizationID, name string,
 	connectionMode runtimeaccess.Mode,
-	directSSHRef, createdBy string,
+	directSSH DirectSSHConfiguration,
+	createdBy string,
 	now time.Time,
 ) (ManagedHost, error) {
 	id = strings.TrimSpace(id)
 	organizationID = strings.TrimSpace(organizationID)
 	name = strings.TrimSpace(name)
 	createdBy = strings.TrimSpace(createdBy)
-	directSSHRef = strings.TrimSpace(directSSHRef)
+	directSSH = DirectSSHConfiguration{
+		Address:       strings.TrimSpace(directSSH.Address),
+		User:          strings.TrimSpace(directSSH.User),
+		HostKeySHA256: strings.TrimSpace(directSSH.HostKeySHA256),
+		CredentialRef: strings.TrimSpace(directSSH.CredentialRef),
+	}
 	if id == "" || organizationID == "" || createdBy == "" ||
 		len(name) < 2 || len(name) > 80 || !connectionMode.Valid() {
 		return ManagedHost{}, ErrInvalidHost
@@ -234,23 +362,24 @@ func NewManagedHost(
 	status := StatusOffline
 	switch connectionMode {
 	case runtimeaccess.ModeAgent:
-		if directSSHRef != "" {
+		if !directSSH.Empty() {
 			return ManagedHost{}, ErrInvalidHost
 		}
 		status = StatusEnrolling
 	case runtimeaccess.ModeDirectDocker:
-		if directSSHRef != "" {
-			if _, err := secretref.Alias(directSSHRef); err != nil {
-				return ManagedHost{}, ErrInvalidHost
-			}
+		if err := directSSH.Validate(); err != nil {
+			return ManagedHost{}, err
 		}
 	}
 	now = now.UTC()
 	return ManagedHost{
 		ID: id, OrganizationID: organizationID, Name: name,
 		Status: status, ConnectionMode: connectionMode,
-		DirectSSHRef: directSSHRef, Capabilities: []string{},
-		CreatedBy: createdBy, CreatedAt: now, UpdatedAt: now,
+		DirectSSHRef:     directSSH.CredentialRef,
+		DirectSSHAddress: directSSH.Address, DirectSSHUser: directSSH.User,
+		DirectSSHHostKeySHA256: directSSH.HostKeySHA256,
+		Capabilities:           []string{},
+		CreatedBy:              createdBy, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 

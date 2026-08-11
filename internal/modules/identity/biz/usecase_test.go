@@ -546,11 +546,25 @@ func TestAdministrativeSessionGovernance(t *testing.T) {
 			t.Fatalf("ListUserSessions() exposed token hash: %+v", session)
 		}
 	}
+	terminalPrincipal, err := useCase.ResolveTerminalPrincipal(
+		t.Context(), "organization", "member", "member-session",
+	)
+	if err != nil || terminalPrincipal.UserID != "member" ||
+		terminalPrincipal.OrganizationID != "organization" ||
+		terminalPrincipal.SessionID != "member-session" ||
+		terminalPrincipal.Role != security.RoleViewer {
+		t.Fatalf("ResolveTerminalPrincipal() = %+v/%v", terminalPrincipal, err)
+	}
 	if _, err := useCase.ListUserSessions(t.Context(), owner, "foreign"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-organization ListUserSessions() error = %v", err)
 	}
 	if err := useCase.RevokeUserSession(t.Context(), owner, "member", "member-session", "request-1"); err != nil {
 		t.Fatalf("RevokeUserSession() error = %v", err)
+	}
+	if _, err := useCase.ResolveTerminalPrincipal(
+		t.Context(), "organization", "member", "member-session",
+	); !errors.Is(err, security.ErrUnauthenticated) {
+		t.Fatalf("revoked terminal login session error = %v", err)
 	}
 	revoked, err := useCase.RevokeAllUserSessions(t.Context(), owner, "member", "request-2")
 	if err != nil || revoked != 1 {

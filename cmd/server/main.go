@@ -212,6 +212,7 @@ func run() error {
 				NewDockerRuntimeTargetProber(),
 		}
 		var agentCommandDispatcher managedhostbiz.AgentCommandDispatcher
+		var agentConnectionRegistry *managedhostdata.ConnectionRegistry
 		if cfg.Security.AgentPKI.Enabled {
 			enrollmentTTL, err := cfg.Security.AgentPKI.EnrollmentTTLDuration()
 			if err != nil {
@@ -268,6 +269,7 @@ func run() error {
 					)
 				}
 				agentCommandDispatcher = connectionRegistry
+				agentConnectionRegistry = connectionRegistry
 				managedHostUseCase.WithAgentControl(
 					managedHostStore,
 					connectionRegistry,
@@ -284,6 +286,12 @@ func run() error {
 				if streamErr != nil {
 					return fmt.Errorf("create Agent stream: %w", streamErr)
 				}
+				agentRoutes := http.NewServeMux()
+				agentRoutes.Handle("/api/v1/agent/connect", agentStream)
+				agentRoutes.Handle(
+					"/api/v1/agent/certificate:rotate",
+					managedhostservice.NewAgentCertificateRotationHTTP(managedHostUseCase),
+				)
 				serverCertificate, serverPrivateKey, materialErr :=
 					cfg.Server.Agent.Materials()
 				if materialErr != nil {
@@ -291,7 +299,7 @@ func run() error {
 				}
 				agentHandler := httpx.RequestID(id.New)(
 					httpx.AccessLog(logger)(
-						httpx.Recovery(logger)(agentStream),
+						httpx.Recovery(logger)(agentRoutes),
 					),
 				)
 				agentControlServer, materialErr = server.NewAgentServer(
@@ -384,8 +392,45 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("create terminal use case: %w", err)
 		}
+		directContainerGateway, err := terminaldata.NewDirectContainerGateway(
+			runtimeinventorydata.NewEnvironmentDirectCredentialResolver(),
+		)
+		if err != nil {
+			return fmt.Errorf("create direct container terminal gateway: %w", err)
+		}
+		containerGateways := map[runtimeaccess.Mode]terminalbiz.ContainerGateway{
+			runtimeaccess.ModeDirectDocker: directContainerGateway,
+		}
+		directSSHGateway, err := terminaldata.NewDirectSSHGateway(
+			terminaldata.NewEnvironmentSSHPrivateKeyResolver(),
+		)
+		if err != nil {
+			return fmt.Errorf("create direct SSH terminal gateway: %w", err)
+		}
+		hostGateways := map[runtimeaccess.Mode]terminalbiz.HostGateway{
+			runtimeaccess.ModeDirectDocker: directSSHGateway,
+		}
+		if agentConnectionRegistry != nil {
+			agentContainerGateway, gatewayErr :=
+				terminaldata.NewAgentContainerGateway(agentConnectionRegistry)
+			if gatewayErr != nil {
+				return fmt.Errorf("create Agent container terminal gateway: %w", gatewayErr)
+			}
+			containerGateways[runtimeaccess.ModeAgent] = agentContainerGateway
+			agentHostGateway, gatewayErr :=
+				terminaldata.NewAgentHostGateway(agentConnectionRegistry)
+			if gatewayErr != nil {
+				return fmt.Errorf("create Agent host terminal gateway: %w", gatewayErr)
+			}
+			hostGateways[runtimeaccess.ModeAgent] = agentHostGateway
+		}
+		terminalUseCase.WithContainerGateway(
+			terminaldata.NewContainerGatewayRouter(containerGateways),
+		).WithHostGateway(
+			terminaldata.NewHostGatewayRouter(hostGateways),
+		).WithPrincipalResolver(identityUseCase)
 		if err := productAPI.WithTerminal(
-			terminalservice.NewHTTP(terminalUseCase), authenticateProject,
+			terminalservice.NewHTTP(terminalUseCase, metrics), authenticateProject,
 		); err != nil {
 			return fmt.Errorf("mount terminal API: %w", err)
 		}

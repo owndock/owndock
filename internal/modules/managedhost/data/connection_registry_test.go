@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -10,6 +11,146 @@ import (
 	"github.com/owndock/owndock/internal/modules/managedhost/biz"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
+
+func TestConnectionRegistryBridgesConstrainedAgentTerminal(t *testing.T) {
+	registry := newTestConnectionRegistry(t, 8, 4)
+	registry.Register(
+		"host-1",
+		"agent-session-1",
+		[]string{agentprotocol.CapabilityTerminalContainer},
+		func() {},
+	)
+	frames := registry.TerminalFrames("host-1", "agent-session-1")
+	opened := make(chan agentprotocol.TerminalStream, 1)
+	openErrors := make(chan error, 1)
+	request := agentprotocol.TerminalOpen{
+		Kind:         agentprotocol.TerminalKindContainer,
+		DeploymentID: "deployment-1", ProjectID: "project-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-1", ContainerName: "owndock-container-1",
+		CutoverSequence: 7, Columns: 120, Rows: 30,
+	}
+	go func() {
+		stream, err := registry.OpenTerminal(
+			t.Context(), "host-1", "terminal-session-1", request,
+		)
+		opened <- stream
+		openErrors <- err
+	}()
+	openFrame := <-frames
+	if openFrame.Type != agentprotocol.TerminalFrameOpen ||
+		openFrame.Sequence != 1 || openFrame.Open == nil ||
+		*openFrame.Open != request {
+		t.Fatalf("open frame = %+v", openFrame)
+	}
+	if err := registry.CompleteTerminalFrame(
+		"host-1",
+		"agent-session-1",
+		agentprotocol.TerminalFrame{
+			SessionID: "terminal-session-1", Sequence: 1,
+			Type: agentprotocol.TerminalFrameReady,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	stream := <-opened
+	if err := <-openErrors; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Write([]byte("whoami\n")); err != nil {
+		t.Fatal(err)
+	}
+	stdin := <-frames
+	if stdin.Type != agentprotocol.TerminalFrameStdin || stdin.Sequence != 2 ||
+		string(stdin.Data) != "whoami\n" {
+		t.Fatalf("stdin frame = %+v", stdin)
+	}
+	if err := stream.Resize(t.Context(), 132, 43); err != nil {
+		t.Fatal(err)
+	}
+	resize := <-frames
+	if resize.Type != agentprotocol.TerminalFrameResize || resize.Sequence != 3 ||
+		resize.Columns != 132 || resize.Rows != 43 {
+		t.Fatalf("resize frame = %+v", resize)
+	}
+	if err := registry.CompleteTerminalFrame(
+		"host-1",
+		"agent-session-1",
+		agentprotocol.TerminalFrame{
+			SessionID: "terminal-session-1", Sequence: 2,
+			Type: agentprotocol.TerminalFrameStdout, Data: []byte("owndock\n"),
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	buffer := make([]byte, 32)
+	read, err := stream.Read(buffer)
+	if err != nil || string(buffer[:read]) != "owndock\n" {
+		t.Fatalf("terminal output = %q, error = %v", buffer[:read], err)
+	}
+	if err := registry.CompleteTerminalFrame(
+		"host-1",
+		"agent-session-1",
+		agentprotocol.TerminalFrame{
+			SessionID: "terminal-session-1", Sequence: 3,
+			Type: agentprotocol.TerminalFrameClose,
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Read(buffer); !errors.Is(err, io.EOF) {
+		t.Fatalf("closed terminal read error = %v", err)
+	}
+	if err := stream.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestConnectionRegistryRequiresTerminalCapability(t *testing.T) {
+	registry := newTestConnectionRegistry(t, 2, 4)
+	registry.Register(
+		"host-1",
+		"agent-session-1",
+		[]string{agentprotocol.CapabilityRuntimeProbe},
+		func() {},
+	)
+	_, err := registry.OpenTerminal(
+		t.Context(),
+		"host-1",
+		"terminal-session-1",
+		agentprotocol.TerminalOpen{
+			Kind:         agentprotocol.TerminalKindContainer,
+			DeploymentID: "deployment-1", ProjectID: "project-1",
+			ApplicationID: "application-1", EnvironmentID: "environment-1",
+			RuntimeTargetID: "target-1", ContainerName: "owndock-container-1",
+			CutoverSequence: 1, Columns: 120, Rows: 30,
+		},
+	)
+	if !errors.Is(err, biz.ErrAgentCapabilityUnavailable) {
+		t.Fatalf("OpenTerminal() error = %v", err)
+	}
+}
+
+func TestConnectionRegistrySeparatesHostAndContainerCapabilities(t *testing.T) {
+	registry := newTestConnectionRegistry(t, 2, 4)
+	registry.Register(
+		"host-1",
+		"agent-session-1",
+		[]string{agentprotocol.CapabilityTerminalContainer},
+		func() {},
+	)
+	_, err := registry.OpenTerminal(
+		t.Context(),
+		"host-1",
+		"host-terminal-1",
+		agentprotocol.TerminalOpen{
+			Kind: agentprotocol.TerminalKindHost, Columns: 120, Rows: 30,
+		},
+	)
+	if !errors.Is(err, biz.ErrAgentCapabilityUnavailable) {
+		t.Fatalf("host terminal with container-only capability error = %v", err)
+	}
+}
 
 func TestConnectionRegistryReplacesAndConditionallyUnregisters(t *testing.T) {
 	registry := newTestConnectionRegistry(t, 2, 4)

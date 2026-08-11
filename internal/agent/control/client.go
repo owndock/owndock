@@ -19,7 +19,13 @@ import (
 var (
 	ErrConfigurationInvalid  = errors.New("Agent control configuration is invalid")
 	ErrConnectionUnavailable = errors.New("Agent control connection is unavailable")
+	ErrReconnectRequested    = errors.New("Agent control reconnect was requested")
 	ErrProtocolViolation     = errors.New("Agent control protocol violation")
+)
+
+const (
+	maximumConcurrentTerminals     = 16
+	maximumConcurrentHostTerminals = 4
 )
 
 type PermanentError struct {
@@ -42,6 +48,20 @@ type CommandExecutor interface {
 	) (agentprotocol.AgentCommandResult, error)
 }
 
+type ContainerTerminalExecutor interface {
+	OpenContainerTerminal(
+		context.Context,
+		agentprotocol.TerminalOpen,
+	) (agentprotocol.TerminalStream, error)
+}
+
+type HostTerminalExecutor interface {
+	OpenHostTerminal(
+		context.Context,
+		agentprotocol.TerminalOpen,
+	) (agentprotocol.TerminalStream, error)
+}
+
 type Identity struct {
 	OrganizationID string
 	ManagedHostID  string
@@ -62,9 +82,36 @@ type ClientConfig struct {
 }
 
 type Client struct {
-	httpClient *http.Client
-	executor   CommandExecutor
-	config     ClientConfig
+	httpClient         *http.Client
+	executor           CommandExecutor
+	config             ClientConfig
+	terminal           ContainerTerminalExecutor
+	hostTerminal       HostTerminalExecutor
+	terminalMu         sync.Mutex
+	terminals          map[string]*clientTerminalState
+	sessionMu          sync.Mutex
+	sessionCancel      context.CancelFunc
+	reconnectRequested bool
+}
+
+// Reconnect closes only the current authenticated control stream. Runner will
+// immediately establish a new stream, allowing a freshly installed client
+// identity to take effect without restarting the Agent process.
+func (c *Client) Reconnect() {
+	c.sessionMu.Lock()
+	c.reconnectRequested = true
+	cancel := c.sessionCancel
+	c.sessionMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+type clientTerminalState struct {
+	kind               agentprotocol.TerminalKind
+	lastServerSequence uint64
+	inbound            chan agentprotocol.TerminalFrame
+	cancel             context.CancelFunc
 }
 
 func NewClient(
@@ -73,7 +120,12 @@ func NewClient(
 	config ClientConfig,
 ) (*Client, error) {
 	if len(config.Capabilities) == 0 {
-		config.Capabilities = agentprotocol.SupportedCapabilities()
+		for _, capability := range agentprotocol.SupportedCapabilities() {
+			if capability != agentprotocol.CapabilityTerminalContainer &&
+				capability != agentprotocol.CapabilityTerminalHost {
+				config.Capabilities = append(config.Capabilities, capability)
+			}
+		}
 	}
 	if httpClient == nil || executor == nil || validateClientConfig(config) != nil {
 		return nil, ErrConfigurationInvalid
@@ -82,7 +134,18 @@ func NewClient(
 		httpClient: httpClient,
 		executor:   executor,
 		config:     config,
+		terminals:  make(map[string]*clientTerminalState),
 	}, nil
+}
+
+func (c *Client) WithContainerTerminal(executor ContainerTerminalExecutor) *Client {
+	c.terminal = executor
+	return c
+}
+
+func (c *Client) WithHostTerminal(executor HostTerminalExecutor) *Client {
+	c.hostTerminal = executor
+	return c
 }
 
 func validateClientConfig(config ClientConfig) error {
@@ -113,6 +176,11 @@ func validateClientConfig(config ClientConfig) error {
 		config.MaxConcurrentCommands > 64 {
 		return ErrConfigurationInvalid
 	}
+	if (hasCapability(config.Capabilities, agentprotocol.CapabilityTerminalContainer) ||
+		hasCapability(config.Capabilities, agentprotocol.CapabilityTerminalHost)) &&
+		config.MaxFrameBytes < agentprotocol.MinimumTerminalFrameBytes {
+		return ErrConfigurationInvalid
+	}
 	seen := make(map[string]struct{}, len(config.Capabilities))
 	for _, capability := range config.Capabilities {
 		if !agentprotocol.SupportsCapability(capability) {
@@ -129,14 +197,41 @@ func validateClientConfig(config ClientConfig) error {
 	return nil
 }
 
-func (c *Client) Run(ctx context.Context) error {
+func (c *Client) Run(ctx context.Context) (result error) {
+	if hasCapability(c.config.Capabilities, agentprotocol.CapabilityTerminalContainer) &&
+		c.terminal == nil {
+		return ErrConfigurationInvalid
+	}
+	if hasCapability(c.config.Capabilities, agentprotocol.CapabilityTerminalHost) &&
+		c.hostTerminal == nil {
+		return ErrConfigurationInvalid
+	}
 	sessionContext, cancel := context.WithCancel(ctx)
 	defer cancel()
+	c.sessionMu.Lock()
+	c.sessionCancel = cancel
+	c.reconnectRequested = false
+	c.sessionMu.Unlock()
+	defer func() {
+		c.sessionMu.Lock()
+		c.sessionCancel = nil
+		reconnectRequested := c.reconnectRequested
+		c.reconnectRequested = false
+		c.sessionMu.Unlock()
+		if reconnectRequested && ctx.Err() == nil {
+			// The certificate rotation request and control stream can share an
+			// HTTP/2 TLS connection. Once the stream has closed, discard every
+			// idle connection so the next hello must perform a new handshake and
+			// load the freshly installed identity bundle.
+			c.httpClient.CloseIdleConnections()
+			result = ErrReconnectRequested
+		}
+	}()
 
 	requestReader, requestWriter := io.Pipe()
 	defer func() { _ = requestReader.Close() }()
 	defer func() { _ = requestWriter.Close() }()
-	outbound := make(chan outboundFrame, c.config.MaxConcurrentCommands+2)
+	outbound := make(chan outboundFrame, c.config.MaxConcurrentCommands+64)
 	writerErrors := make(chan error, 1)
 	go writeAgentFrames(
 		sessionContext,
@@ -212,6 +307,7 @@ func (c *Client) Run(ctx context.Context) error {
 	var workers sync.WaitGroup
 	defer func() {
 		cancel()
+		c.closeContainerTerminals()
 		workers.Wait()
 	}()
 	lastServerSequence := first.Sequence
@@ -252,6 +348,7 @@ func (c *Client) Run(ctx context.Context) error {
 				results,
 				semaphore,
 				&workers,
+				outbound,
 			); err != nil {
 				return err
 			}
@@ -292,6 +389,7 @@ func (c *Client) Run(ctx context.Context) error {
 type outboundFrame struct {
 	heartbeat     bool
 	commandResult *agentprotocol.AgentCommandResult
+	terminal      *agentprotocol.TerminalFrame
 }
 
 func writeAgentFrames(
@@ -332,6 +430,10 @@ func writeAgentFrames(
 			case value.commandResult != nil:
 				frame.Type = "command_result"
 				frame.CommandResult = newAgentResult(*value.commandResult)
+			case value.terminal != nil:
+				frame.Type = "terminal"
+				terminal := *value.terminal
+				frame.Terminal = &terminal
 			default:
 				err = ErrProtocolViolation
 				continue
@@ -476,7 +578,7 @@ func validateHelloAcknowledgement(
 		frame.HeartbeatIntervalSeconds > 3600 ||
 		frame.MaxFrameBytes < 1024 ||
 		frame.MaxFrameBytes > 1024*1024 ||
-		frame.Command != nil || frame.Code != "" {
+		frame.Command != nil || frame.Terminal != nil || frame.Code != "" {
 		return 0, 0, &PermanentError{Code: "invalid_hello_ack"}
 	}
 	maximum := frame.MaxFrameBytes
@@ -502,23 +604,24 @@ func (c *Client) handleServerFrame(
 	results chan<- commandExecution,
 	semaphore chan struct{},
 	workers *sync.WaitGroup,
+	outbound chan<- outboundFrame,
 ) error {
 	switch frame.Type {
 	case "heartbeat_ack":
 		if frame.AcknowledgedSequence == 0 || frame.Command != nil ||
-			frame.Code != "" || frame.CommandID != "" {
+			frame.Terminal != nil || frame.Code != "" || frame.CommandID != "" {
 			return &PermanentError{Code: "invalid_heartbeat_ack"}
 		}
 		return nil
 	case "command_result_ack":
 		if frame.AcknowledgedSequence == 0 ||
 			!validIdentity(frame.CommandID) ||
-			frame.Command != nil || frame.Code != "" {
+			frame.Command != nil || frame.Terminal != nil || frame.Code != "" {
 			return &PermanentError{Code: "invalid_command_result_ack"}
 		}
 		return nil
 	case "command":
-		if frame.Command == nil || frame.Code != "" ||
+		if frame.Command == nil || frame.Terminal != nil || frame.Code != "" ||
 			frame.AcknowledgedSequence != 0 || frame.CommandID != "" {
 			return &PermanentError{Code: "invalid_command"}
 		}
@@ -546,14 +649,290 @@ func (c *Client) handleServerFrame(
 			return ErrConnectionUnavailable
 		}
 		return nil
+	case "terminal":
+		if frame.Terminal == nil || frame.Command != nil || frame.Code != "" ||
+			frame.AcknowledgedSequence != 0 || frame.CommandID != "" {
+			return &PermanentError{Code: "invalid_terminal_frame"}
+		}
+		return c.handleTerminalFrame(ctx, *frame.Terminal, outbound, workers)
 	case "error":
-		if !validSafeCode(frame.Code) || frame.Command != nil {
+		if !validSafeCode(frame.Code) || frame.Command != nil || frame.Terminal != nil {
 			return &PermanentError{Code: "invalid_server_error"}
 		}
 		return &PermanentError{Code: frame.Code}
 	default:
 		return &PermanentError{Code: "unknown_server_frame"}
 	}
+}
+
+type terminalRead struct {
+	payload []byte
+	err     error
+}
+
+func (c *Client) handleTerminalFrame(
+	ctx context.Context,
+	frame agentprotocol.TerminalFrame,
+	outbound chan<- outboundFrame,
+	workers *sync.WaitGroup,
+) error {
+	if err := frame.Validate(agentprotocol.TerminalServerToAgent); err != nil {
+		return &PermanentError{Code: "invalid_terminal_frame"}
+	}
+	if frame.Type == agentprotocol.TerminalFrameOpen {
+		if frame.Sequence != 1 || !c.terminalOpenSupported(*frame.Open) {
+			return &PermanentError{Code: "invalid_terminal_frame"}
+		}
+		terminalContext, cancel := context.WithCancel(ctx)
+		state := &clientTerminalState{
+			kind:               frame.Open.Kind,
+			lastServerSequence: frame.Sequence,
+			inbound:            make(chan agentprotocol.TerminalFrame, 16),
+			cancel:             cancel,
+		}
+		c.terminalMu.Lock()
+		if c.terminals[frame.SessionID] != nil {
+			c.terminalMu.Unlock()
+			cancel()
+			return &PermanentError{Code: "invalid_terminal_frame"}
+		}
+		if len(c.terminals) >= maximumConcurrentTerminals ||
+			frame.Open.Kind == agentprotocol.TerminalKindHost &&
+				c.hostTerminalCountLocked() >= maximumConcurrentHostTerminals {
+			c.terminalMu.Unlock()
+			cancel()
+			return enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+				SessionID: frame.SessionID,
+				Sequence:  1,
+				Type:      agentprotocol.TerminalFrameError,
+				Code:      "terminal_capacity_exceeded",
+			})
+		}
+		c.terminals[frame.SessionID] = state
+		c.terminalMu.Unlock()
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			c.runTerminal(terminalContext, frame, state, outbound)
+		}()
+		return nil
+	}
+
+	c.terminalMu.Lock()
+	state := c.terminals[frame.SessionID]
+	if state == nil || frame.Sequence != state.lastServerSequence+1 {
+		c.terminalMu.Unlock()
+		return &PermanentError{Code: "invalid_terminal_frame"}
+	}
+	select {
+	case state.inbound <- frame:
+		state.lastServerSequence = frame.Sequence
+		if frame.Type == agentprotocol.TerminalFrameClose {
+			state.cancel()
+		}
+		c.terminalMu.Unlock()
+		return nil
+	default:
+		c.terminalMu.Unlock()
+		return ErrConnectionUnavailable
+	}
+}
+
+func (c *Client) terminalOpenSupported(open agentprotocol.TerminalOpen) bool {
+	switch open.Kind {
+	case agentprotocol.TerminalKindContainer:
+		return c.terminal != nil && hasCapability(
+			c.config.Capabilities,
+			agentprotocol.CapabilityTerminalContainer,
+		)
+	case agentprotocol.TerminalKindHost:
+		return c.hostTerminal != nil && hasCapability(
+			c.config.Capabilities,
+			agentprotocol.CapabilityTerminalHost,
+		)
+	default:
+		return false
+	}
+}
+
+func (c *Client) hostTerminalCountLocked() int {
+	count := 0
+	for _, state := range c.terminals {
+		if state.kind == agentprotocol.TerminalKindHost {
+			count++
+		}
+	}
+	return count
+}
+
+func (c *Client) runTerminal(
+	ctx context.Context,
+	openFrame agentprotocol.TerminalFrame,
+	state *clientTerminalState,
+	outbound chan<- outboundFrame,
+) {
+	defer c.removeContainerTerminal(openFrame.SessionID, state)
+	var stream agentprotocol.TerminalStream
+	var err error
+	switch openFrame.Open.Kind {
+	case agentprotocol.TerminalKindContainer:
+		stream, err = c.terminal.OpenContainerTerminal(ctx, *openFrame.Open)
+	case agentprotocol.TerminalKindHost:
+		stream, err = c.hostTerminal.OpenHostTerminal(ctx, *openFrame.Open)
+	default:
+		err = ErrProtocolViolation
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			_ = enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+				SessionID: openFrame.SessionID, Sequence: 1,
+				Type: agentprotocol.TerminalFrameError, Code: "terminal_open_failed",
+			})
+		}
+		return
+	}
+	defer stream.Close()
+	sequence := uint64(1)
+	if enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+		SessionID: openFrame.SessionID, Sequence: sequence,
+		Type: agentprotocol.TerminalFrameReady,
+	}) != nil {
+		return
+	}
+	reads := make(chan terminalRead, 1)
+	go readContainerTerminal(ctx, stream, reads)
+	for {
+		select {
+		case frame := <-state.inbound:
+			switch frame.Type {
+			case agentprotocol.TerminalFrameStdin:
+				if writeTerminalPayload(stream, frame.Data) != nil {
+					sequence++
+					_ = enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+						SessionID: openFrame.SessionID, Sequence: sequence,
+						Type: agentprotocol.TerminalFrameError, Code: "terminal_io_failed",
+					})
+					return
+				}
+			case agentprotocol.TerminalFrameResize:
+				if stream.Resize(ctx, frame.Columns, frame.Rows) != nil {
+					sequence++
+					_ = enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+						SessionID: openFrame.SessionID, Sequence: sequence,
+						Type: agentprotocol.TerminalFrameError, Code: "terminal_resize_failed",
+					})
+					return
+				}
+			case agentprotocol.TerminalFrameClose:
+				return
+			}
+		case result := <-reads:
+			if len(result.payload) > 0 {
+				sequence++
+				if enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+					SessionID: openFrame.SessionID, Sequence: sequence,
+					Type: agentprotocol.TerminalFrameStdout, Data: result.payload,
+				}) != nil {
+					return
+				}
+			}
+			if result.err != nil {
+				sequence++
+				frameType, code := agentprotocol.TerminalFrameClose, ""
+				if !errors.Is(result.err, io.EOF) {
+					frameType, code = agentprotocol.TerminalFrameError, "terminal_io_failed"
+				}
+				_ = enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
+					SessionID: openFrame.SessionID, Sequence: sequence,
+					Type: frameType, Code: code,
+				})
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func readContainerTerminal(
+	ctx context.Context,
+	stream agentprotocol.TerminalStream,
+	results chan<- terminalRead,
+) {
+	buffer := make([]byte, agentprotocol.MaximumTerminalDataBytes)
+	for {
+		read, err := stream.Read(buffer)
+		result := terminalRead{err: err}
+		if read > 0 {
+			result.payload = append([]byte(nil), buffer[:read]...)
+		}
+		select {
+		case results <- result:
+		case <-ctx.Done():
+			return
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func writeTerminalPayload(writer io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		written, err := writer.Write(payload)
+		if err != nil {
+			return err
+		}
+		if written < 1 || written > len(payload) {
+			return io.ErrShortWrite
+		}
+		payload = payload[written:]
+	}
+	return nil
+}
+
+func enqueueTerminalFrame(
+	ctx context.Context,
+	outbound chan<- outboundFrame,
+	frame agentprotocol.TerminalFrame,
+) error {
+	if err := frame.Validate(agentprotocol.TerminalAgentToServer); err != nil {
+		return ErrProtocolViolation
+	}
+	return enqueueOutbound(ctx, outbound, outboundFrame{terminal: &frame})
+}
+
+func (c *Client) removeContainerTerminal(
+	sessionID string,
+	state *clientTerminalState,
+) {
+	state.cancel()
+	c.terminalMu.Lock()
+	if c.terminals[sessionID] == state {
+		delete(c.terminals, sessionID)
+	}
+	c.terminalMu.Unlock()
+}
+
+func (c *Client) closeContainerTerminals() {
+	c.terminalMu.Lock()
+	states := make([]*clientTerminalState, 0, len(c.terminals))
+	for _, state := range c.terminals {
+		states = append(states, state)
+	}
+	c.terminalMu.Unlock()
+	for _, state := range states {
+		state.cancel()
+	}
+}
+
+func hasCapability(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func enqueueOutbound(

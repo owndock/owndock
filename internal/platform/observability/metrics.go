@@ -10,18 +10,22 @@ import (
 )
 
 type Metrics struct {
-	registry        *prometheus.Registry
-	requests        *prometheus.CounterVec
-	duration        *prometheus.HistogramVec
-	inFlight        prometheus.Gauge
-	buildOperations *prometheus.CounterVec
-	buildDuration   *prometheus.HistogramVec
-	buildLogWrites  *prometheus.CounterVec
-	buildLogBytes   *prometheus.CounterVec
-	workerPolls     *prometheus.CounterVec
-	workerPollTime  *prometheus.HistogramVec
-	workerLastOK    *prometheus.GaugeVec
-	workerLastError *prometheus.GaugeVec
+	registry         *prometheus.Registry
+	requests         *prometheus.CounterVec
+	duration         *prometheus.HistogramVec
+	inFlight         prometheus.Gauge
+	buildOperations  *prometheus.CounterVec
+	buildDuration    *prometheus.HistogramVec
+	buildLogWrites   *prometheus.CounterVec
+	buildLogBytes    *prometheus.CounterVec
+	workerPolls      *prometheus.CounterVec
+	workerPollTime   *prometheus.HistogramVec
+	workerLastOK     *prometheus.GaugeVec
+	workerLastError  *prometheus.GaugeVec
+	terminalActive   *prometheus.GaugeVec
+	terminalOpened   *prometheus.CounterVec
+	terminalClosed   *prometheus.CounterVec
+	terminalDuration *prometheus.HistogramVec
 }
 
 func NewMetrics() *Metrics {
@@ -80,6 +84,23 @@ func NewMetrics() *Metrics {
 			Namespace: "owndock", Subsystem: "worker", Name: "last_error_unixtime",
 			Help: "Unix timestamp of the most recent failed or timed-out worker polling iteration.",
 		}, []string{"worker"}),
+		terminalActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: "owndock", Subsystem: "terminal", Name: "connections_active",
+			Help: "Current terminal connections by bounded kind and connection mode.",
+		}, []string{"kind", "connection_mode"}),
+		terminalOpened: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "owndock", Subsystem: "terminal", Name: "connections_total",
+			Help: "Total established terminal connections by bounded kind and connection mode.",
+		}, []string{"kind", "connection_mode"}),
+		terminalClosed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "owndock", Subsystem: "terminal", Name: "connection_closes_total",
+			Help: "Total closed terminal connections by bounded close reason.",
+		}, []string{"kind", "connection_mode", "reason"}),
+		terminalDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "owndock", Subsystem: "terminal", Name: "connection_duration_seconds",
+			Help:    "Established terminal connection duration by bounded close reason.",
+			Buckets: []float64{1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200},
+		}, []string{"kind", "connection_mode", "reason"}),
 	}
 	registry.MustRegister(
 		metrics.requests,
@@ -93,10 +114,61 @@ func NewMetrics() *Metrics {
 		metrics.workerPollTime,
 		metrics.workerLastOK,
 		metrics.workerLastError,
+		metrics.terminalActive,
+		metrics.terminalOpened,
+		metrics.terminalClosed,
+		metrics.terminalDuration,
 		collectors.NewGoCollector(),
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return metrics
+}
+
+func (m *Metrics) TerminalConnectionOpened(kind, connectionMode string) {
+	kind, connectionMode = safeTerminalKind(kind), safeTerminalConnectionMode(connectionMode)
+	m.terminalActive.WithLabelValues(kind, connectionMode).Inc()
+	m.terminalOpened.WithLabelValues(kind, connectionMode).Inc()
+}
+
+func (m *Metrics) TerminalConnectionClosed(
+	kind, connectionMode, reason string,
+	duration time.Duration,
+) {
+	kind, connectionMode = safeTerminalKind(kind), safeTerminalConnectionMode(connectionMode)
+	reason = safeTerminalCloseReason(reason)
+	m.terminalActive.WithLabelValues(kind, connectionMode).Dec()
+	m.terminalClosed.WithLabelValues(kind, connectionMode, reason).Inc()
+	m.terminalDuration.WithLabelValues(kind, connectionMode, reason).
+		Observe(max(duration.Seconds(), 0))
+}
+
+func safeTerminalKind(value string) string {
+	switch value {
+	case "container", "host":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func safeTerminalConnectionMode(value string) string {
+	switch value {
+	case "direct", "agent":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func safeTerminalCloseReason(value string) string {
+	switch value {
+	case "user_requested", "administrator_terminated", "permission_revoked",
+		"idle_timeout", "maximum_duration", "target_unavailable",
+		"connection_failed", "server_shutdown":
+		return value
+	default:
+		return "connection_failed"
+	}
 }
 
 func (m *Metrics) RecordWorkerPoll(worker, result string, duration time.Duration) {

@@ -2,7 +2,7 @@
 
 本文用时序图说明 OwnDock 当前已实现的关键链路，以及首个端到端部署用例的目标链路。标题中的“已实现”表示代码、契约和测试已经存在；“目标”表示产品语义已经确定，但执行能力尚未接入，不能据此判断当前版本可以执行生产部署。
 
-TerminalSession 创建、一次性 Cookie、会话状态机和后续 WSS/执行网关的分层时序见[安全终端会话](terminal-sessions.md)。其中控制面已经实现，交互字节流仍是目标链路。
+TerminalSession 创建、一次性 Cookie、登录会话重新确认、WSS 和执行网关的分层时序见[安全终端会话](terminal-sessions.md)。其中控制面、同域 WSS，以及 direct/Agent 两种连接模式的容器 Docker exec 与主机 PTY/SSH Gateway 已实现；真实远程主机故障和浏览器系统验收仍是目标链路。
 
 ## 已实现：启动、Migration 与就绪
 
@@ -279,7 +279,7 @@ sequenceDiagram
 
 ## 已实现基础：Agent mTLS 控制连接与在线状态
 
-Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前双端已经实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流、有上限的抖动退避和优雅停止；Server 端提供 `runtime.probe` 与 `deployment.prepare/stage/activate/cancel` 类型化 command/result、有界队列、并发去重和 secret-safe 近期结果缓存。Agent 侧本机 Docker executor、deadline、并发去重和跨重启结果缓存也已实现，并通过双端流一致性与真实 Engine 测试。Agent Control Server 启用时，Agent probe 与 Deployment Gateway 在 composition root 配套注册。
+Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前双端已经实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流、有上限的抖动退避和优雅停止；Server 端提供 `runtime.probe`、`deployment.prepare/stage/activate/cancel`、Runtime Inventory command/result，以及 `terminal.container`/`terminal.host` 会话复用。Agent 侧本机 Docker executor、deadline、并发去重、跨重启安全结果缓存、受限容器终端和固定身份主机 PTY 也已实现。Agent Control Server 启用时，Agent probe、Deployment Gateway 与两类 Terminal Gateway 在 composition root 配套注册。
 
 ```mermaid
 sequenceDiagram

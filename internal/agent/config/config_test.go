@@ -27,10 +27,67 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 	}
 	if config.Control.MaxFrameBytes != 65536 ||
 		config.Control.MaxConcurrentCommands != 4 ||
-		len(config.Control.Capabilities) != 9 ||
+		len(config.Control.Capabilities) != 11 ||
 		config.Runtime.ResultCacheSize != 256 ||
-		config.Runtime.CutoverWatermarkSize != 16384 {
+		config.Runtime.CutoverWatermarkSize != 16384 ||
+		!config.HostTerminal.Enabled ||
+		config.HostTerminal.User != "owndock-terminal" ||
+		!config.CertificateRotation.Enabled ||
+		config.Control.ClientCertificateFile != config.Control.ClientPrivateKeyFile {
 		t.Fatalf("config = %#v", config)
+	}
+}
+
+func TestLoadRejectsRotationWithSplitCertificateAndKeyFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	value := []byte(`
+control:
+  endpoint: https://control.example.com:8443/api/v1/agent/connect
+  organization_id: organization-1
+  managed_host_id: host-1
+  identity_id: identity-1
+  instance_id: instance-1
+  ca_certificate_file: /etc/owndock/agent-ca.pem
+  client_certificate_file: /etc/owndock/agent.pem
+  client_private_key_file: /etc/owndock/agent-key.pem
+runtime: {}
+certificate_rotation:
+  enabled: true
+`)
+	if err := os.WriteFile(path, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("split rotation identity error = %v", err)
+	}
+}
+
+func TestLoadRejectsHostTerminalCapabilityWithoutFixedLocalIdentity(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	value := []byte(`
+control:
+  endpoint: https://control.example.com:8443/api/v1/agent/connect
+  organization_id: organization-1
+  managed_host_id: host-1
+  identity_id: identity-1
+  instance_id: instance-1
+  ca_certificate_file: /etc/owndock/agent-ca.pem
+  client_certificate_file: /etc/owndock/agent.pem
+  client_private_key_file: /etc/owndock/agent-key.pem
+  capabilities:
+    - runtime.probe
+    - terminal.host
+runtime: {}
+host_terminal:
+  enabled: true
+  user: ""
+  shell: /bin/sh
+`)
+	if err := os.WriteFile(path, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("host terminal identity error = %v", err)
 	}
 }
 
@@ -88,6 +145,32 @@ runtime: {}
 	}
 	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("partial inventory capabilities error = %v", err)
+	}
+}
+
+func TestLoadRejectsTerminalCapabilityWithSmallFrames(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	value := []byte(`
+control:
+  endpoint: https://control.example.com:8443/api/v1/agent/connect
+  organization_id: organization-1
+  managed_host_id: host-1
+  identity_id: identity-1
+  instance_id: instance-1
+  ca_certificate_file: /etc/owndock/agent-ca.pem
+  client_certificate_file: /etc/owndock/agent.pem
+  client_private_key_file: /etc/owndock/agent-key.pem
+  max_frame_bytes: 32768
+  capabilities:
+    - runtime.probe
+    - terminal.container
+runtime: {}
+`)
+	if err := os.WriteFile(path, value, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("terminal frame limit error = %v", err)
 	}
 }
 

@@ -6,8 +6,8 @@ control:
   instance_id: replace-with-installation-instance-id
   boot_id_file: /proc/sys/kernel/random/boot_id
   ca_certificate_file: /etc/owndock/agent-ca.pem
-  client_certificate_file: /etc/owndock/agent.pem
-  client_private_key_file: /etc/owndock/agent-key.pem
+  client_certificate_file: /etc/owndock/agent-identity.pem
+  client_private_key_file: /etc/owndock/agent-identity.pem
   handshake_timeout: 10s
   server_silence_timeout: 45s
   reconnect_minimum: 1s
@@ -25,9 +25,23 @@ control:
     - runtime.inventory.chunk
     - runtime.inventory.release
     - runtime.inventory.events
+    - terminal.container
+    - terminal.host
 
 runtime:
   docker_socket: /var/run/docker.sock
   state_directory: /var/lib/owndock-agent
   result_cache_size: 256
   cutover_watermark_size: 16384
+
+host_terminal:
+  enabled: true
+  user: owndock-terminal
+  shell: /bin/sh
+  termination_grace: 5s
+
+certificate_rotation:
+  enabled: true
+  renew_before: 168h
+  retry_delay: 15m
+  request_timeout: 30s

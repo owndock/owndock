@@ -54,46 +54,55 @@ type Target struct {
 	Kind               Kind
 	OrganizationID     string
 	ProjectID          string
+	ApplicationID      string
+	EnvironmentID      string
 	ManagedHostID      string
 	RuntimeTargetID    string
 	DeploymentID       string
 	RunningInstanceID  string
 	InstanceGeneration uint64
+	ContainerName      string
 	EnvironmentStage   string
 	ConnectionMode     runtimeaccess.Mode
+	Connection         runtimeaccess.Connection
+	SSHAddress         string
+	SSHUser            string
+	SSHHostKeySHA256   string
+	SSHCredentialRef   string
 }
 
 type TerminalSession struct {
-	ID                    string
-	OrganizationID        string
-	ProjectID             string
-	Kind                  Kind
-	ActorID               string
-	ManagedHostID         string
-	RuntimeTargetID       string
-	DeploymentID          string
-	RunningInstanceID     string
-	InstanceGeneration    uint64
-	Status                SessionStatus
-	ConnectionMode        runtimeaccess.Mode
-	CreatedAt             time.Time
-	ConnectedAt           time.Time
-	LastActivityAt        time.Time
-	EndedAt               time.Time
-	IdleDeadline          time.Time
-	MaximumDeadline       time.Time
-	TicketHash            string
-	TicketExpiresAt       time.Time
-	TicketConsumedAt      time.Time
-	ClientIP              string
-	UserAgent             string
-	RequestID             string
-	CloseReason           CloseReason
-	SafeErrorCode         string
-	UserConcurrencySlot   int
-	TargetConcurrencySlot int
-	Active                bool
-	Version               uint64
+	ID                      string
+	OrganizationID          string
+	ProjectID               string
+	Kind                    Kind
+	ActorID                 string
+	AuthenticationSessionID string
+	ManagedHostID           string
+	RuntimeTargetID         string
+	DeploymentID            string
+	RunningInstanceID       string
+	InstanceGeneration      uint64
+	Status                  SessionStatus
+	ConnectionMode          runtimeaccess.Mode
+	CreatedAt               time.Time
+	ConnectedAt             time.Time
+	LastActivityAt          time.Time
+	EndedAt                 time.Time
+	IdleDeadline            time.Time
+	MaximumDeadline         time.Time
+	TicketHash              string
+	TicketExpiresAt         time.Time
+	TicketConsumedAt        time.Time
+	ClientIP                string
+	UserAgent               string
+	RequestID               string
+	CloseReason             CloseReason
+	SafeErrorCode           string
+	UserConcurrencySlot     int
+	TargetConcurrencySlot   int
+	Active                  bool
+	Version                 uint64
 }
 
 type Credential struct {
@@ -103,7 +112,7 @@ type Credential struct {
 }
 
 func NewTerminalSession(
-	id, actorID, ticketHash, clientIP, userAgent, requestID string,
+	id, actorID, authenticationSessionID, ticketHash, clientIP, userAgent, requestID string,
 	target Target,
 	policy AccessPolicy,
 	now time.Time,
@@ -117,11 +126,12 @@ func NewTerminalSession(
 		ID: strings.TrimSpace(id), OrganizationID: strings.TrimSpace(target.OrganizationID),
 		ProjectID: strings.TrimSpace(target.ProjectID), Kind: target.Kind,
 		ActorID: strings.TrimSpace(actorID), ManagedHostID: strings.TrimSpace(target.ManagedHostID),
-		RuntimeTargetID:    strings.TrimSpace(target.RuntimeTargetID),
-		DeploymentID:       strings.TrimSpace(target.DeploymentID),
-		RunningInstanceID:  strings.TrimSpace(target.RunningInstanceID),
-		InstanceGeneration: target.InstanceGeneration,
-		Status:             StatusPending, ConnectionMode: target.ConnectionMode,
+		AuthenticationSessionID: strings.TrimSpace(authenticationSessionID),
+		RuntimeTargetID:         strings.TrimSpace(target.RuntimeTargetID),
+		DeploymentID:            strings.TrimSpace(target.DeploymentID),
+		RunningInstanceID:       strings.TrimSpace(target.RunningInstanceID),
+		InstanceGeneration:      target.InstanceGeneration,
+		Status:                  StatusPending, ConnectionMode: target.ConnectionMode,
 		CreatedAt: now, LastActivityAt: now,
 		IdleDeadline: now.Add(policy.IdleTimeout), MaximumDeadline: now.Add(policy.MaximumDuration),
 		TicketHash: strings.TrimSpace(ticketHash), TicketExpiresAt: ticketExpiresAt,
@@ -136,7 +146,8 @@ func NewTerminalSession(
 
 func (s TerminalSession) Validate() error {
 	if !validIdentifier(s.ID) || !validIdentifier(s.OrganizationID) ||
-		!validIdentifier(s.ActorID) || !validIdentifier(s.ManagedHostID) ||
+		!validIdentifier(s.ActorID) || !validIdentifier(s.AuthenticationSessionID) ||
+		!validIdentifier(s.ManagedHostID) ||
 		!s.Kind.Valid() || !s.Status.Valid() || !s.ConnectionMode.Valid() ||
 		s.CreatedAt.IsZero() || s.LastActivityAt.IsZero() ||
 		!s.IdleDeadline.After(s.CreatedAt) || !s.MaximumDeadline.After(s.IdleDeadline) ||
@@ -173,6 +184,7 @@ func validTicketHash(value string) bool {
 
 func (s TerminalSession) Redacted() TerminalSession {
 	s.TicketHash = ""
+	s.AuthenticationSessionID = ""
 	return s
 }
 

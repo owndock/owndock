@@ -116,6 +116,8 @@ type agentRegistryStub struct {
 	cancel            context.CancelFunc
 	commands          chan biz.AgentCommand
 	results           []biz.AgentCommandResult
+	terminalFrames    chan agentprotocol.TerminalFrame
+	terminalResults   []agentprotocol.TerminalFrame
 }
 
 func (r *agentRegistryStub) Register(
@@ -128,7 +130,29 @@ func (r *agentRegistryStub) Register(
 	if r.commands == nil {
 		r.commands = make(chan biz.AgentCommand)
 	}
+	if r.terminalFrames == nil {
+		r.terminalFrames = make(chan agentprotocol.TerminalFrame)
+	}
 	return r.commands
+}
+func (r *agentRegistryStub) TerminalFrames(
+	string,
+	string,
+) <-chan agentprotocol.TerminalFrame {
+	if r.terminalFrames == nil {
+		r.terminalFrames = make(chan agentprotocol.TerminalFrame)
+	}
+	return r.terminalFrames
+}
+func (r *agentRegistryStub) CompleteTerminalFrame(
+	hostID, sessionID string,
+	frame agentprotocol.TerminalFrame,
+) error {
+	if r.hostID != hostID || r.sessionID != sessionID {
+		return biz.ErrAgentDisconnected
+	}
+	r.terminalResults = append(r.terminalResults, frame)
+	return nil
 }
 func (r *agentRegistryStub) Unregister(hostID, sessionID string) {
 	if r.hostID == hostID && r.sessionID == sessionID {

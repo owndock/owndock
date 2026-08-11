@@ -273,6 +273,17 @@ func (s *contractTerminalStore) GetSession(_ context.Context, organizationID, se
 	return item, nil
 }
 
+func (s *contractTerminalStore) GetSessionForConnect(
+	_ context.Context,
+	sessionID string,
+) (terminalbiz.TerminalSession, error) {
+	item, ok := s.sessions[sessionID]
+	if !ok || item.Status != terminalbiz.StatusPending || !item.Active {
+		return terminalbiz.TerminalSession{}, terminalbiz.ErrSessionNotFound
+	}
+	return item, nil
+}
+
 func (s *contractTerminalStore) CreateSession(_ context.Context, item terminalbiz.TerminalSession) (terminalbiz.TerminalSession, error) {
 	if existing, ok := s.sessions[item.ID]; ok && existing.Active {
 		return terminalbiz.TerminalSession{}, terminalbiz.ErrSessionSlotConflict

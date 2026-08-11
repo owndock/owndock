@@ -23,6 +23,14 @@ func TestMetricsInstrumentAndExpose(t *testing.T) {
 	metrics.RecordBuildLog("build", 128, nil)
 	metrics.RecordWorkerPoll("deployment", "success", 500*time.Millisecond)
 	metrics.RecordWorkerPoll("unbounded-customer-value", "unexpected", time.Second)
+	metrics.TerminalConnectionOpened("container", "direct")
+	metrics.TerminalConnectionClosed(
+		"container", "direct", "permission_revoked", 45*time.Second,
+	)
+	metrics.TerminalConnectionOpened("organization-sensitive", "target-sensitive")
+	metrics.TerminalConnectionClosed(
+		"organization-sensitive", "target-sensitive", "session-sensitive", -time.Second,
+	)
 
 	metricsResponse := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(metricsResponse, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -37,9 +45,21 @@ func TestMetricsInstrumentAndExpose(t *testing.T) {
 		`owndock_worker_poll_duration_seconds_count{result="success",worker="deployment"} 1`,
 		`owndock_worker_last_success_unixtime{worker="deployment"}`,
 		`owndock_worker_last_error_unixtime{worker="unknown"}`,
+		`owndock_terminal_connections_total{connection_mode="direct",kind="container"} 1`,
+		`owndock_terminal_connections_active{connection_mode="direct",kind="container"} 0`,
+		`owndock_terminal_connection_closes_total{connection_mode="direct",kind="container",reason="permission_revoked"} 1`,
+		`owndock_terminal_connection_duration_seconds_count{connection_mode="direct",kind="container",reason="permission_revoked"} 1`,
+		`owndock_terminal_connection_closes_total{connection_mode="unknown",kind="unknown",reason="connection_failed"} 1`,
 	} {
 		if !strings.Contains(body, sample) {
 			t.Fatalf("metrics output missing %q", sample)
+		}
+	}
+	for _, secret := range []string{
+		"organization-sensitive", "target-sensitive", "session-sensitive",
+	} {
+		if strings.Contains(body, secret) {
+			t.Fatalf("metrics output leaked unbounded value %q", secret)
 		}
 	}
 }

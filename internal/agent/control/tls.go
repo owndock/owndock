@@ -58,36 +58,9 @@ func NewHTTPClient(
 			ErrConfigurationInvalid,
 		)
 	}
-	certificatePEM, err := readBoundedTLSFile(certificatePath)
-	if err != nil {
-		return nil, fmt.Errorf("read Agent client certificate: %w", err)
+	if _, err := loadClientCertificate(certificatePath, privateKeyPath, time.Now()); err != nil {
+		return nil, err
 	}
-	privateKeyPEM, err := readBoundedTLSFile(privateKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("read Agent client private key: %w", err)
-	}
-	defer func() {
-		for index := range privateKeyPEM {
-			privateKeyPEM[index] = 0
-		}
-	}()
-	certificate, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"%w: parse Agent client certificate",
-			ErrConfigurationInvalid,
-		)
-	}
-	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
-	if err != nil || time.Now().Before(leaf.NotBefore) ||
-		!time.Now().Before(leaf.NotAfter) ||
-		!allowsClientAuthentication(leaf) {
-		return nil, fmt.Errorf(
-			"%w: Agent client certificate is not currently valid for client authentication",
-			ErrConfigurationInvalid,
-		)
-	}
-	certificate.Leaf = leaf
 	transport := &http.Transport{
 		Proxy: nil,
 		DialContext: (&net.Dialer{
@@ -95,16 +68,26 @@ func NewHTTPClient(
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
-		MaxConnsPerHost:       1,
+		MaxConnsPerHost:       2,
 		IdleConnTimeout:       30 * time.Second,
 		TLSHandshakeTimeout:   handshakeTimeout,
 		ResponseHeaderTimeout: handshakeTimeout,
 		ExpectContinueTimeout: time.Second,
 		DisableCompression:    true,
 		TLSClientConfig: &tls.Config{
-			MinVersion:   tls.VersionTLS13,
-			RootCAs:      roots,
-			Certificates: []tls.Certificate{certificate},
+			MinVersion: tls.VersionTLS13,
+			RootCAs:    roots,
+			GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				certificate, loadErr := loadClientCertificate(
+					certificatePath,
+					privateKeyPath,
+					time.Now(),
+				)
+				if loadErr != nil {
+					return nil, loadErr
+				}
+				return &certificate, nil
+			},
 		},
 	}
 	return &http.Client{
@@ -113,6 +96,56 @@ func NewHTTPClient(
 			return errors.New("Agent control redirects are not allowed")
 		},
 	}, nil
+}
+
+// loadClientCertificate reopens both files for every TLS handshake. A future
+// certificate rotation can therefore atomically replace the pair and force a
+// reconnect without restarting the Agent. Permissions and symlink checks are
+// repeated so a post-start file replacement cannot weaken the key boundary.
+func loadClientCertificate(
+	certificatePath, privateKeyPath string,
+	now time.Time,
+) (tls.Certificate, error) {
+	certificatePath, err := regularAbsoluteFile(certificatePath, false)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	privateKeyPath, err = regularAbsoluteFile(privateKeyPath, true)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	certificatePEM, err := readBoundedTLSFile(certificatePath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("read Agent client certificate: %w", err)
+	}
+	privateKeyPEM, err := readBoundedTLSFile(privateKeyPath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("read Agent client private key: %w", err)
+	}
+	defer clearTLSBytes(privateKeyPEM)
+	certificate, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf(
+			"%w: parse Agent client certificate",
+			ErrConfigurationInvalid,
+		)
+	}
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil || now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) ||
+		!allowsClientAuthentication(leaf) {
+		return tls.Certificate{}, fmt.Errorf(
+			"%w: Agent client certificate is not currently valid for client authentication",
+			ErrConfigurationInvalid,
+		)
+	}
+	certificate.Leaf = leaf
+	return certificate, nil
+}
+
+func clearTLSBytes(value []byte) {
+	for index := range value {
+		value[index] = 0
+	}
 }
 
 func readBoundedTLSFile(path string) ([]byte, error) {

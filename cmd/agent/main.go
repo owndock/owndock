@@ -100,6 +100,19 @@ func run(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return fmt.Errorf("create Agent Docker runtime: %w", err)
 	}
+	var hostTerminal *agentruntime.HostTerminalExecutor
+	if config.HostTerminal.Enabled {
+		terminationGrace, _ := config.HostTerminal.TerminationGraceDuration()
+		hostTerminal, err = agentruntime.NewHostTerminalExecutor(
+			agentruntime.HostTerminalConfig{
+				User: config.HostTerminal.User, Shell: config.HostTerminal.Shell,
+				TerminationGrace: terminationGrace,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Agent host terminal: %w", err)
+		}
+	}
 	httpClient, err := agentcontrol.NewHTTPClient(
 		agentcontrol.TLSFiles{
 			CACertificateFile:     config.Control.CACertificateFile,
@@ -139,6 +152,10 @@ func run(ctx context.Context, arguments []string) error {
 		httpClient.CloseIdleConnections()
 		return fmt.Errorf("create Agent control client: %w", err)
 	}
+	client.WithContainerTerminal(executor)
+	if hostTerminal != nil {
+		client.WithHostTerminal(hostTerminal)
+	}
 	defer client.CloseIdleConnections()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With(
@@ -165,12 +182,51 @@ func run(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return fmt.Errorf("create Agent control runner: %w", err)
 	}
+	var certificateRotator *agentcontrol.CertificateRotator
+	if config.CertificateRotation.Enabled {
+		renewBefore, _ := config.CertificateRotation.RenewBeforeDuration()
+		retryDelay, _ := config.CertificateRotation.RetryDelayDuration()
+		requestTimeout, _ := config.CertificateRotation.RequestTimeoutDuration()
+		certificateRotator, err = agentcontrol.NewCertificateRotator(
+			httpClient,
+			client,
+			agentcontrol.CertificateRotatorConfig{
+				ControlEndpoint: config.Control.Endpoint,
+				IdentityBundle:  config.Control.ClientCertificateFile,
+				CACertificate:   config.Control.CACertificateFile,
+				Identity: agentcontrol.Identity{
+					OrganizationID: config.Control.OrganizationID,
+					ManagedHostID:  config.Control.ManagedHostID,
+					IdentityID:     config.Control.IdentityID,
+					InstanceID:     config.Control.InstanceID,
+				},
+				RenewBefore: renewBefore, RetryDelay: retryDelay,
+				RequestTimeout: requestTimeout,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Agent certificate rotator: %w", err)
+		}
+	}
 	logger.Info(
 		"Agent started",
 		"runtime", "docker",
 		"protocol.version", "v1",
 	)
-	err = runner.Run(ctx)
+	if certificateRotator == nil {
+		err = runner.Run(ctx)
+	} else {
+		if recoverErr := certificateRotator.RecoverPending(ctx); recoverErr != nil {
+			return fmt.Errorf("recover pending Agent certificate rotation: %w", recoverErr)
+		}
+		runContext, cancel := context.WithCancel(ctx)
+		results := make(chan error, 2)
+		go func() { results <- runner.Run(runContext) }()
+		go func() { results <- certificateRotator.Run(runContext) }()
+		err = <-results
+		cancel()
+		<-results
+	}
 	if err != nil {
 		return err
 	}

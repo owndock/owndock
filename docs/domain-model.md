@@ -46,7 +46,7 @@ Managed Host 1 --* Host Terminal Session
 
 Template 已进入产品模型但尚未进入当前代码/API。Build Configuration、三类 Build 触发入口、状态机、Mongo queue/lease/generation fence、Artifact/Release 交接和 development 自动 Deployment 已进入正式契约。
 独立 Build Worker 已完成固定 Git 2.55.0、HTTPS/SSH 临时凭据、Host Key 固定、Commit 二次验证、受限工作区、rootless BuildKit 构建、认证 Registry push，以及 Artifact/Release 幂等交接；真实 OCI digest 在 lease generation fence 下形成唯一 Artifact。Source Repository 与 Repository Credential 已实现安全登记、执行期秘密解析和受限只读 Git probe；自建 CA/代理兼容矩阵仍待完成。
-Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的全量与 Event 调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window、有界持续读取、Docker 时间游标和失败不推进语义已实现。成功 Deployment 归属核验、Project/Host 权限分离、固定过滤与不透明游标的公开审计查询也已实现；真实双主机断线/事件洪峰系统验收尚未完成。自动安装、证书轮换和部署/终端的多主机故障系统验收仍未实现。
+Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Agent 证书支持到期前本地生成密钥和 CSR、pending 请求恢复、Server 幂等响应、最多 10 分钟旧证书过渡、单文件 identity bundle 原子安装和新 hello 确认。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的全量与 Event 调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window、有界持续读取、Docker 时间游标和失败不推进语义已实现。成功 Deployment 归属核验、Project/Host 权限分离、固定过滤与不透明游标的公开审计查询也已实现；真实双主机断线/事件洪峰系统验收尚未完成。自动安装，以及证书轮换和部署/终端的真实多主机故障系统验收仍未完成。
 
 ## 已实现的状态规则
 
@@ -93,7 +93,7 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 - Docker Runtime Inventory 的持续 Event 双主机/容量/秘密泄漏安全验收；
 - Agent 自动安装、部署/取消执行、证书安全轮换和 Agent Runtime Gateway；
 - 多主机部署选址系统验收；
-- Terminal Docker exec、主机 PTY/direct SSH、WSS 终端传输和浏览器安全 E2E；
+- Terminal 真实远程 Linux/SSH、多主机故障和浏览器安全 E2E；
 - 完整安全运维（安全告警、凭据轮换和发布前入口压力/故障验收）。
 
 这些能力不能通过占位路由、假状态或工程样例提前声明为可用。
@@ -106,11 +106,11 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 ## 下一步实现顺序
 
-1. 在已实现 enrollment、固定身份、双端心跳连接、`runtime.probe`、两阶段部署和持久结果缓存上完成安装自动化和证书轮换；
+1. 在已实现 enrollment、固定身份、双端心跳连接、可恢复证书轮换、`runtime.probe`、两阶段部署和持久结果缓存上完成安装自动化与轮换故障系统验收；
 2. 使用两台真实 Agent 主机完成选址、断线、网络分区、延迟旧命令和过期 fence 系统验收；
 3. 完成 Runtime Inventory 的双主机、容量、事件洪峰和秘密泄漏系统验收；
 4. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
-5. 在已完成 Terminal 权限、策略和 TerminalSession 控制面上继续实现容器 exec、主机 PTY/SSH 和 WSS 安全链路；
+5. 在已完成 Terminal 控制面、direct/Agent 容器与主机 Gateway、活动撤权和 WSS 安全链路上继续完成真实远程与浏览器系统验收；
 6. 建立 Template、密码恢复/OIDC 和生产安全告警能力；
 7. 完成远程 mTLS Engine、真实代理入口压力、网络故障注入后移除或重塑工程样例。
 

@@ -276,10 +276,20 @@ func (r *MongoRepository) AuthenticateAgent(
 		{Key: "organization_id", Value: certificate.OrganizationID},
 		{Key: "managed_host_id", Value: certificate.ManagedHostID},
 		{Key: "instance_id", Value: certificate.InstanceID},
-		{Key: "certificate_serial", Value: certificate.CertificateSerial},
-		{Key: "certificate_sha256", Value: certificate.CertificateSHA256},
-		{Key: "certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
 		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{
+				{Key: "certificate_serial", Value: certificate.CertificateSerial},
+				{Key: "certificate_sha256", Value: certificate.CertificateSHA256},
+				{Key: "certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+			},
+			bson.D{
+				{Key: "previous_certificate_serial", Value: certificate.CertificateSerial},
+				{Key: "previous_certificate_sha256", Value: certificate.CertificateSHA256},
+				{Key: "previous_certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+				{Key: "previous_certificate_valid_until", Value: bson.D{{Key: "$gt", Value: now}}},
+			},
+		}},
 	}).Decode(&document)
 	if err == mongo.ErrNoDocuments {
 		return biz.AgentIdentity{}, biz.ErrInvalidAgentIdentity
@@ -287,7 +297,186 @@ func (r *MongoRepository) AuthenticateAgent(
 	if err != nil {
 		return biz.AgentIdentity{}, fmt.Errorf("authenticate agent identity: %w", err)
 	}
+	identity := document.domain()
+	if identity.CertificateSerial == certificate.CertificateSerial &&
+		identity.CertificateSHA256 == certificate.CertificateSHA256 {
+		return identity, nil
+	}
+	identity.CertificateSerial = identity.PreviousCertificateSerial
+	identity.CertificateSHA256 = identity.PreviousCertificateSHA256
+	identity.CertificateExpires = identity.PreviousCertificateExpires
+	return identity, nil
+}
+
+func (r *MongoRepository) RotateAgentCertificate(
+	ctx context.Context,
+	rotation biz.AgentCertificateRotation,
+	now time.Time,
+) (biz.IssuedCertificate, bool, error) {
+	presented := rotation.Presented
+	var document identityDocument
+	err := r.identities.FindOne(ctx, bson.D{
+		{Key: "_id", Value: presented.IdentityID},
+		{Key: "organization_id", Value: presented.OrganizationID},
+		{Key: "managed_host_id", Value: presented.ManagedHostID},
+		{Key: "instance_id", Value: presented.InstanceID},
+		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{
+				{Key: "certificate_serial", Value: presented.CertificateSerial},
+				{Key: "certificate_sha256", Value: presented.CertificateSHA256},
+			},
+			bson.D{
+				{Key: "previous_certificate_serial", Value: presented.CertificateSerial},
+				{Key: "previous_certificate_sha256", Value: presented.CertificateSHA256},
+				{Key: "previous_certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+				{Key: "$or", Value: bson.A{
+					bson.D{{Key: "previous_certificate_valid_until", Value: bson.D{{Key: "$gt", Value: now}}}},
+					bson.D{
+						{Key: "pending_rotation_id", Value: rotation.ID},
+						{Key: "pending_rotation_csr_hash", Value: rotation.CSRHash},
+					},
+				}},
+			},
+		}},
+	}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.IssuedCertificate{}, false, biz.ErrInvalidAgentIdentity
+	}
+	if err != nil {
+		return biz.IssuedCertificate{}, false, fmt.Errorf("find Agent certificate rotation: %w", err)
+	}
+	if document.PendingRotationID != "" {
+		if document.PendingRotationID != rotation.ID ||
+			document.PendingRotationCSRHash != rotation.CSRHash {
+			return biz.IssuedCertificate{}, false, biz.ErrInvalidAgentIdentity
+		}
+		return document.pendingCertificate(), false, nil
+	}
+	if document.CertificateSerial != presented.CertificateSerial ||
+		document.CertificateSHA256 != presented.CertificateSHA256 ||
+		!document.CertificateExpires.After(now) {
+		return biz.IssuedCertificate{}, false, biz.ErrInvalidAgentIdentity
+	}
+	previousValidUntil := rotation.PreviousValidUntil
+	if document.CertificateExpires.Before(previousValidUntil) {
+		previousValidUntil = document.CertificateExpires
+	}
+	issued := rotation.Certificate
+	result := r.identities.FindOneAndUpdate(ctx, bson.D{
+		{Key: "_id", Value: document.ID},
+		{Key: "certificate_serial", Value: document.CertificateSerial},
+		{Key: "certificate_sha256", Value: document.CertificateSHA256},
+		{Key: "pending_rotation_id", Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+	}, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "previous_certificate_serial", Value: document.CertificateSerial},
+		{Key: "previous_certificate_sha256", Value: document.CertificateSHA256},
+		{Key: "previous_certificate_expires_at", Value: document.CertificateExpires},
+		{Key: "previous_certificate_valid_until", Value: previousValidUntil},
+		{Key: "certificate_serial", Value: issued.Serial},
+		{Key: "certificate_sha256", Value: issued.SHA256},
+		{Key: "certificate_expires_at", Value: issued.ExpiresAt},
+		{Key: "pending_rotation_id", Value: rotation.ID},
+		{Key: "pending_rotation_csr_hash", Value: rotation.CSRHash},
+		{Key: "pending_certificate_pem", Value: issued.CertificatePEM},
+		{Key: "pending_ca_certificate_pem", Value: issued.CACertificatePEM},
+	}}})
+	if err := result.Err(); err == mongo.ErrNoDocuments {
+		return biz.IssuedCertificate{}, false, biz.ErrInvalidAgentIdentity
+	} else if err != nil {
+		return biz.IssuedCertificate{}, false, fmt.Errorf("rotate Agent certificate: %w", err)
+	}
+	hostUpdate, err := r.hosts.UpdateOne(ctx, bson.D{
+		{Key: "_id", Value: document.ManagedHostID},
+		{Key: "organization_id", Value: document.OrganizationID},
+		{Key: "agent_identity_id", Value: document.ID},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.StatusDisabled}}},
+	}, bson.D{{Key: "$set", Value: bson.D{
+		{Key: "agent_certificate_expires_at", Value: issued.ExpiresAt},
+		{Key: "updated_at", Value: now},
+	}}})
+	if err != nil {
+		return biz.IssuedCertificate{}, false, fmt.Errorf("update rotated Agent host: %w", err)
+	}
+	if hostUpdate.MatchedCount != 1 {
+		return biz.IssuedCertificate{}, false, biz.ErrInvalidAgentIdentity
+	}
+	return issued, true, nil
+}
+
+func (r *MongoRepository) AuthenticateAgentCertificateRotation(
+	ctx context.Context,
+	certificate biz.AgentCertificateIdentity,
+	rotationID string,
+	csrHash string,
+	now time.Time,
+) (biz.AgentIdentity, error) {
+	var document identityDocument
+	err := r.identities.FindOne(ctx, bson.D{
+		{Key: "_id", Value: certificate.IdentityID},
+		{Key: "organization_id", Value: certificate.OrganizationID},
+		{Key: "managed_host_id", Value: certificate.ManagedHostID},
+		{Key: "instance_id", Value: certificate.InstanceID},
+		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+		{Key: "$or", Value: bson.A{
+			bson.D{
+				{Key: "certificate_serial", Value: certificate.CertificateSerial},
+				{Key: "certificate_sha256", Value: certificate.CertificateSHA256},
+				{Key: "certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+			},
+			bson.D{
+				{Key: "previous_certificate_serial", Value: certificate.CertificateSerial},
+				{Key: "previous_certificate_sha256", Value: certificate.CertificateSHA256},
+				{Key: "previous_certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+				{Key: "$or", Value: bson.A{
+					bson.D{{Key: "previous_certificate_valid_until", Value: bson.D{{Key: "$gt", Value: now}}}},
+					bson.D{
+						{Key: "pending_rotation_id", Value: rotationID},
+						{Key: "pending_rotation_csr_hash", Value: csrHash},
+					},
+				}},
+			},
+		}},
+	}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.AgentIdentity{}, biz.ErrInvalidAgentIdentity
+	}
+	if err != nil {
+		return biz.AgentIdentity{}, fmt.Errorf("authenticate Agent certificate rotation: %w", err)
+	}
 	return document.domain(), nil
+}
+
+func (r *MongoRepository) ConfirmAgentCertificate(
+	ctx context.Context,
+	certificate biz.AgentCertificateIdentity,
+	now time.Time,
+) (bool, error) {
+	result, err := r.identities.UpdateOne(ctx, bson.D{
+		{Key: "_id", Value: certificate.IdentityID},
+		{Key: "organization_id", Value: certificate.OrganizationID},
+		{Key: "managed_host_id", Value: certificate.ManagedHostID},
+		{Key: "instance_id", Value: certificate.InstanceID},
+		{Key: "certificate_serial", Value: certificate.CertificateSerial},
+		{Key: "certificate_sha256", Value: certificate.CertificateSHA256},
+		{Key: "certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+		{Key: "pending_rotation_id", Value: bson.D{{Key: "$exists", Value: true}}},
+		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+	}, bson.D{{Key: "$unset", Value: bson.D{
+		{Key: "previous_certificate_serial", Value: ""},
+		{Key: "previous_certificate_sha256", Value: ""},
+		{Key: "previous_certificate_expires_at", Value: ""},
+		{Key: "previous_certificate_valid_until", Value: ""},
+		{Key: "pending_rotation_id", Value: ""},
+		{Key: "pending_rotation_csr_hash", Value: ""},
+		{Key: "pending_certificate_pem", Value: ""},
+		{Key: "pending_ca_certificate_pem", Value: ""},
+	}}})
+	if err != nil {
+		return false, fmt.Errorf("confirm Agent certificate rotation: %w", err)
+	}
+	return result.ModifiedCount == 1, nil
 }
 
 func (r *MongoRepository) ConnectAgent(
@@ -398,6 +587,9 @@ type hostDocument struct {
 	AgentBootID               string             `bson:"agent_boot_id,omitempty"`
 	AgentSessionID            string             `bson:"agent_session_id,omitempty"`
 	DirectSSHRef              string             `bson:"direct_ssh_ref,omitempty"`
+	DirectSSHAddress          string             `bson:"direct_ssh_address,omitempty"`
+	DirectSSHUser             string             `bson:"direct_ssh_user,omitempty"`
+	DirectSSHHostKeySHA256    string             `bson:"direct_ssh_host_key_sha256,omitempty"`
 	LastSeenAt                time.Time          `bson:"last_seen_at,omitempty"`
 	AgentVersion              string             `bson:"agent_version,omitempty"`
 	ProtocolVersion           string             `bson:"protocol_version,omitempty"`
@@ -437,28 +629,44 @@ func (d enrollmentDocument) domain() biz.Enrollment {
 }
 
 type identityDocument struct {
-	ID                 string    `bson:"_id"`
-	OrganizationID     string    `bson:"organization_id"`
-	ManagedHostID      string    `bson:"managed_host_id"`
-	InstanceID         string    `bson:"instance_id"`
-	CertificateSerial  string    `bson:"certificate_serial"`
-	CertificateSHA256  string    `bson:"certificate_sha256"`
-	CertificateExpires time.Time `bson:"certificate_expires_at"`
-	AgentVersion       string    `bson:"agent_version"`
-	ProtocolVersion    string    `bson:"protocol_version"`
-	Capabilities       []string  `bson:"capabilities"`
-	IssuedAt           time.Time `bson:"issued_at"`
-	RevokedAt          time.Time `bson:"revoked_at,omitempty"`
+	ID                            string    `bson:"_id"`
+	OrganizationID                string    `bson:"organization_id"`
+	ManagedHostID                 string    `bson:"managed_host_id"`
+	InstanceID                    string    `bson:"instance_id"`
+	CertificateSerial             string    `bson:"certificate_serial"`
+	CertificateSHA256             string    `bson:"certificate_sha256"`
+	CertificateExpires            time.Time `bson:"certificate_expires_at"`
+	PreviousCertificateSerial     string    `bson:"previous_certificate_serial,omitempty"`
+	PreviousCertificateSHA256     string    `bson:"previous_certificate_sha256,omitempty"`
+	PreviousCertificateExpires    time.Time `bson:"previous_certificate_expires_at,omitempty"`
+	PreviousCertificateValidUntil time.Time `bson:"previous_certificate_valid_until,omitempty"`
+	PendingRotationID             string    `bson:"pending_rotation_id,omitempty"`
+	PendingRotationCSRHash        string    `bson:"pending_rotation_csr_hash,omitempty"`
+	PendingCertificatePEM         []byte    `bson:"pending_certificate_pem,omitempty"`
+	PendingCACertificatePEM       []byte    `bson:"pending_ca_certificate_pem,omitempty"`
+	AgentVersion                  string    `bson:"agent_version"`
+	ProtocolVersion               string    `bson:"protocol_version"`
+	Capabilities                  []string  `bson:"capabilities"`
+	IssuedAt                      time.Time `bson:"issued_at"`
+	RevokedAt                     time.Time `bson:"revoked_at,omitempty"`
 }
 
 func identityDocumentFromDomain(item biz.AgentIdentity) identityDocument {
 	return identityDocument{
 		ID: item.ID, OrganizationID: item.OrganizationID,
 		ManagedHostID: item.ManagedHostID, InstanceID: item.InstanceID,
-		CertificateSerial:  item.CertificateSerial,
-		CertificateSHA256:  item.CertificateSHA256,
-		CertificateExpires: item.CertificateExpires,
-		AgentVersion:       item.AgentVersion, ProtocolVersion: item.ProtocolVersion,
+		CertificateSerial:             item.CertificateSerial,
+		CertificateSHA256:             item.CertificateSHA256,
+		CertificateExpires:            item.CertificateExpires,
+		PreviousCertificateSerial:     item.PreviousCertificateSerial,
+		PreviousCertificateSHA256:     item.PreviousCertificateSHA256,
+		PreviousCertificateExpires:    item.PreviousCertificateExpires,
+		PreviousCertificateValidUntil: item.PreviousCertificateValidUntil,
+		PendingRotationID:             item.PendingRotationID,
+		PendingRotationCSRHash:        item.PendingRotationCSRHash,
+		PendingCertificatePEM:         append([]byte(nil), item.PendingCertificatePEM...),
+		PendingCACertificatePEM:       append([]byte(nil), item.PendingCACertificatePEM...),
+		AgentVersion:                  item.AgentVersion, ProtocolVersion: item.ProtocolVersion,
 		Capabilities: item.Capabilities, IssuedAt: item.IssuedAt,
 		RevokedAt: item.RevokedAt,
 	}
@@ -472,12 +680,29 @@ func (d identityDocument) domain() biz.AgentIdentity {
 	return biz.AgentIdentity{
 		ID: d.ID, OrganizationID: d.OrganizationID,
 		ManagedHostID: d.ManagedHostID, InstanceID: d.InstanceID,
-		CertificateSerial:  d.CertificateSerial,
-		CertificateSHA256:  d.CertificateSHA256,
-		CertificateExpires: d.CertificateExpires,
-		AgentVersion:       d.AgentVersion, ProtocolVersion: d.ProtocolVersion,
+		CertificateSerial:             d.CertificateSerial,
+		CertificateSHA256:             d.CertificateSHA256,
+		CertificateExpires:            d.CertificateExpires,
+		PreviousCertificateSerial:     d.PreviousCertificateSerial,
+		PreviousCertificateSHA256:     d.PreviousCertificateSHA256,
+		PreviousCertificateExpires:    d.PreviousCertificateExpires,
+		PreviousCertificateValidUntil: d.PreviousCertificateValidUntil,
+		PendingRotationID:             d.PendingRotationID,
+		PendingRotationCSRHash:        d.PendingRotationCSRHash,
+		PendingCertificatePEM:         append([]byte(nil), d.PendingCertificatePEM...),
+		PendingCACertificatePEM:       append([]byte(nil), d.PendingCACertificatePEM...),
+		AgentVersion:                  d.AgentVersion, ProtocolVersion: d.ProtocolVersion,
 		Capabilities: capabilities, IssuedAt: d.IssuedAt,
 		RevokedAt: d.RevokedAt,
+	}
+}
+
+func (d identityDocument) pendingCertificate() biz.IssuedCertificate {
+	return biz.IssuedCertificate{
+		CertificatePEM:   append([]byte(nil), d.PendingCertificatePEM...),
+		CACertificatePEM: append([]byte(nil), d.PendingCACertificatePEM...),
+		Serial:           d.CertificateSerial, SHA256: d.CertificateSHA256,
+		ExpiresAt: d.CertificateExpires,
 	}
 }
 
@@ -489,8 +714,10 @@ func hostDocumentFromDomain(item biz.ManagedHost) hostDocument {
 		AgentIdentityID: item.AgentIdentityID, AgentInstanceID: item.AgentInstanceID,
 		AgentCertificateExpiresAt: item.AgentCertificateExpiresAt,
 		AgentBootID:               item.AgentBootID, AgentSessionID: item.AgentSessionID,
-		DirectSSHRef: item.DirectSSHRef,
-		LastSeenAt:   item.LastSeenAt, AgentVersion: item.AgentVersion,
+		DirectSSHRef:     item.DirectSSHRef,
+		DirectSSHAddress: item.DirectSSHAddress, DirectSSHUser: item.DirectSSHUser,
+		DirectSSHHostKeySHA256: item.DirectSSHHostKeySHA256,
+		LastSeenAt:             item.LastSeenAt, AgentVersion: item.AgentVersion,
 		ProtocolVersion: item.ProtocolVersion, Capabilities: item.Capabilities,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 	}
@@ -505,8 +732,10 @@ func (d hostDocument) domain() biz.ManagedHost {
 		AgentIdentityID: d.AgentIdentityID, AgentInstanceID: d.AgentInstanceID,
 		AgentCertificateExpiresAt: d.AgentCertificateExpiresAt,
 		AgentBootID:               d.AgentBootID, AgentSessionID: d.AgentSessionID,
-		DirectSSHRef: d.DirectSSHRef,
-		LastSeenAt:   d.LastSeenAt, AgentVersion: d.AgentVersion,
+		DirectSSHRef:     d.DirectSSHRef,
+		DirectSSHAddress: d.DirectSSHAddress, DirectSSHUser: d.DirectSSHUser,
+		DirectSSHHostKeySHA256: d.DirectSSHHostKeySHA256,
+		LastSeenAt:             d.LastSeenAt, AgentVersion: d.AgentVersion,
 		ProtocolVersion: d.ProtocolVersion, Capabilities: capabilities,
 		CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt,
 	}
