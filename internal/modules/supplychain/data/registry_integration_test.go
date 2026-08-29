@@ -479,17 +479,44 @@ func TestTrivyVulnerabilityScanWithPinnedDatabaseAndRegistry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	trivy := extractTrivyExecutable(t, ctx)
-	cache := t.TempDir()
-	command := exec.CommandContext(ctx, trivy, "image", "--download-db-only",
-		"--cache-dir", cache, "--no-progress")
-	command.Env = []string{"HOME=" + t.TempDir(), "TRIVY_CACHE_DIR=" + cache}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("download pinned Trivy database: %v: %s", err, output)
+	databaseRoot := filepath.Join(t.TempDir(), "trivy-db")
+	databaseManager, err := NewTrivyDatabaseSnapshotManager(TrivyDatabaseSnapshotOptions{
+		Executable: trivy, ExpectedVersion: PinnedTrivyVersion, RootDirectory: databaseRoot,
+		RetainSnapshots: 3, MinimumRetention: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	databaseSnapshot, err := databaseManager.Update(ctx)
+	if err != nil {
+		t.Fatalf("publish pinned Trivy database snapshot: %v", err)
+	}
+	cache := databaseSnapshot.CurrentPath
+	if target, linkErr := os.Readlink(cache); linkErr != nil ||
+		target != filepath.Join("snapshots", databaseSnapshot.Name) {
+		t.Fatalf("atomic Trivy database link = %q, %v", target, linkErr)
+	}
+	if err := filepath.Walk(databaseRoot, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if info.IsDir() {
+			return os.Chmod(path, 0o755)
+		}
+		return os.Chmod(path, 0o644)
+	}); err != nil {
+		t.Fatalf("prepare non-secret DB fixture permissions: %v", err)
 	}
 
 	registryName := fmt.Sprintf("owndock-trivy-registry-%d", time.Now().UnixNano())
+	networkName := fmt.Sprintf("owndock-trivy-%d", time.Now().UnixNano())
+	runDockerCommand(t, ctx, "network", "create", networkName)
+	t.Cleanup(func() { _ = exec.Command("docker", "network", "rm", networkName).Run() })
 	runDockerCommand(t, ctx, "run", "--detach", "--name", registryName,
-		"--publish", "127.0.0.1::5000", pinnedRegistryImage)
+		"--network", networkName, "--publish", "127.0.0.1::5000", pinnedRegistryImage)
 	t.Cleanup(func() { removeDockerContainer(registryName) })
 	registryPort := strings.TrimSpace(runDockerCommand(t, ctx, "port", registryName, "5000/tcp"))
 	registryBase := "http://" + registryPort
@@ -497,6 +524,24 @@ func TestTrivyVulnerabilityScanWithPinnedDatabaseAndRegistry(t *testing.T) {
 	repository := strings.TrimPrefix(registryBase, "http://") + "/vulnerability/api"
 	subjectDigest := createUnsignedRegistrySubject(t, ctx, registryBase,
 		"vulnerability/api", "scan", "amd64")
+	isolatedSubject := registryName + ":5000/vulnerability/api@" + subjectDigest
+	isolatedOutput, isolatedError, isolatedErr := runDockerCapture(ctx, map[string]string{"HOME": "/tmp"},
+		"run", "--rm", "--network", networkName, "--user", "65532:65532", "--read-only",
+		"--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777",
+		"--volume", databaseRoot+":/var/lib/owndock/trivy-db:ro",
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges:true",
+		"--pids-limit", "128", "--memory", "1g", "--cpus", "1", "--env", "HOME",
+		"--entrypoint", "/usr/local/bin/trivy", pinnedTrivyImage,
+		"image", "--format", "json", "--scanners", "vuln", "--skip-db-update", "--offline-scan",
+		"--no-progress", "--cache-backend", "memory", "--cache-dir", "/var/lib/owndock/trivy-db/current",
+		"--insecure", isolatedSubject)
+	if isolatedErr != nil {
+		t.Fatalf("resource-isolated Trivy scan: %v: %s", isolatedErr, isolatedError)
+	}
+	if _, err := newTrivyV2Report(isolatedOutput, biz.MaximumVulnerabilityReportSize,
+		isolatedSubject, PinnedTrivyVersion, databaseSnapshot.Database); err != nil {
+		t.Fatalf("resource-isolated Trivy report: %v", err)
+	}
 	credentials := &credentialCaptureProvider{username: "anonymous", password: "unused-password"}
 	scanner, err := NewTrivyScanner(TrivyOptions{Executable: trivy,
 		ExpectedVersion: PinnedTrivyVersion, CacheDirectory: cache,
@@ -523,6 +568,33 @@ func TestTrivyVulnerabilityScanWithPinnedDatabaseAndRegistry(t *testing.T) {
 	if err != nil || report.ScannerVersion != PinnedTrivyVersion || report.Database.SchemaVersion == 0 ||
 		report.Database.UpdatedAt.IsZero() || report.ScannedAt.IsZero() || !credentials.cleared() {
 		t.Fatalf("real Trivy report = %+v, %v, credential cleared=%t", report, err, credentials.cleared())
+	}
+	oversizedFixture := filepath.Join(t.TempDir(), "oversized-trivy-report.json")
+	fixture, err := os.OpenFile(oversizedFixture, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.Truncate(biz.MaximumVulnerabilityReportSize + 1); err != nil {
+		_ = fixture.Close()
+		t.Fatal(err)
+	}
+	_ = fixture.Close()
+	oversizedExecutable := writeFakeTrivy(t, fmt.Sprintf(`
+if [ "$1" = "version" ]; then exec %q "$@"; fi
+exec /bin/cat %q
+`, trivy, oversizedFixture))
+	oversizedCredentials := &credentialCaptureProvider{username: "anonymous", password: "unused-password"}
+	oversizedScanner, err := NewTrivyScanner(TrivyOptions{Executable: oversizedExecutable,
+		ExpectedVersion: PinnedTrivyVersion, CacheDirectory: cache,
+		MaxOutputBytes: biz.MaximumVulnerabilityReportSize, Credentials: oversizedCredentials,
+		AllowPlainHTTP: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oversizedScanner.ScanVulnerabilities(ctx, biz.VulnerabilityScanRequest{
+		ProjectID: "project-1", RegistryCredentialID: "registry-1", RegistryRepository: repository,
+		SubjectDigest: subjectDigest, FormatVersion: biz.TrivyReportFormatVersion}); !errors.Is(err, biz.ErrVulnerabilityReportSize) || !oversizedCredentials.cleared() {
+		t.Fatalf("oversized Trivy report error = %v, credential cleared=%t", err, oversizedCredentials.cleared())
 	}
 	publisher, err := NewORASPublisher(ORASPublisherOptions{Credentials: credentials,
 		AllowPlainHTTP: true, MaxDocumentBytes: biz.MaximumVulnerabilityReportSize})

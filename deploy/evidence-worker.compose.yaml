@@ -15,9 +15,9 @@ services:
     volumes:
       - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
       - ${OWNDOCK_TRUSTED_ROOTS_DIRECTORY:?required}:/etc/owndock/trusted-roots:ro
-      # Populate this directory with a reviewed Trivy DB snapshot before the
-      # worker starts. The worker never updates the database during a scan.
-      - ${OWNDOCK_TRIVY_CACHE_DIRECTORY:?required}:/var/lib/owndock/trivy-cache:ro
+      # The updater atomically switches current inside this parent directory.
+      # Evidence Worker sees every snapshot read-only and never updates it.
+      - ${OWNDOCK_TRIVY_DATABASE_ROOT:?required}:/var/lib/owndock/trivy-db:ro
     read_only: true
     tmpfs:
       # Syft cache and bounded transient image data have no persistent volume.

@@ -439,7 +439,7 @@ func TestEvidenceWorkerRequiresPinnedSyftAndMongoDB(t *testing.T) {
 		SyftExecutable: "/usr/local/bin/syft", SyftVersion: "1.50.0",
 		CosignExecutable: "/usr/local/bin/cosign", CosignVersion: "3.0.6",
 		TrivyExecutable: "/usr/local/bin/trivy", TrivyVersion: "0.74.0",
-		TrivyCacheDirectory: "/var/lib/owndock/trivy-cache", VulnerabilityFreshness: "24h",
+		TrivyCacheDirectory: "/var/lib/owndock/trivy-db/current", VulnerabilityFreshness: "24h",
 		TrustedRootsDirectory: "/etc/owndock/trusted-roots",
 		MaxDocumentBytes:      16 * 1024 * 1024, MaxLayerBytes: 256 * 1024 * 1024,
 		MetricsAddress: "127.0.0.1:9092",

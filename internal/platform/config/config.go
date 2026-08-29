@@ -67,7 +67,7 @@ const (
 	defaultEvidenceSyftPath      = "/usr/local/bin/syft"
 	defaultEvidenceCosignPath    = "/usr/local/bin/cosign"
 	defaultEvidenceTrivyPath     = "/usr/local/bin/trivy"
-	defaultEvidenceTrivyCache    = "/var/lib/owndock/trivy-cache"
+	defaultEvidenceTrivyCache    = "/var/lib/owndock/trivy-db/current"
 	defaultEvidenceScanFreshness = 24 * time.Hour
 	defaultEvidenceTrustRoots    = "/etc/owndock/trusted-roots"
 	defaultEvidenceDocumentBytes = int64(16 * 1024 * 1024)

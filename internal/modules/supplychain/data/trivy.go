@@ -59,8 +59,13 @@ type trivyVersionOutput struct {
 }
 
 func (s *TrivyScanner) databaseMetadata(ctx context.Context) (biz.VulnerabilityDatabase, error) {
-	command := exec.CommandContext(ctx, s.executable, "version", "--format", "json", "--cache-dir", s.cacheDirectory)
-	command.Env = trivyEnvironment(s.cacheDirectory)
+	return readTrivyDatabaseMetadata(ctx, s.executable, s.expectedVersion, s.cacheDirectory)
+}
+
+func readTrivyDatabaseMetadata(ctx context.Context, executable, expectedVersion,
+	cacheDirectory string) (biz.VulnerabilityDatabase, error) {
+	command := exec.CommandContext(ctx, executable, "version", "--format", "json", "--cache-dir", cacheDirectory)
+	command.Env = trivyEnvironment(cacheDirectory)
 	output := &boundedBuffer{maximum: 64 * 1024}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 4096}
 	if err := command.Run(); err != nil {
@@ -68,7 +73,7 @@ func (s *TrivyScanner) databaseMetadata(ctx context.Context) (biz.VulnerabilityD
 	}
 	var result trivyVersionOutput
 	if err := json.Unmarshal(output.Bytes(), &result); err != nil ||
-		strings.TrimPrefix(strings.TrimSpace(result.Version), "v") != s.expectedVersion {
+		strings.TrimPrefix(strings.TrimSpace(result.Version), "v") != expectedVersion {
 		return biz.VulnerabilityDatabase{}, biz.ErrVulnerabilityScannerVersion
 	}
 	database := biz.VulnerabilityDatabase{SchemaVersion: result.VulnerabilityDB.Version}

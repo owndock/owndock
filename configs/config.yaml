@@ -89,7 +89,7 @@ runtime:
     cosign_version: 3.0.6
     trivy_executable: /usr/local/bin/trivy
     trivy_version: 0.74.0
-    trivy_cache_directory: /var/lib/owndock/trivy-cache
+    trivy_cache_directory: /var/lib/owndock/trivy-db/current
     vulnerability_freshness: 24h
     trusted_roots_directory: /etc/owndock/trusted-roots
     max_document_bytes: 16777216

@@ -45,7 +45,7 @@ Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `
 
 ## 进程边界
 
-当前建立四个有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker 执行；`cmd/build-worker` 负责领取 Build、续租、隔离 Git checkout，并在 Artifact 事务中冻结 SBOM/Provenance Job 输入；`cmd/evidence-worker` 负责领取镜像证据任务、使用固定 Syft 生成 SBOM、根据不可变 Recipe 生成 SLSA Provenance v1，并通过 ORAS 把正文发布到 OCI Registry。Server 只在授权下载时读取并校验 OCI 证据，不执行生成器、扫描器或签名器。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。CLI 仍只在职责与完整生命周期明确后创建。Web 前端由独立项目维护。
+当前建立四个常驻、且有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker 执行；`cmd/build-worker` 负责领取 Build、续租、隔离 Git checkout，并在 Artifact 事务中冻结 SBOM/Provenance Job 输入；`cmd/evidence-worker` 负责领取镜像证据任务、使用固定 Syft 生成 SBOM、根据不可变 Recipe 生成 SLSA Provenance v1，并通过 ORAS 把正文发布到 OCI Registry。`cmd/vulnerability-db-updater` 是由外部调度器启动的一次性维护 Job，只能写 Trivy DB 快照卷，不接触 MongoDB、客户 Registry 或 KMS；它不算第五个常驻控制面。Server 只在授权下载时读取并校验 OCI 证据，不执行生成器、扫描器或签名器。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。CLI 仍只在职责与完整生命周期明确后创建。Web 前端由独立项目维护。
 
 常驻任务实现 `Run(context.Context) error`，通过 `internal/platform/lifecycle.Server` 接入 Kratos App。构造函数不得启动 goroutine；停止过程必须响应 context，并受统一 shutdown timeout 约束。
 

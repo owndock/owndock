@@ -37,4 +37,6 @@ CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、Mon
 
 Trivy 适配器单元测试覆盖固定 `0.74.0`、精确 digest 调用、扫描前后 DB 元数据一致、扫描期间 DB 变化失败关闭、输出上限、凭据清零和错误分类。MongoDB Replica Set 门禁覆盖 Evidence、最新 Vulnerability Observation 和 Job 完成的同事务提交。
 
-`make test-vulnerability-integration` 会从固定 digest 的 Trivy 多架构镜像提取扫描器、下载一份真实漏洞库快照、启动固定版本的私有 Distribution Registry，随后验证精确镜像 digest 扫描、报告主题绑定、OCI Referrer 发布和完整内容回读。这项下载量较大，因此不进入普通 `make check`，而是由定时/手动的双架构 `test-build-security` 执行。首次 GitHub Actions 双架构结果尚未获取；DB 快照原子更新、资源隔离和真实超大报告系统门禁也仍待补齐，因此不能据此宣称漏洞治理已全部生产就绪。
+`make test-vulnerability-integration` 会从固定 digest 的 Trivy 多架构镜像提取扫描器，通过正式 Snapshot Manager 下载真实 DB 并原子发布 `current`，再启动固定版本的私有 Distribution Registry。门禁验证精确镜像 digest 扫描、报告主题绑定、OCI Referrer 发布和完整内容回读；同一测试还在非 root、只读根、无 capabilities、PID/CPU/内存/tmpfs 上限下使用只读 DB 完成离线扫描，并用 16 MiB+1 的真实子进程输出验证硬截断和凭据清零。
+
+Updater 镜像另已在相同的非 root、只读根、无 capabilities 和有限资源约束下下载并发布真实 DB。该测试下载量较大，因此不进入普通 `make check`，而由定时/手动的双架构 `test-build-security` 执行。首次 GitHub Actions 双架构结果尚未获取；误报豁免以及生产出口/客户文件系统矩阵仍待补齐，因此不能据此宣称漏洞治理已全部生产就绪。

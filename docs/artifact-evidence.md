@@ -267,6 +267,7 @@ OWNDOCK_MONGODB_URI='mongodb://...' \
 OWNDOCK_CONFIG_FILE='/etc/owndock/config.yaml' \
 OWNDOCK_EVIDENCE_SECRET_ENV_FILE='/etc/owndock/evidence-secrets.env' \
 OWNDOCK_TRUSTED_ROOTS_DIRECTORY='/etc/owndock/trusted-roots' \
+OWNDOCK_TRIVY_DATABASE_ROOT='/var/lib/owndock/trivy-db' \
 docker compose -f deploy/evidence-worker.compose.yaml up -d
 ```
 
@@ -280,7 +281,7 @@ docker compose -f deploy/evidence-worker.compose.yaml up -d
 
 ## 漏洞扫描与重扫
 
-OwnDock 固定使用 Trivy `0.74.0`，Evidence Worker 镜像固定多架构 digest，不使用 `latest`。漏洞库与 Worker 镜像分开管理：运维流程先准备并审核 Trivy DB 快照，再以只读目录挂载到 `/var/lib/owndock/trivy-cache`。Worker 扫描时强制 `--skip-db-update` 和 `--offline-scan`，不允许单个 Job 自行从公网改变安全基线。
+OwnDock 固定使用 Trivy `0.74.0`，Evidence Worker 镜像固定多架构 digest，不使用 `latest`。漏洞库与 Worker 镜像分开管理：独立的一次性 `owndock-vulnerability-db-updater` 下载到同卷 staging，校验版本、元数据、时效和 DB SHA-256，再原子切换 `/var/lib/owndock/trivy-db/current`；Evidence Worker 只读挂载父目录。Worker 扫描时强制 `--skip-db-update` 和 `--offline-scan`，不允许单个 Job 自行从公网改变安全基线。完整初始化、调度与恢复步骤见[Trivy 漏洞库快照运维](vulnerability-database.md)。
 
 每次扫描前后都会读取数据库 schema version、`updated_at`、`downloaded_at` 和 `next_update`；两次结果不一致时失败关闭。详细 Trivy JSON 报告以 `application/vnd.aquasec.trivy.report+json` OCI Referrer 绑定精确镜像 digest，MongoDB 只保存最新的有界摘要：各严重级数量、可修复数量、最高严重级、扫描/数据库时间和完整报告 digest。报告 Evidence 历史不覆盖；“最新观察值”只是一个便于查询和策略计算的投影。
 

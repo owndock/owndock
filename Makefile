@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-private-sigstore-integration test-build-security test-terminal-security test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker
+.PHONY: fmt fmt-check mod-verify vet test test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-terminal-security test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -78,6 +78,15 @@ test-vulnerability-integration:
 	OWNDOCK_RUN_VULNERABILITY_INTEGRATION=1 go test ./internal/modules/supplychain/data \
 		-run TestTrivyVulnerabilityScanWithPinnedDatabaseAndRegistry -count=1 -timeout=8m
 
+test-vulnerability-db-updater-image:
+	$(MAKE) docker-vulnerability-db-updater VERSION=integration
+	@test "$$(docker image inspect owndock-vulnerability-db-updater:integration --format '{{.Config.User}}')" = "65532:65532"
+	docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+		--pids-limit 64 --memory 2g --cpus 1 \
+		--tmpfs /tmp:rw,noexec,nosuid,nodev,size=268435456,mode=1777 \
+		--volume /var/lib/owndock/trivy-db \
+		owndock-vulnerability-db-updater:integration -timeout 8m
+
 test-private-sigstore-integration:
 	OWNDOCK_RUN_PRIVATE_SIGSTORE_INTEGRATION=1 go test ./internal/modules/supplychain/data \
 		-run TestCosignKeylessVerificationWithPrivateSigstore -count=1 -timeout=5m
@@ -91,6 +100,7 @@ test-build-security:
 		-run TestMongoReplicaSetIntegration -count=1 -timeout=5m
 	$(MAKE) test-supply-chain-integration
 	$(MAKE) test-vulnerability-integration
+	$(MAKE) test-vulnerability-db-updater-image
 	OWNDOCK_RUN_SERVER_INGRESS_INTEGRATION=1 go test ./cmd/server \
 		-run TestServerProcessIngressDoesNotReflectSecrets -count=1 -timeout=3m
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \
@@ -146,7 +156,7 @@ test-agent-dual-process:
 	packaging/agent/dual_control_process_integration_test.sh \
 		bin/owndock-agent-dual-client bin/owndock-agent-dual-server
 
-build: build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker
+build: build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater
 
 build-server:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock ./cmd/server
@@ -182,6 +192,9 @@ build-build-egress-gateway:
 build-evidence-worker:
 	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock-evidence-worker ./cmd/evidence-worker
 
+build-vulnerability-db-updater:
+	go build -trimpath -ldflags "$(LDFLAGS)" -o bin/owndock-vulnerability-db-updater ./cmd/vulnerability-db-updater
+
 docker-build-worker:
 	docker build --file Dockerfile.build-worker \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
@@ -199,6 +212,12 @@ docker-evidence-worker:
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
 		--tag owndock-evidence-worker:$(VERSION) .
+
+docker-vulnerability-db-updater:
+	docker build --file Dockerfile.vulnerability-db-updater \
+		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--tag owndock-vulnerability-db-updater:$(VERSION) .
 
 api-validate:
 	go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) validate --allow-external-refs=false --fail-on WARN api/openapi.yaml
@@ -226,3 +245,6 @@ run-build-egress-gateway:
 
 run-evidence-worker:
 	go run ./cmd/evidence-worker -conf configs/config.yaml
+
+run-vulnerability-db-updater:
+	go run ./cmd/vulnerability-db-updater
