@@ -3,8 +3,12 @@ package mongo
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +21,7 @@ import (
 
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
+	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	buildworker "github.com/owndock/owndock/internal/modules/build/worker"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
@@ -32,6 +37,8 @@ import (
 	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
+	supplychainbiz "github.com/owndock/owndock/internal/modules/supplychain/biz"
+	supplychaindata "github.com/owndock/owndock/internal/modules/supplychain/data"
 	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
 	terminaldata "github.com/owndock/owndock/internal/modules/terminal/data"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
@@ -65,6 +72,12 @@ func (readyRuntimeTargetProber) ProbeRuntimeTarget(
 type readySourceRepositoryProber struct{}
 
 type readyWebhookVerifier struct{ event buildbiz.WebhookEvent }
+
+type integrationWebhookSecrets struct{ secret []byte }
+
+func (s integrationWebhookSecrets) ResolveWebhookSecret(context.Context, buildbiz.BuildHook) ([]byte, error) {
+	return append([]byte(nil), s.secret...), nil
+}
 
 func (v *readyWebhookVerifier) VerifyAndParse(context.Context, buildbiz.BuildHook, buildbiz.WebhookEnvelope) (buildbiz.WebhookEvent, error) {
 	return v.event, nil
@@ -256,10 +269,19 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	assertProjectMemberIndexes(t, ctx, client.Database())
 	assertIngressRateLimitIndex(t, ctx, client.Database())
 	assertTerminalIndexes(t, ctx, client.Database())
+	assertArtifactEvidenceIndexes(t, ctx, client.Database())
+	assertArtifactEvidenceJobIndexes(t, ctx, client.Database())
+	assertEvidenceVerificationIndexes(t, ctx, client.Database())
+	assertSignatureSigningProfileIndexes(t, ctx, client.Database())
+	assertVulnerabilityObservationIndexes(t, ctx, client.Database())
 	verifyIngressRateLimitIntegration(t, ctx, client.Database())
 	verifyTerminalPersistenceIntegration(t, ctx, client.Database())
 	verifyBuildWorkerSIGKILLRecovery(t, ctx, uri, client)
 	verifyBuildSourceRepositoryIntegration(t, ctx, client)
+	verifyArtifactEvidenceIntegration(t, ctx, client.Database())
+	verifyArtifactEvidenceFenceIntegration(t, ctx, client.Database())
+	verifySignatureVerificationFenceIntegration(t, ctx, client.Database())
+	verifyVulnerabilityObservationIntegration(t, ctx, client.Database())
 	var backfilledInventory bson.M
 	if err := client.Database().Collection("runtime_inventory_current").FindOne(ctx, bson.D{
 		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
@@ -605,6 +627,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		client, auditStore, auditStore, id.New, time.Now,
 	).WithManagedHosts(managedHostStore).
 		WithProjectMembers(controlPlaneStore).
+		WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
 		WithRuntimeTargetProbe(controlPlaneStore, readyRuntimeTargetProber{})
 	host, err := managedHostUseCase.Create(
 		ctx, principal, "Production Host", runtimeaccess.ModeDirectDocker,
@@ -697,15 +720,33 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("cross-host agent enrollment error = %v", err)
 	}
 	if err := client.WithinTransaction(ctx, func(transactionContext context.Context) error {
-		return managedHostStore.ActivateAgent(
+		return managedHostStore.ActivateAgentRecoverable(
 			transactionContext,
 			foundEnrollment.ID,
 			foundEnrollment.TokenHash,
 			enrollmentNow,
 			agentIdentity,
+			managedhostbiz.EnrollmentRecovery{
+				RequestSHA256:    strings.Repeat("a", 64),
+				RecoverUntil:     enrollmentNow.Add(10 * time.Minute),
+				CertificatePEM:   []byte("issued-certificate"),
+				CACertificatePEM: []byte("issued-ca"),
+			},
 		)
 	}); err != nil {
 		t.Fatalf("activate agent identity: %v", err)
+	}
+	recoveredEnrollment, recovered, err := managedHostStore.RecoverAgentEnrollment(
+		ctx, foundEnrollment.TokenHash, strings.Repeat("a", 64), enrollmentNow,
+	)
+	if err != nil || !recovered || recoveredEnrollment.Identity.ID != agentIdentity.ID ||
+		string(recoveredEnrollment.CertificatePEM) != "issued-certificate" {
+		t.Fatalf("recovered enrollment = %+v, found = %t, error = %v", recoveredEnrollment, recovered, err)
+	}
+	if _, recovered, err := managedHostStore.RecoverAgentEnrollment(
+		ctx, foundEnrollment.TokenHash, strings.Repeat("b", 64), enrollmentNow,
+	); err != nil || recovered {
+		t.Fatalf("conflicting enrollment recovery found = %t, error = %v", recovered, err)
 	}
 	if err := client.WithinTransaction(ctx, func(transactionContext context.Context) error {
 		return managedHostStore.ActivateAgent(
@@ -838,9 +879,52 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil || len(memberProjects) != 1 || memberProjects[0].ID != project.ID {
 		t.Fatalf("bound member projects = %+v/%v", memberProjects, err)
 	}
-	application, err := controlPlaneUseCase.CreateApplication(ctx, principal, project.ID, "API", "application-request")
+	application, err := controlPlaneUseCase.CreateApplicationFromTemplate(
+		ctx, principal, project.ID, "API", "http-service", "application-request",
+	)
 	if err != nil {
 		t.Fatalf("create application: %v", err)
+	}
+	applications, err := controlPlaneUseCase.ListApplications(
+		ctx, principal, project.ID,
+	)
+	if err != nil || len(applications) != 1 ||
+		applications[0].TemplateSnapshot == nil ||
+		applications[0].TemplateSnapshot.TemplateID != "http-service" ||
+		applications[0].TemplateSnapshot.TemplateVersion != 1 ||
+		applications[0].TemplateSnapshot.RuntimeSpec.Ports[0].ContainerPort != 8080 {
+		t.Fatalf("persisted application snapshot = %+v, error = %v", applications, err)
+	}
+	if _, err := client.Database().Collection("product_applications").InsertOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: "invalid-template-snapshot"},
+			{Key: "project_id", Value: project.ID},
+			{Key: "name", Value: "Invalid Snapshot"},
+			{Key: "name_normalized", Value: "invalid snapshot"},
+			{Key: "template_snapshot", Value: bson.D{
+				{Key: "template_id", Value: "http-service"},
+				{Key: "template_version", Value: 1},
+				{Key: "dockerfile_path", Value: "../Dockerfile"},
+				{Key: "context_path", Value: "."},
+				{Key: "runtime_spec", Value: bson.D{}},
+			}},
+			{Key: "created_by", Value: principal.UserID},
+			{Key: "created_at", Value: time.Now().UTC()},
+		},
+	); err != nil {
+		t.Fatalf("insert invalid application snapshot fixture: %v", err)
+	}
+	if _, err := controlPlaneUseCase.ListApplications(
+		ctx, principal, project.ID,
+	); !errors.Is(err, controlplanebiz.ErrInvalidTemplate) {
+		t.Fatalf("invalid stored application snapshot error = %v", err)
+	}
+	if _, err := client.Database().Collection("product_applications").DeleteOne(
+		ctx,
+		bson.D{{Key: "_id", Value: "invalid-template-snapshot"}},
+	); err != nil {
+		t.Fatalf("remove invalid application snapshot fixture: %v", err)
 	}
 	registryCredential, err := controlPlaneUseCase.CreateRegistryCredential(
 		ctx, principal, project.ID, "Private Registry", "registry.example.com",
@@ -1695,6 +1779,406 @@ func directConnectionURI(t *testing.T, value string) string {
 	return parsed.String()
 }
 
+func verifyArtifactEvidenceIntegration(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	item, err := supplychainbiz.NewEvidence(supplychainbiz.EvidenceInput{
+		ID: "evidence-integration-sbom", OrganizationID: "evidence-integration-organization",
+		ProjectID: "evidence-integration-project", ArtifactID: "evidence-integration-artifact",
+		SubjectDigest: "sha256:" + strings.Repeat("a", 64),
+		Kind:          supplychainbiz.EvidenceKindSBOM, MediaType: "application/vnd.cyclonedx+json",
+		FormatVersion: "1.6", Producer: "integration-worker/1.0.0",
+		RegistryRepository: "registry.example.com/team/api",
+		DescriptorDigest:   "sha256:" + strings.Repeat("b", 64),
+		VerificationStatus: supplychainbiz.VerificationVerified, CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create artifact evidence fixture: %v", err)
+	}
+	if _, err := repository.CreateEvidence(ctx, item); err != nil {
+		t.Fatalf("persist artifact evidence: %v", err)
+	}
+	if _, err := repository.CreateEvidence(ctx, item); !errors.Is(err, supplychainbiz.ErrDuplicate) {
+		t.Fatalf("duplicate artifact evidence error = %v", err)
+	}
+	items, err := repository.ListEvidence(ctx, item.ProjectID, item.ArtifactID)
+	if err != nil || len(items) != 1 || items[0].DescriptorDigest != item.DescriptorDigest {
+		t.Fatalf("list artifact evidence = %+v, %v", items, err)
+	}
+	if _, err := database.Collection("artifact_evidence").UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: item.ID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "descriptor_digest", Value: "corrupt"}}}},
+	); err != nil {
+		t.Fatalf("corrupt artifact evidence fixture: %v", err)
+	}
+	if _, err := repository.GetEvidence(ctx, item.ProjectID, item.ArtifactID, item.ID); !errors.Is(err, supplychainbiz.ErrInvalidEvidence) {
+		t.Fatalf("corrupt artifact evidence error = %v", err)
+	}
+	if _, err := database.Collection("artifact_evidence").DeleteOne(ctx, bson.D{{Key: "_id", Value: item.ID}}); err != nil {
+		t.Fatalf("delete artifact evidence fixture: %v", err)
+	}
+}
+
+func assertArtifactEvidenceIndexes(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	cursor, err := database.Collection("artifact_evidence").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list artifact evidence indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode artifact evidence indexes: %v", err)
+	}
+	names := make(map[string]bool, len(documents))
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{
+		"idx_artifact_evidence_list", "uniq_artifact_evidence_descriptor",
+		"idx_artifact_evidence_digest",
+	} {
+		if !names[name] {
+			t.Errorf("artifact evidence index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertArtifactEvidenceJobIndexes(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	cursor, err := database.Collection("artifact_evidence_jobs").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list artifact evidence job indexes: %v", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode artifact evidence job indexes: %v", err)
+	}
+	names := make(map[string]bool, len(documents))
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{
+		"idx_artifact_evidence_job_queue", "uniq_artifact_evidence_job_idempotency",
+	} {
+		if !names[name] {
+			t.Errorf("artifact evidence job index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertEvidenceVerificationIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("evidence_verifications").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"idx_evidence_verification_list", "uniq_evidence_verification_snapshot"} {
+		if !names[name] {
+			t.Errorf("evidence verification index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertVulnerabilityObservationIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("vulnerability_observations").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"uniq_vulnerability_observation_latest",
+		"idx_vulnerability_observation_policy", "idx_vulnerability_observation_evidence"} {
+		if !names[name] {
+			t.Errorf("vulnerability observation index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertSignatureSigningProfileIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("signature_signing_profiles").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"uniq_signature_signing_profile_name",
+		"uniq_signature_signing_profile_policy", "idx_signature_signing_profile_list"} {
+		if !names[name] {
+			t.Errorf("signature signing profile index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func verifySignatureVerificationFenceIntegration(t *testing.T, ctx context.Context,
+	database *drivermongo.Database) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	base := time.Now().UTC().Add(-time.Minute)
+	snapshot := supplychainbiz.SignatureTrustSnapshot{PolicyID: "signature-policy-1", PolicyVersion: 2,
+		Mode: supplychainbiz.SignatureTrustKeyless, TrustedRootID: "offline-root-1",
+		TrustedRootHash:     "sha256:" + strings.Repeat("a", 64),
+		CertificateIdentity: "https://git.example.com/team/api/.ci/release@refs/tags/v1.0.0",
+		OIDCIssuer:          "https://issuer.example.com"}
+	job, err := supplychainbiz.NewEvidenceJob(supplychainbiz.EvidenceJobInput{ID: "signature-fence-job",
+		OrganizationID: "signature-organization", ProjectID: "signature-project", ArtifactID: "signature-artifact",
+		SubjectDigest: "sha256:" + strings.Repeat("b", 64), RegistryRepository: "registry.example.com/team/signed",
+		RegistryCredentialID: "signature-registry", Kind: supplychainbiz.EvidenceKindSignature,
+		FormatVersion: supplychainbiz.CosignSignatureFormatV03, Producer: "cosign/3.0.6",
+		Signature: snapshot, CreatedAt: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job, err = repository.CreateEvidenceJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := repository.ClaimNextEvidenceJob(ctx, supplychainbiz.EvidenceClaim{
+		WorkerID: "signature-worker-1", Now: base.Add(time.Second), ExpiresAt: base.Add(2 * time.Minute),
+		Kinds: []supplychainbiz.EvidenceKind{supplychainbiz.EvidenceKindSignature}})
+	if err != nil || !found {
+		t.Fatalf("claim signature job = %+v/%v/%v", claimed, found, err)
+	}
+	if err := claimed.Transition(supplychainbiz.EvidenceJobVerifying, base.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = repository.SaveClaimedEvidenceJob(ctx, claimed, claimed.Version,
+		"signature-worker-1", claimed.Lease.Generation, base.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	verification, err := supplychainbiz.NewEvidenceVerification(supplychainbiz.EvidenceVerification{
+		ID: "signature-verification-1", OrganizationID: job.OrganizationID, ProjectID: job.ProjectID,
+		ArtifactID: job.ArtifactID, SubjectDigest: job.SubjectDigest, PolicyID: snapshot.PolicyID,
+		PolicyVersion: snapshot.PolicyVersion, TrustMode: snapshot.Mode, TrustRootHash: snapshot.TrustedRootHash,
+		SignerIdentity: snapshot.CertificateIdentity, OIDCIssuer: snapshot.OIDCIssuer,
+		BundleSetDigest: "sha256:" + strings.Repeat("c", 64), Verifier: "cosign", VerifierVersion: "3.0.6",
+		VerificationStatus: supplychainbiz.VerificationVerified, CreatedAt: base.Add(3 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation := claimed.Lease.Generation
+	if err := claimed.Transition(supplychainbiz.EvidenceJobSucceeded, base.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	completed, published, err := repository.PublishClaimedSignatureVerification(ctx, claimed, verification,
+		claimed.Version, "signature-worker-1", generation, base.Add(3*time.Second))
+	if err != nil || completed.Status != supplychainbiz.EvidenceJobSucceeded || published.ID != verification.ID {
+		t.Fatalf("publish signature verification = %+v/%+v/%v", completed, published, err)
+	}
+	items, err := repository.ListEvidenceVerifications(ctx, job.ProjectID, job.ArtifactID)
+	if err != nil || len(items) != 1 || items[0].BundleSetDigest != verification.BundleSetDigest {
+		t.Fatalf("list signature verifications = %+v/%v", items, err)
+	}
+}
+
+func verifyArtifactEvidenceFenceIntegration(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	base := time.Now().UTC().Add(-time.Minute)
+	job, err := supplychainbiz.NewEvidenceJob(supplychainbiz.EvidenceJobInput{
+		ID: "evidence-fence-job", OrganizationID: "evidence-fence-organization",
+		ProjectID: "evidence-fence-project", ArtifactID: "evidence-fence-artifact",
+		SubjectDigest:      "sha256:" + strings.Repeat("c", 64),
+		RegistryRepository: "registry.example.com/team/fenced", Kind: supplychainbiz.EvidenceKindSBOM,
+		RegistryCredentialID: "evidence-registry-1",
+		FormatVersion:        "1.6", Producer: "integration-evidence-worker/1.0.0", CreatedAt: base,
+	})
+	if err != nil {
+		t.Fatalf("create evidence job fixture: %v", err)
+	}
+	if job, err = repository.CreateEvidenceJob(ctx, job); err != nil {
+		t.Fatalf("persist evidence job: %v", err)
+	}
+	duplicateRequest := job
+	duplicateRequest.ID = "evidence-fence-job-duplicate-request"
+	if _, err := repository.CreateEvidenceJob(ctx, duplicateRequest); !errors.Is(err, supplychainbiz.ErrDuplicate) {
+		t.Fatalf("duplicate evidence job idempotency error = %v", err)
+	}
+	workerOne, found, err := repository.ClaimNextEvidenceJob(ctx, supplychainbiz.EvidenceClaim{
+		WorkerID: "evidence-worker-1", Now: base.Add(time.Second), ExpiresAt: base.Add(10 * time.Second),
+	})
+	if err != nil || !found || workerOne.Lease.Generation != 1 {
+		t.Fatalf("first evidence claim = %+v/%v/%v", workerOne, found, err)
+	}
+	if err := workerOne.Transition(supplychainbiz.EvidenceJobGenerating, base.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	workerOne, err = repository.SaveClaimedEvidenceJob(ctx, workerOne, workerOne.Version,
+		"evidence-worker-1", workerOne.Lease.Generation, base.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("save generating evidence job: %v", err)
+	}
+	if err := workerOne.Transition(supplychainbiz.EvidenceJobPublishing, base.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	workerOne, err = repository.SaveClaimedEvidenceJob(ctx, workerOne, workerOne.Version,
+		"evidence-worker-1", workerOne.Lease.Generation, base.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("save publishing evidence job: %v", err)
+	}
+	workerTwo, found, err := repository.ClaimNextEvidenceJob(ctx, supplychainbiz.EvidenceClaim{
+		WorkerID: "evidence-worker-2", Now: base.Add(11 * time.Second), ExpiresAt: base.Add(30 * time.Second),
+	})
+	if err != nil || !found || workerTwo.Lease.Generation != 2 {
+		t.Fatalf("recovered evidence claim = %+v/%v/%v", workerTwo, found, err)
+	}
+	evidence, err := supplychainbiz.NewEvidence(supplychainbiz.EvidenceInput{
+		ID: "evidence-fence-result", OrganizationID: job.OrganizationID, ProjectID: job.ProjectID,
+		ArtifactID: job.ArtifactID, SubjectDigest: job.SubjectDigest, Kind: job.Kind,
+		MediaType: "application/vnd.cyclonedx+json", FormatVersion: job.FormatVersion,
+		Producer: job.Producer, RegistryRepository: job.RegistryRepository,
+		DescriptorDigest:   "sha256:" + strings.Repeat("d", 64),
+		VerificationStatus: supplychainbiz.VerificationUnverified, CreatedAt: base.Add(12 * time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := workerOne
+	if err := stale.Transition(supplychainbiz.EvidenceJobSucceeded, base.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := repository.PublishClaimedEvidence(ctx, stale, evidence, workerOne.Version,
+		"evidence-worker-1", 1, base.Add(4*time.Second)); !errors.Is(err, supplychainbiz.ErrEvidenceLeaseExpired) {
+		t.Fatalf("stale evidence publish error = %v", err)
+	}
+	count, err := database.Collection("artifact_evidence").CountDocuments(ctx,
+		bson.D{{Key: "_id", Value: evidence.ID}})
+	if err != nil || count != 0 {
+		t.Fatalf("stale transaction evidence count = %d, %v", count, err)
+	}
+	if err := workerTwo.Transition(supplychainbiz.EvidenceJobSucceeded, base.Add(12*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	completed, published, err := repository.PublishClaimedEvidence(ctx, workerTwo, evidence, workerTwo.Version,
+		"evidence-worker-2", 2, base.Add(12*time.Second))
+	if err != nil || completed.Status != supplychainbiz.EvidenceJobSucceeded || published.ID != evidence.ID {
+		t.Fatalf("fenced evidence publication = %+v/%+v/%v", completed, published, err)
+	}
+}
+
+func verifyVulnerabilityObservationIntegration(t *testing.T, ctx context.Context,
+	database *drivermongo.Database) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	base := time.Now().UTC().Add(-time.Minute)
+	job, err := supplychainbiz.NewEvidenceJob(supplychainbiz.EvidenceJobInput{
+		ID: "vulnerability-integration-job", OrganizationID: "vulnerability-integration-organization",
+		ProjectID: "vulnerability-integration-project", ArtifactID: "vulnerability-integration-artifact",
+		SubjectDigest: "sha256:" + strings.Repeat("7", 64), RegistryRepository: "registry.example.com/team/scanned",
+		RegistryCredentialID: "vulnerability-registry-1",
+		Kind:                 supplychainbiz.EvidenceKindVulnerabilityReport,
+		FormatVersion:        supplychainbiz.TrivyReportFormatVersion, Producer: "trivy/0.74.0", CreatedAt: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = repository.CreateEvidenceJob(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, found, err := repository.ClaimNextEvidenceJob(ctx, supplychainbiz.EvidenceClaim{
+		WorkerID: "vulnerability-worker-1", Now: base.Add(time.Second), ExpiresAt: base.Add(time.Minute)})
+	if err != nil || !found {
+		t.Fatalf("claim vulnerability job = %+v/%v/%v", claimed, found, err)
+	}
+	if err := claimed.Transition(supplychainbiz.EvidenceJobGenerating, base.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = repository.SaveClaimedEvidenceJob(ctx, claimed, claimed.Version,
+		"vulnerability-worker-1", claimed.Lease.Generation, base.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := claimed.Transition(supplychainbiz.EvidenceJobPublishing, base.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err = repository.SaveClaimedEvidenceJob(ctx, claimed, claimed.Version,
+		"vulnerability-worker-1", claimed.Lease.Generation, base.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, err := supplychainbiz.NewEvidence(supplychainbiz.EvidenceInput{
+		ID: "vulnerability-integration-evidence", OrganizationID: job.OrganizationID, ProjectID: job.ProjectID,
+		ArtifactID: job.ArtifactID, SubjectDigest: job.SubjectDigest, Kind: job.Kind,
+		MediaType: supplychainbiz.TrivyReportMediaType, FormatVersion: job.FormatVersion, Producer: job.Producer,
+		RegistryRepository: job.RegistryRepository, DescriptorDigest: "sha256:" + strings.Repeat("8", 64),
+		VerificationStatus: supplychainbiz.VerificationUnverified, CreatedAt: base.Add(4 * time.Second)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observationID, _ := supplychainbiz.VulnerabilityObservationID(job.ArtifactID, "trivy")
+	observation, err := supplychainbiz.NewVulnerabilityObservation(supplychainbiz.VulnerabilityObservation{
+		ID: observationID, OrganizationID: job.OrganizationID, ProjectID: job.ProjectID,
+		ArtifactID: job.ArtifactID, SubjectDigest: job.SubjectDigest, EvidenceID: evidence.ID,
+		DescriptorDigest: evidence.DescriptorDigest, Scanner: "trivy", ScannerVersion: "0.74.0",
+		Database: supplychainbiz.VulnerabilityDatabase{SchemaVersion: 2, UpdatedAt: base.Add(-time.Hour),
+			DownloadedAt: base.Add(-30 * time.Minute), NextUpdate: base.Add(6 * time.Hour)},
+		ScannedAt: base, FreshUntil: base.Add(6 * time.Hour),
+		Counts:          supplychainbiz.VulnerabilityCounts{High: 1, Total: 1, Fixable: 1},
+		HighestSeverity: supplychainbiz.VulnerabilitySeverityHigh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, expectedVersion := claimed.Lease.Generation, claimed.Version
+	if err := claimed.Transition(supplychainbiz.EvidenceJobSucceeded, base.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	completed, _, published, err := repository.PublishClaimedVulnerabilityObservation(ctx, claimed,
+		evidence, observation, expectedVersion, "vulnerability-worker-1", generation, base.Add(4*time.Second))
+	if err != nil || completed.Status != supplychainbiz.EvidenceJobSucceeded || published.EvidenceID != evidence.ID {
+		t.Fatalf("publish vulnerability observation = %+v/%+v/%v", completed, published, err)
+	}
+	latest, err := repository.GetLatestVulnerabilityObservation(ctx, job.ProjectID, job.ArtifactID)
+	if err != nil || latest.Counts.High != 1 || latest.DescriptorDigest != evidence.DescriptorDigest {
+		t.Fatalf("latest vulnerability observation = %+v/%v", latest, err)
+	}
+}
+
 func verifyBuildSourceRepositoryIntegration(
 	t *testing.T,
 	ctx context.Context,
@@ -2022,6 +2506,140 @@ func verifyBuildSourceRepositoryIntegration(
 	}
 	if admitted != webhookFloodLimit {
 		t.Fatalf("concurrent webhook admissions = %d, want %d", admitted, webhookFloodLimit)
+	}
+	const networkWebhookSecret = "network-webhook-flood-secret"
+	useCase.WithWebhookAdmission(repository, webhookFloodLimit, time.Minute).
+		WithWebhookVerifier(builddata.NewWebhookVerifier(integrationWebhookSecrets{
+			secret: []byte(networkWebhookSecret),
+		}))
+	networkHook, err := useCase.CreateBuildHook(
+		ctx, principal, projectID, applicationID, configuration.ID, "Network flood webhook",
+		buildbiz.WebhookProviderGitHub, []string{"refs/heads/main"},
+		"secret://network-webhook", "build-request-network-hook",
+	)
+	if err != nil {
+		t.Fatalf("create network flood Hook: %v", err)
+	}
+	server := httptest.NewServer(buildservice.NewHTTP(useCase))
+	defer server.Close()
+	networkResults := make(chan int, webhookFloodRequests)
+	networkErrors := make(chan error, webhookFloodRequests)
+	floodBody := []byte(`{"ref":"refs/heads/main","after":"a975c10d68a2d7461634f13b15c52a2efba72d16"}`)
+	mac := hmac.New(sha256.New, []byte(networkWebhookSecret))
+	_, _ = mac.Write(floodBody)
+	signature := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	var networkWait sync.WaitGroup
+	for index := range webhookFloodRequests {
+		networkWait.Add(1)
+		go func() {
+			defer networkWait.Done()
+			request, requestErr := http.NewRequestWithContext(
+				ctx, http.MethodPost, server.URL+"/api/v1/build-hooks/github/"+networkHook.ID,
+				bytes.NewReader(floodBody),
+			)
+			if requestErr != nil {
+				networkErrors <- requestErr
+				return
+			}
+			request.Header.Set("Content-Type", "application/json")
+			request.Header.Set("X-GitHub-Delivery", fmt.Sprintf("network-delivery-%03d", index))
+			request.Header.Set("X-GitHub-Event", "push")
+			request.Header.Set("X-Hub-Signature-256", signature)
+			response, requestErr := server.Client().Do(request)
+			if requestErr != nil {
+				networkErrors <- requestErr
+				return
+			}
+			_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
+			_ = response.Body.Close()
+			networkResults <- response.StatusCode
+		}()
+	}
+	networkWait.Wait()
+	close(networkResults)
+	close(networkErrors)
+	for requestErr := range networkErrors {
+		t.Fatalf("network Webhook flood: %v", requestErr)
+	}
+	networkAccepted, networkLimited := 0, 0
+	for status := range networkResults {
+		switch status {
+		case http.StatusAccepted:
+			networkAccepted++
+		case http.StatusTooManyRequests:
+			networkLimited++
+		default:
+			t.Fatalf("network Webhook flood status = %d", status)
+		}
+	}
+	if networkAccepted != webhookFloodLimit || networkLimited != webhookFloodRequests-webhookFloodLimit {
+		t.Fatalf("network Webhook flood accepted/limited = %d/%d", networkAccepted, networkLimited)
+	}
+	if _, err := database.Collection("builds").DeleteMany(ctx, bson.D{
+		{Key: "trigger_id", Value: networkHook.ID},
+	}); err != nil {
+		t.Fatalf("clean network flood Builds: %v", err)
+	}
+	orderingHook, err := useCase.CreateBuildHook(
+		ctx, principal, projectID, applicationID, configuration.ID, "Webhook ordering guard",
+		buildbiz.WebhookProviderGitHub, []string{"refs/heads/main"},
+		"secret://webhook-ordering", "build-request-ordering-hook",
+	)
+	if err != nil {
+		t.Fatalf("create ordering Hook: %v", err)
+	}
+	sendSignedPush := func(deliveryID, commitSHA string) (int, string) {
+		t.Helper()
+		body := []byte(fmt.Sprintf(`{"ref":"refs/heads/main","after":%q}`, commitSHA))
+		digest := hmac.New(sha256.New, []byte(networkWebhookSecret))
+		_, _ = digest.Write(body)
+		request, requestErr := http.NewRequestWithContext(
+			ctx, http.MethodPost, server.URL+"/api/v1/build-hooks/github/"+orderingHook.ID,
+			bytes.NewReader(body),
+		)
+		if requestErr != nil {
+			t.Fatalf("create ordering Webhook request: %v", requestErr)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-GitHub-Delivery", deliveryID)
+		request.Header.Set("X-GitHub-Event", "push")
+		request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(digest.Sum(nil)))
+		response, requestErr := server.Client().Do(request)
+		if requestErr != nil {
+			t.Fatalf("send ordering Webhook request: %v", requestErr)
+		}
+		responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+		_ = response.Body.Close()
+		if readErr != nil {
+			t.Fatalf("read ordering Webhook response: %v", readErr)
+		}
+		return response.StatusCode, string(responseBody)
+	}
+	currentCommit := "a975c10d68a2d7461634f13b15c52a2efba72d16"
+	staleCommit := "b975c10d68a2d7461634f13b15c52a2efba72d16"
+	currentStatus, currentBody := sendSignedPush("ordering-current", currentCommit)
+	staleStatus, staleBody := sendSignedPush("ordering-stale", staleCommit)
+	if currentStatus != http.StatusAccepted || !strings.Contains(currentBody, `"status":"accepted"`) ||
+		staleStatus != http.StatusAccepted || !strings.Contains(staleBody, `"status":"ignored"`) {
+		t.Fatalf("ordered/stale Webhooks = %d/%s, %d/%s", currentStatus, currentBody, staleStatus, staleBody)
+	}
+	orderedBuildCount, err := database.Collection("builds").CountDocuments(ctx, bson.D{
+		{Key: "trigger_id", Value: orderingHook.ID},
+	})
+	if err != nil || orderedBuildCount != 1 {
+		t.Fatalf("ordering Hook Build count = %d/%v", orderedBuildCount, err)
+	}
+	ignoredDeliveryCount, err := database.Collection("webhook_deliveries").CountDocuments(ctx, bson.D{
+		{Key: "hook_id", Value: orderingHook.ID},
+		{Key: "status", Value: buildbiz.WebhookDeliveryStatusIgnored},
+	})
+	if err != nil || ignoredDeliveryCount != 1 {
+		t.Fatalf("ordering Hook ignored delivery count = %d/%v", ignoredDeliveryCount, err)
+	}
+	if _, err := database.Collection("builds").DeleteMany(ctx, bson.D{
+		{Key: "trigger_id", Value: orderingHook.ID},
+	}); err != nil {
+		t.Fatalf("clean ordering Hook Builds: %v", err)
 	}
 	if allowed, _, err := repository.ReserveBuildTrigger(ctx, "integration-shared-id", floodNow, 1, time.Minute); err != nil || !allowed {
 		t.Fatalf("trigger namespace admission = %t/%v", allowed, err)

@@ -56,12 +56,13 @@ func (r buildLogRedactor) Redact(value string) string {
 }
 
 type buildKitStatusLogger struct {
-	sink       biz.BuildLogSink
-	redactor   buildLogRedactor
-	buffers    map[string][]byte
-	discarding map[string]bool
-	stages     map[string]biz.BuildLogStage
-	started    map[string]bool
+	sink          biz.BuildLogSink
+	redactor      buildLogRedactor
+	buffers       map[string][]byte
+	discarding    map[string]bool
+	stages        map[string]biz.BuildLogStage
+	started       map[string]bool
+	networkDenied bool
 }
 
 func newBuildKitStatusLogger(sink biz.BuildLogSink, username string, secret []byte) *buildKitStatusLogger {
@@ -150,6 +151,9 @@ func (l *buildKitStatusLogger) consumeBytes(ctx context.Context, key string,
 }
 
 func (l *buildKitStatusLogger) emit(ctx context.Context, stage biz.BuildLogStage, value string) {
+	if strings.Contains(strings.ToLower(value), "451 unavailable for legal reasons") {
+		l.networkDenied = true
+	}
 	if l.sink == nil {
 		return
 	}
@@ -160,6 +164,8 @@ func (l *buildKitStatusLogger) emit(ctx context.Context, stage biz.BuildLogStage
 		l.sink(ctx, stage, value)
 	}
 }
+
+func (l *buildKitStatusLogger) NetworkDenied() bool { return l.networkDenied }
 
 func buildLogStageForVertex(name string) biz.BuildLogStage {
 	lower := strings.ToLower(name)

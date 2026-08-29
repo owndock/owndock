@@ -1,0 +1,31 @@
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.buildTime=${BUILD_TIME}" \
+    -o /out/owndock-evidence-worker ./cmd/evidence-worker
+
+# The multi-architecture digest is part of the reviewed Syft 1.50.0 baseline.
+# A version change requires updating config validation and the SBOM fixtures.
+FROM anchore/syft:v1.50.0@sha256:1288ea4c8b38767b4e620c1e312c8cb26b6e887a99b4f07ab6cd19fc6f225026 AS syft
+
+FROM ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00 AS cosign
+
+# The database is mounted separately and recorded in every observation. This
+# stage contributes only the immutable multi-architecture Trivy executable.
+FROM aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 AS trivy
+
+FROM gcr.io/distroless/base-debian12:nonroot@sha256:63f52bd27b6aa6555f5d56500b70d7bb0afe51c654905be88a2c1cf967a77b1a
+COPY --from=go-build /out/owndock-evidence-worker /usr/local/bin/owndock-evidence-worker
+COPY --from=syft /syft /usr/local/bin/syft
+COPY --from=cosign /ko-app/cosign /usr/local/bin/cosign
+COPY --from=trivy /usr/local/bin/trivy /usr/local/bin/trivy
+USER 65532:65532
+WORKDIR /tmp
+ENTRYPOINT ["/usr/local/bin/owndock-evidence-worker"]
+CMD ["-conf", "/etc/owndock/config.yaml"]

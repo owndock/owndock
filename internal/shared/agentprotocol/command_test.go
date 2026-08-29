@@ -126,6 +126,47 @@ func TestDeploymentCommandRequiresCutoverSequence(t *testing.T) {
 	}
 }
 
+func TestCutoverReleaseCommandIsNarrowAndRoundTrips(t *testing.T) {
+	command := AgentCommand{
+		ID:       "release-command-1",
+		Kind:     AgentCommandCutoverRelease,
+		Deadline: time.Unix(1000, 0).UTC(),
+		Cutover: &CutoverCommand{
+			DeploymentID:    "deployment-1",
+			CutoverSequence: 7,
+			RuntimeTargetID: "target-1",
+			ContainerName:   "owndock-container",
+		},
+	}
+	if err := command.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	document := NewCommandDocument(command)
+	if roundTrip := document.Domain(); !command.Equivalent(roundTrip) {
+		t.Fatalf("round trip = %+v", roundTrip)
+	}
+	result := AgentCommandResult{
+		CommandID: command.ID,
+		Status:    AgentCommandSucceeded,
+	}
+	if err := result.Validate(command); err != nil {
+		t.Fatal(err)
+	}
+
+	unsafe := command
+	cutover := *command.Cutover
+	cutover.ContainerName = "/var/run/docker.sock"
+	unsafe.Cutover = &cutover
+	if !errors.Is(unsafe.Validate(), ErrCommandInvalid) {
+		t.Fatal("cutover release accepted an arbitrary Docker target")
+	}
+	unsafe = command
+	unsafe.Deployment = &DeploymentCommand{}
+	if !errors.Is(unsafe.Validate(), ErrCommandInvalid) {
+		t.Fatal("cutover release accepted a mixed deployment payload")
+	}
+}
+
 func TestCommandDocumentRoundTripsDeploymentWithoutAliasingSecrets(t *testing.T) {
 	command := deploymentCommand(AgentCommandDeploymentPrepare)
 	command.Deployment.ImageDigest =

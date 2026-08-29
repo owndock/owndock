@@ -40,6 +40,9 @@ import (
 	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	runtimeinventoryservice "github.com/owndock/owndock/internal/modules/runtimeinventory/service"
 	runtimeinventoryworker "github.com/owndock/owndock/internal/modules/runtimeinventory/worker"
+	supplychainbiz "github.com/owndock/owndock/internal/modules/supplychain/biz"
+	supplychaindata "github.com/owndock/owndock/internal/modules/supplychain/data"
+	supplychainservice "github.com/owndock/owndock/internal/modules/supplychain/service"
 	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
 	terminaldata "github.com/owndock/owndock/internal/modules/terminal/data"
 	terminalservice "github.com/owndock/owndock/internal/modules/terminal/service"
@@ -348,6 +351,7 @@ func run() error {
 			time.Now,
 		).WithManagedHosts(managedHostStore).
 			WithProjectMembers(controlPlaneStore).
+			WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
 			WithArtifactReleases(controlPlaneStore).
 			WithRuntimeTargetProbe(
 				controlPlaneStore,
@@ -481,9 +485,16 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("parse source repository probe timeout: %w", err)
 		}
-		gitSourceGateway := builddata.NewGitSourceProber(
+		gitSourceGateway, err := builddata.NewGitSourceProberWithNetwork(
 			builddata.NewEnvironmentRepositorySecretResolver(),
-		).WithTimeout(sourceProbeTimeout)
+			builddata.GitNetworkOptions{
+				CACertFile: cfg.Product.SourceGitCACertFile, HTTPSProxyURL: cfg.Product.SourceGitHTTPSProxy,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create Git source prober: %w", err)
+		}
+		gitSourceGateway.WithTimeout(sourceProbeTimeout)
 		buildTriggerWindow, err := cfg.Product.BuildTriggerRateWindowDuration()
 		if err != nil {
 			return fmt.Errorf("parse build trigger rate window: %w", err)
@@ -522,6 +533,65 @@ func run() error {
 			authenticateProject,
 		); err != nil {
 			return fmt.Errorf("mount build API: %w", err)
+		}
+		supplyChainRepository := supplychaindata.NewMongoRepository(mongoClient.Database())
+		supplyChainUseCase, err := supplychainbiz.NewUseCase(
+			controlPlaneStore,
+			supplychaindata.NewArtifactLookupAdapter(buildRepository),
+			supplyChainRepository,
+		)
+		if err != nil {
+			return fmt.Errorf("create supply-chain use case: %w", err)
+		}
+		evidenceContentReader, err := supplychaindata.NewOCIContentReader(
+			supplychaindata.OCIContentReaderOptions{
+				Credentials:      supplychaindata.NewEnvironmentRegistryCredentialProvider(controlPlaneStore),
+				MaxDocumentBytes: cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create OCI Evidence content reader: %w", err)
+		}
+		supplyChainUseCase.WithContentReader(evidenceContentReader)
+		supplyChainUseCase.WithVerificationRepository(supplyChainRepository)
+		supplyChainUseCase.WithVulnerabilityObservations(supplyChainRepository, time.Now)
+		signatureTrustPolicies, err := supplychainbiz.NewSignatureTrustPolicyUseCase(
+			controlPlaneStore, supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create signature trust policy use case: %w", err)
+		}
+		signatureTrustPolicies.WithAudit(mongoClient, auditStore)
+		signatureSigningProfiles, err := supplychainbiz.NewSignatureSigningProfileUseCase(
+			controlPlaneStore, supplyChainRepository, supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create signature signing profile use case: %w", err)
+		}
+		signatureSigningProfiles.WithAudit(mongoClient, auditStore)
+		signatureVerifications, err := supplychainbiz.NewSignatureVerificationUseCase(
+			supplychaindata.NewArtifactLookupAdapter(buildRepository), supplyChainRepository,
+			supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create signature verification use case: %w", err)
+		}
+		signatureVerifications.WithAudit(mongoClient, auditStore)
+		vulnerabilityScans, err := supplychainbiz.NewVulnerabilityScanUseCase(
+			supplychaindata.NewArtifactLookupAdapter(buildRepository), supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create vulnerability scan use case: %w", err)
+		}
+		vulnerabilityScans.WithAudit(mongoClient, auditStore)
+		if err := productAPI.WithSupplyChain(
+			supplychainservice.NewHTTP(supplyChainUseCase).
+				WithSignatureTrustPolicies(signatureTrustPolicies).
+				WithSignatureSigningProfiles(signatureSigningProfiles).
+				WithSignatureVerifications(signatureVerifications).
+				WithVulnerabilityScans(vulnerabilityScans), authenticateProject,
+		); err != nil {
+			return fmt.Errorf("mount supply-chain API: %w", err)
 		}
 		if cfg.Runtime.DeploymentWorker.Enabled {
 			pollInterval, err := cfg.Runtime.DeploymentWorker.PollIntervalDuration()

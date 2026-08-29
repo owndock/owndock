@@ -14,7 +14,7 @@ import (
 
 const (
 	contentType     = "application/x-ndjson"
-	protocolVersion = "v1"
+	protocolVersion = agentprotocol.Version
 )
 
 type agentFrame struct {

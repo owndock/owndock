@@ -148,3 +148,77 @@ func TestNewEnvironmentValidatesVariables(t *testing.T) {
 		t.Fatalf("invalid variables error = %v", err)
 	}
 }
+
+func TestNewApplicationCopiesTemplateSnapshot(t *testing.T) {
+	template := Template{
+		ID: "http-service", Version: 3,
+		Name: LocalizedText{
+			English: "HTTP service", SimplifiedChinese: "HTTP 服务",
+		},
+		Description: LocalizedText{
+			English: "Web service", SimplifiedChinese: "Web 服务",
+		},
+		Preset: TemplatePreset{
+			DockerfilePath: "Dockerfile", ContextPath: ".",
+			RuntimeSpec: runtimespec.Spec{
+				Ports: []runtimespec.Port{{
+					Name: "http", ContainerPort: 8080,
+				}},
+			},
+		},
+	}
+	item, err := NewApplicationFromTemplate(
+		"application", "project", "API", "user", time.Unix(1, 0),
+		&template,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.Version = 4
+	template.Preset.RuntimeSpec.Ports[0].ContainerPort = 9090
+	if item.TemplateSnapshot == nil ||
+		item.TemplateSnapshot.TemplateVersion != 3 ||
+		item.TemplateSnapshot.RuntimeSpec.Ports[0].ContainerPort != 8080 ||
+		item.TemplateSnapshot.RuntimeSpec.Resources.CPUMilli !=
+			runtimespec.DefaultCPUMilli {
+		t.Fatalf("snapshot = %+v", item.TemplateSnapshot)
+	}
+}
+
+func TestNormalizeTemplateRejectsUnsafeOrIncompletePreset(t *testing.T) {
+	item := Template{
+		ID: "worker", Version: 1,
+		Name: LocalizedText{English: "Worker", SimplifiedChinese: "任务"},
+		Description: LocalizedText{
+			English: "Background worker", SimplifiedChinese: "后台任务",
+		},
+		Preset: TemplatePreset{
+			DockerfilePath: "../Dockerfile", ContextPath: ".",
+		},
+	}
+	if _, err := NormalizeTemplate(item); err != ErrInvalidTemplate {
+		t.Fatalf("unsafe template error = %v", err)
+	}
+	item.Preset.ContextPath = "services/api"
+	item.Preset.DockerfilePath = "services/api/Dockerfile"
+	if _, err := NormalizeTemplate(item); err != nil {
+		t.Fatalf("nested safe template error = %v", err)
+	}
+	item.Preset.DockerfilePath = "services/worker/Dockerfile"
+	if _, err := NormalizeTemplate(item); err != ErrInvalidTemplate {
+		t.Fatalf("Dockerfile outside context error = %v", err)
+	}
+}
+
+func TestNormalizeApplicationTemplateSnapshotRejectsInvalidStoredPreset(
+	t *testing.T,
+) {
+	if _, err := NormalizeApplicationTemplateSnapshot(
+		&ApplicationTemplateSnapshot{
+			TemplateID: "http-service", TemplateVersion: 1,
+			DockerfilePath: "../Dockerfile", ContextPath: ".",
+		},
+	); err != ErrInvalidTemplate {
+		t.Fatalf("invalid snapshot error = %v", err)
+	}
+}

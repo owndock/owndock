@@ -257,6 +257,63 @@ func TestAgentDockerGatewayRejectsDirectConnection(t *testing.T) {
 	}
 }
 
+func TestAgentDockerGatewayBuildsNarrowCutoverRelease(t *testing.T) {
+	dispatcher := &agentCommandDispatcherStub{}
+	gateway := newAgentGateway(t, dispatcher, &agentFenceStub{})
+	plan := testAgentExecutionPlan(t)
+	if err := gateway.ReleaseCutoverWatermark(t.Context(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatcher.commands) != 1 || dispatcher.hosts[0] != "host-1" {
+		t.Fatalf("dispatch = %+v, hosts = %v", dispatcher.commands, dispatcher.hosts)
+	}
+	command := dispatcher.commands[0]
+	if command.Kind != agentprotocol.AgentCommandCutoverRelease ||
+		command.Deployment != nil || command.Cutover == nil ||
+		command.Cutover.DeploymentID != plan.DeploymentID ||
+		command.Cutover.CutoverSequence != plan.CutoverSequence ||
+		command.Cutover.RuntimeTargetID != plan.RuntimeTargetID ||
+		command.Cutover.ContainerName != plan.ContainerName {
+		t.Fatalf("command = %+v", command)
+	}
+}
+
+func TestAgentDockerGatewayRejectsDirectCutoverRelease(t *testing.T) {
+	gateway := newAgentGateway(
+		t,
+		&agentCommandDispatcherStub{},
+		&agentFenceStub{},
+	)
+	err := gateway.ReleaseCutoverWatermark(t.Context(), testExecutionPlan())
+	var executionError *biz.ExecutionError
+	if !errors.As(err, &executionError) ||
+		executionError.Category != biz.FailureConfiguration {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestAgentDockerGatewayMapsCutoverCommandIDFailure(t *testing.T) {
+	gateway, err := NewAgentDockerGateway(
+		&agentCommandDispatcherStub{},
+		&agentFenceStub{},
+		func() (string, error) { return "", errors.New("ID unavailable") },
+		time.Now,
+		time.Minute,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = gateway.ReleaseCutoverWatermark(
+		t.Context(),
+		testAgentExecutionPlan(t),
+	)
+	var executionError *biz.ExecutionError
+	if !errors.As(err, &executionError) ||
+		executionError.Category != biz.FailureRuntime {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func newAgentGateway(
 	t *testing.T,
 	dispatcher managedhostbiz.AgentCommandDispatcher,

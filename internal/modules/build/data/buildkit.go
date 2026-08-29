@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -44,6 +45,7 @@ type BuildKitOptions struct {
 	ClientCertFile  string
 	ClientKeyFile   string
 	ExpectedVersion string
+	EgressProxyURL  string
 }
 
 type buildKitClient interface {
@@ -55,8 +57,9 @@ type buildKitClient interface {
 type buildKitClientFactory func(context.Context) (buildKitClient, error)
 
 type BuildKitGateway struct {
-	resolver  biz.RegistrySecretResolver
-	newClient buildKitClientFactory
+	resolver       biz.RegistrySecretResolver
+	newClient      buildKitClientFactory
+	egressProxyURL string
 }
 
 func NewBuildKitGateway(ctx context.Context, resolver biz.RegistrySecretResolver, options BuildKitOptions) (*BuildKitGateway, error) {
@@ -64,12 +67,17 @@ func NewBuildKitGateway(ctx context.Context, resolver biz.RegistrySecretResolver
 	if err != nil || resolver == nil {
 		return nil, ErrInvalidBuildKitConfiguration
 	}
-	return newBuildKitGateway(ctx, resolver, expectedVersion, factory)
+	proxyURL := strings.TrimSpace(options.EgressProxyURL)
+	if !validBuildEgressProxyURL(proxyURL) {
+		return nil, ErrInvalidBuildKitConfiguration
+	}
+	return newBuildKitGateway(ctx, resolver, expectedVersion, proxyURL, factory)
 }
 
 func newBuildKitGateway(ctx context.Context, resolver biz.RegistrySecretResolver, expectedVersion string,
-	factory buildKitClientFactory) (*BuildKitGateway, error) {
-	if resolver == nil || factory == nil || strings.TrimSpace(expectedVersion) == "" {
+	egressProxyURL string, factory buildKitClientFactory) (*BuildKitGateway, error) {
+	if resolver == nil || factory == nil || strings.TrimSpace(expectedVersion) == "" ||
+		!validBuildEgressProxyURL(egressProxyURL) {
 		return nil, ErrInvalidBuildKitConfiguration
 	}
 	client, err := factory(ctx)
@@ -84,7 +92,9 @@ func newBuildKitGateway(ctx context.Context, resolver biz.RegistrySecretResolver
 	if info == nil || strings.TrimSpace(info.BuildkitVersion.Version) != expectedVersion {
 		return nil, ErrBuildKitVersionMismatch
 	}
-	return &BuildKitGateway{resolver: resolver, newClient: factory}, nil
+	return &BuildKitGateway{
+		resolver: resolver, newClient: factory, egressProxyURL: egressProxyURL,
+	}, nil
 }
 
 func buildKitFactory(options BuildKitOptions) (buildKitClientFactory, string, error) {
@@ -179,23 +189,25 @@ func (g *BuildKitGateway) Build(ctx context.Context, request biz.BuildExecutionR
 	auth := authprovider.NewDockerAuthProvider(authprovider.DockerAuthProviderConfig{
 		AuthConfigProvider: registryAuthProvider(request.Credential, password),
 	})
-	var statusChannel chan *buildkitclient.SolveStatus
-	var statusDone chan struct{}
-	if request.LogSink != nil {
-		statusChannel = make(chan *buildkitclient.SolveStatus, 16)
-		statusDone = make(chan struct{})
-		logger := newBuildKitStatusLogger(request.LogSink, request.Credential.Username, password)
-		go func() {
-			logger.Consume(operationContext, statusChannel)
-			close(statusDone)
-		}()
-	}
+	statusChannel := make(chan *buildkitclient.SolveStatus, 16)
+	statusDone := make(chan struct{})
+	logger := newBuildKitStatusLogger(request.LogSink, request.Credential.Username, password)
+	go func() {
+		logger.Consume(operationContext, statusChannel)
+		close(statusDone)
+	}()
 	response, err := client.Solve(operationContext, nil, buildkitclient.SolveOpt{
 		Frontend: "gateway.v0",
 		FrontendAttrs: map[string]string{
-			"source":   PinnedDockerfileFrontend,
-			"filename": dockerfileName,
-			"platform": string(request.Configuration.TargetPlatform),
+			"source":                PinnedDockerfileFrontend,
+			"filename":              dockerfileName,
+			"platform":              string(request.Configuration.TargetPlatform),
+			"build-arg:HTTP_PROXY":  g.egressProxyURL,
+			"build-arg:HTTPS_PROXY": g.egressProxyURL,
+			"build-arg:http_proxy":  g.egressProxyURL,
+			"build-arg:https_proxy": g.egressProxyURL,
+			"build-arg:NO_PROXY":    "",
+			"build-arg:no_proxy":    "",
 		},
 		LocalMounts: map[string]fsutil.FS{"context": local, "dockerfile": local},
 		Exports: []buildkitclient.ExportEntry{{
@@ -207,10 +219,11 @@ func (g *BuildKitGateway) Build(ctx context.Context, request biz.BuildExecutionR
 		Session: []session.Attachable{auth},
 		Ref:     fmt.Sprintf("%s/%d", request.BuildID, request.Generation),
 	}, statusChannel)
-	if statusDone != nil {
-		<-statusDone
-	}
+	<-statusDone
 	if err != nil {
+		if logger.NetworkDenied() {
+			return biz.BuildExecutionOutput{}, biz.ErrBuildNetworkDenied
+		}
 		return biz.BuildExecutionOutput{}, classifyBuildKitError(ctx, operationContext, err)
 	}
 	if response == nil {
@@ -222,6 +235,24 @@ func (g *BuildKitGateway) Build(ctx context.Context, request biz.BuildExecutionR
 		return biz.BuildExecutionOutput{}, biz.ErrInvalidBuildOutput
 	}
 	return biz.BuildExecutionOutput{ImageDigest: request.Configuration.ImageRepository + "@" + descriptor.String()}, nil
+}
+
+func validBuildEgressProxyURL(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || value != strings.ToLower(value) {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() == "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.String() != value {
+		return false
+	}
+	_, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return false
+	}
+	portNumber, err := strconv.Atoi(port)
+	return err == nil && portNumber >= 1 && portNumber <= 65535
 }
 
 func buildInputPaths(request biz.BuildExecutionRequest) (string, string, error) {
@@ -338,8 +369,12 @@ func classifyBuildKitError(parentContext, operationContext context.Context, err 
 		strings.Contains(message, "out of memory") {
 		return biz.ErrBuildResourceLimit
 	}
+	if strings.Contains(message, "451 unavailable for legal reasons") {
+		return biz.ErrBuildNetworkDenied
+	}
 	if strings.Contains(message, "unauthorized") || strings.Contains(message, "authentication required") ||
-		strings.Contains(message, "denied") {
+		strings.Contains(message, "pull access denied") ||
+		strings.Contains(message, "requested access to the resource is denied") {
 		return biz.ErrRegistryAuthentication
 	}
 	if strings.Contains(message, "push") || strings.Contains(message, "registry") {

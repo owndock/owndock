@@ -36,6 +36,8 @@ flowchart LR
 - 私有 HTTPS 仓库使用 Access Token；
 - SSH 仓库使用 Deploy Key，并且必须固定 `SHA256:` Host Key fingerprint。
 - 显式探测会验证凭据、TLS/SSH 主机身份和默认分支，但不会下载工作区。
+- 自建 HTTPS Git 可以由安装管理员配置额外 CA bundle；Server probe 和 Build Worker checkout 使用同一条信任配置。
+- 需要企业出口代理时可以显式配置无凭据的 HTTP(S) CONNECT 代理；该代理只用于 HTTPS Git，SSH 仍直接连接并固定 Host Key。
 
 当前明确拒绝：
 
@@ -45,6 +47,22 @@ flowchart LR
 - 未固定 Host Key 的 SSH 仓库；
 - HTTPS 凭据绑定到 SSH 仓库，或 SSH Deploy Key 绑定到 HTTPS 仓库；
 - 关闭 TLS 校验或跳过 SSH Host Key 校验。
+
+## 自建 CA 与 HTTPS 代理
+
+这两项是安装范围的网络信任，不是普通 Project 用户可以修改的仓库字段：
+
+```yaml
+product:
+  source_git_ca_cert_file: /etc/owndock/git/ca.pem
+  source_git_https_proxy: http://proxy.internal:3128
+```
+
+`source_git_ca_cert_file` 必须是绝对路径、普通文件、最大 1 MiB，并且只能包含有效 X.509 PEM 证书。Server 和 Build Worker 启动时都会读取并验证它；配置了该路径却无法读取时，进程拒绝启动。Build Worker 会把已经验证的 CA 内容复制到本次 checkout 的 `0700` 临时目录，以 `0600` 文件交给 Git，操作结束即删除，避免运行中信任文件被替换。
+
+`source_git_https_proxy` 只接受规范的 `http://host[:port]` 或 `https://host[:port]` origin，不接受 username、password、路径、query 或 fragment。OwnDock 不会继承宿主进程中的 `HTTPS_PROXY`、`GIT_SSL_CAINFO` 或 `SSL_CERT_FILE`，避免部署环境意外改变 Git 信任边界。当前代理不承载认证信息；需要代理认证时应等待受 Secret Provider 管理的专用能力，不能把密码写进 URL。
+
+如果 Server 和 Build Worker 运行在不同容器或主机上，管理员需要把同一 CA bundle 以只读文件挂载到配置中的相同绝对路径。设置代理后，所有 HTTPS Git probe/resolve/checkout 都经该代理；当前不提供按仓库绕过代理，也不把 HTTPS 代理用于 SSH。
 
 ## 为什么 API 不返回 secret_ref
 
@@ -120,8 +138,8 @@ sequenceDiagram
 | `reference_not_found` | 仓库可访问，但默认分支不存在 | 修正默认分支 |
 | `unreachable` | 超时、DNS、TLS 或网络连接失败 | 检查网络、CA、代理或服务状态 |
 
-`ready` 是 `last_probed_at` 时刻的连接快照，不是永久保证；构建执行时仍会重新验证和固定 Commit。单次探测默认最多 10 秒，可通过 `product.source_probe_timeout` 在 1～30 秒范围内调整，且仍受 HTTP 请求总超时约束。
+`ready` 是 `last_probed_at` 时刻的连接快照，不是永久保证；构建执行时仍会重新验证和固定 Commit。单次探测默认最多 10 秒，可通过 `product.source_probe_timeout` 在 1～30 秒范围内调整，且仍受 HTTP 请求总超时约束。自建 CA、代理不可达、代理拒绝 CONNECT 或 TLS 链不可信都会安全映射为 `unreachable`，不会回传底层地址或 TLS 错误。
 
-## 后续阶段
+## 当前验证边界
 
-BUILD-001 的受限 Git 连接探测、执行期秘密解析和 `/probe` 契约已经落地，仍需补齐真实 Git 服务的自建 CA/代理兼容矩阵门禁。Build Configuration、手动触发、通用 Trigger Token、原生 Webhook Adapter、精确 Commit checkout、rootless BuildKit 构建和认证 Registry push 已经落地。API Server 始终不 checkout 源码或执行客户代码。
+BUILD-001 已通过本地真实 Git smart HTTP/SSH 服务验证：私有 HTTPS Access Token、自签名 CA、HTTP CONNECT 代理、错误 Token、未受信 CA、代理不可达、SSH Deploy Key、Host Key 固定、精确 ref/Commit resolve，以及 Server probe 和 Worker checkout 使用相同信任策略。这里验证的是标准协议兼容性，不代表 OwnDock 调用了 GitHub、GitLab 或其他托管平台的私有 API。API Server 始终不 checkout 源码或执行客户代码。

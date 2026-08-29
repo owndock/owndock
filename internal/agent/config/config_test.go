@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
 
 func TestLoadCheckedInAgentConfig(t *testing.T) {
@@ -27,14 +29,48 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 	}
 	if config.Control.MaxFrameBytes != 65536 ||
 		config.Control.MaxConcurrentCommands != 4 ||
-		len(config.Control.Capabilities) != 11 ||
+		len(config.Control.Capabilities) != 12 ||
 		config.Runtime.ResultCacheSize != 256 ||
 		config.Runtime.CutoverWatermarkSize != 16384 ||
 		!config.HostTerminal.Enabled ||
-		config.HostTerminal.User != "owndock-terminal" ||
+		config.HostTerminal.User != "owndock-agent" ||
+		config.Control.CACertificateFile != "/etc/owndock/agent-ca.pem" ||
+		config.Control.ClientCertificateFile != "/var/lib/owndock-agent/identity/agent-identity.pem" ||
 		!config.CertificateRotation.Enabled ||
 		config.Control.ClientCertificateFile != config.Control.ClientPrivateKeyFile {
 		t.Fatalf("config = %#v", config)
+	}
+}
+
+func TestMarshalYAMLValidatesGeneratedConfig(t *testing.T) {
+	config, err := Load(checkedInAgentConfigPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	value, err := MarshalYAML(config)
+	if err != nil || len(value) == 0 {
+		t.Fatalf("marshal config = %q, %v", value, err)
+	}
+	if _, err := MarshalYAML(Config{}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("invalid config error = %v", err)
+	}
+}
+
+func TestLoadRejectsMissingPath(t *testing.T) {
+	if _, err := Load("  "); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("empty path error = %v", err)
+	}
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml")); err == nil {
+		t.Fatal("loaded a missing config file")
+	}
+}
+
+func TestValidateCapabilitiesUsesRuntimeRules(t *testing.T) {
+	if err := ValidateCapabilities(baselineCapabilities()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateCapabilities([]string{"unsupported"}); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("unsupported capability error = %v", err)
 	}
 }
 
@@ -114,6 +150,10 @@ runtime: {}
 	}
 	if config.Control.BootIDFile != defaultBootIDFile ||
 		len(config.Control.Capabilities) != len(baselineCapabilities()) ||
+		capabilityEnabled(
+			config.Control.Capabilities,
+			agentprotocol.CapabilityCutoverRelease,
+		) ||
 		config.Runtime.DockerSocket != defaultDockerSocket ||
 		config.Runtime.StateDirectory != defaultStateDirectory ||
 		config.Runtime.ResultCacheSize != defaultResultCacheSize ||
@@ -214,4 +254,13 @@ func TestReadBootIDUsesBoundedRegularFile(t *testing.T) {
 	if _, err := ReadBootID(path); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("error = %v", err)
 	}
+}
+
+func checkedInAgentConfigPath(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test file")
+	}
+	return filepath.Join(filepath.Dir(file), "..", "..", "..", "configs", "agent.yaml")
 }

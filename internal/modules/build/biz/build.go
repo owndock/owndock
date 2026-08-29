@@ -34,6 +34,7 @@ const (
 	BuildFailureCheckout                 BuildFailureCategory = "checkout_failed"
 	BuildFailureConfiguration            BuildFailureCategory = "build_configuration"
 	BuildFailureResourceLimit            BuildFailureCategory = "build_resource_limit"
+	BuildFailureNetworkPolicy            BuildFailureCategory = "build_network_policy"
 	BuildFailureBuild                    BuildFailureCategory = "build_failed"
 	BuildFailureRegistryAuthentication   BuildFailureCategory = "registry_authentication"
 	BuildFailureRegistryPush             BuildFailureCategory = "registry_push"
@@ -45,7 +46,7 @@ func (c BuildFailureCategory) Valid() bool {
 	switch c {
 	case BuildFailureRepositoryAuthentication, BuildFailureRepositoryUnreachable,
 		BuildFailureRevisionNotFound, BuildFailureCheckout, BuildFailureConfiguration,
-		BuildFailureResourceLimit, BuildFailureBuild, BuildFailureRegistryAuthentication,
+		BuildFailureResourceLimit, BuildFailureNetworkPolicy, BuildFailureBuild, BuildFailureRegistryAuthentication,
 		BuildFailureRegistryPush, BuildFailureCanceled, BuildFailureUnknown:
 		return true
 	default:

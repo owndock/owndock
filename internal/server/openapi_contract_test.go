@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/getkin/kin-openapi/openapi3"
@@ -113,8 +114,72 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			body: `{"name":"Delivery"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
+			name: "create signature trust policy", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/signature-trust-policies",
+			body:    `{"name":"Release signer","mode":"keyless","trusted_root_id":"offline-root-1","trusted_root_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","certificate_identity":"https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v1.0.0","oidc_issuer":"https://token.actions.githubusercontent.com","enabled":true}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list signature trust policies", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/signature-trust-policies",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get signature trust policy", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/signature-trust-policies/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list artifact signature verifications", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id/verifications",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "schedule artifact signature verification", method: http.MethodPost,
+			target: "/api/v1/projects/test-id/artifacts/test-id/signature-verifications",
+			body:   `{"policy_id":"test-id"}`, headers: idempotencyHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "rotate signature trust policy", method: http.MethodPatch,
+			target:  "/api/v1/projects/test-id/signature-trust-policies/test-id",
+			body:    `{"name":"Release signer","mode":"keyless","trusted_root_id":"offline-root-2","trusted_root_hash":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","certificate_identity":"https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v1.0.0","oidc_issuer":"https://token.actions.githubusercontent.com","enabled":true,"expected_version":1}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create signature signing profile", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/signature-signing-profiles",
+			body:    `{"name":"Release KMS","key_reference":"hashivault://release-signing-key","trust_policy_id":"signing-trust-policy","enabled":true}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list signature signing profiles", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/signature-signing-profiles",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get signature signing profile", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/signature-signing-profiles/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "rotate signature signing profile", method: http.MethodPatch,
+			target:  "/api/v1/projects/test-id/signature-signing-profiles/test-id",
+			body:    `{"name":"Release KMS","key_reference":"hashivault://release-signing-key-v2","trust_policy_id":"signing-trust-policy","enabled":true,"expected_version":1}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "list projects", method: http.MethodGet, target: "/api/v1/projects",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list built-in templates", method: http.MethodGet,
+			target: "/api/v1/templates", headers: bearerHeaders(),
+			wantStatus: http.StatusOK,
+		},
+		{
+			name: "get built-in template", method: http.MethodGet,
+			target: "/api/v1/templates/http-service", headers: bearerHeaders(),
+			wantStatus: http.StatusOK,
 		},
 		{
 			name: "create project member", method: http.MethodPost, target: "/api/v1/projects/test-id/members",
@@ -140,7 +205,7 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		},
 		{
 			name: "create project application", method: http.MethodPost, target: "/api/v1/projects/test-id/applications",
-			body: `{"name":"API"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
+			body: `{"name":"API","template_id":"http-service"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
 			name: "list project applications", method: http.MethodGet, target: "/api/v1/projects/test-id/applications",
@@ -296,6 +361,32 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			name: "get artifact", method: http.MethodGet,
 			target:  "/api/v1/projects/test-id/artifacts/test-id",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "list artifact evidence", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id/evidence",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "latest vulnerability observation unavailable without repository", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id/vulnerability-observation",
+			headers: bearerHeaders(), wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "vulnerability scan unavailable without scheduler", method: http.MethodPost,
+			target: "/api/v1/projects/test-id/artifacts/test-id/vulnerability-scans",
+			headers: map[string]string{"Authorization": "Bearer " + contractAccessToken,
+				"Idempotency-Key": "contract-vulnerability-scan"}, wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name: "get artifact evidence", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id/evidence/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "download artifact evidence", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/artifacts/test-id/evidence/test-id:download",
+			headers: bearerHeaders(), wantStatus: http.StatusServiceUnavailable,
 		},
 		{
 			name: "create release from artifact", method: http.MethodPost,
@@ -556,11 +647,53 @@ func assertOpenAPIExchange(
 	if err := openapi3filter.ValidateResponse(ctx, responseInput); err != nil {
 		t.Fatalf("response does not match OpenAPI: %v; body = %s", err, recorder.Body.String())
 	}
+	assertContractResponseDoesNotEchoSecrets(t, body, headers, recorder)
 	return route.Operation.OperationID
+}
+
+func assertContractResponseDoesNotEchoSecrets(
+	t *testing.T,
+	requestBody []byte,
+	requestHeaders map[string]string,
+	response *httptest.ResponseRecorder,
+) {
+	t.Helper()
+	requestMaterial := string(requestBody)
+	for name, value := range requestHeaders {
+		requestMaterial += "\n" + name + ": " + value
+	}
+	responseMaterial := response.Body.String()
+	for name, values := range response.Header() {
+		responseMaterial += "\n" + name + ": " + fmt.Sprint(values)
+	}
+	for _, sentinel := range []string{
+		"bootstrap-secret",
+		"long-enough-password",
+		"member-long-password",
+		"secret://registry-password",
+		"secret://git-token",
+		"secret://github-hook",
+		"secret://docker",
+		"secret://database-url",
+		"contract-build-trigger-token-01234567890123",
+		"sha256=contract",
+		contractInvitationToken,
+		"one-time-ticket",
+	} {
+		if strings.Contains(requestMaterial, sentinel) && strings.Contains(responseMaterial, sentinel) {
+			t.Fatalf("response echoed request secret sentinel %q", sentinel)
+		}
+	}
 }
 
 func bearerHeaders() map[string]string {
 	return map[string]string{"Authorization": "Bearer " + contractAccessToken}
+}
+
+func idempotencyHeaders() map[string]string {
+	headers := bearerHeaders()
+	headers["Idempotency-Key"] = "contract-request-1"
+	return headers
 }
 
 func terminalHeaders() map[string]string {

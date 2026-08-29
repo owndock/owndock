@@ -143,6 +143,26 @@ func TestAgentDockerGatewayRoutesTwoHostsWithoutCrossingTargets(
 	)
 	assertNoAgentErrors(t, agentErrors)
 
+	if err := gateway.ReleaseCutoverWatermark(t.Context(), first); err != nil {
+		t.Fatalf("release Host A cutover: %v", err)
+	}
+	if err := gateway.ReleaseCutoverWatermark(t.Context(), second); err != nil {
+		t.Fatalf("release Host B cutover: %v", err)
+	}
+	released := collectRoutedCommands(t, routed, 2)
+	for _, command := range released {
+		if command.kind != agentprotocol.AgentCommandCutoverRelease ||
+			(command.hostID == "host-a" &&
+				(command.runtimeTargetID != "target-a" ||
+					command.deploymentID != "deployment-a")) ||
+			(command.hostID == "host-b" &&
+				(command.runtimeTargetID != "target-b" ||
+					command.deploymentID != "deployment-b")) {
+			t.Fatalf("cutover release route = %+v", command)
+		}
+	}
+	assertNoAgentErrors(t, agentErrors)
+
 	registry.DisconnectHost("host-a")
 	err = gateway.Prepare(
 		t.Context(),
@@ -279,17 +299,24 @@ func startAgentCommandResponder(
 	)
 	go func() {
 		for command := range commands {
-			deployment := command.Deployment
-			if deployment == nil {
+			var runtimeTargetID, deploymentID string
+			switch {
+			case command.Deployment != nil:
+				runtimeTargetID = command.Deployment.RuntimeTargetID
+				deploymentID = command.Deployment.DeploymentID
+			case command.Cutover != nil:
+				runtimeTargetID = command.Cutover.RuntimeTargetID
+				deploymentID = command.Cutover.DeploymentID
+			default:
 				errs <- errors.New(
-					"deployment responder received non-deployment command",
+					"deployment responder received unrelated command",
 				)
 				continue
 			}
 			routed <- routedAgentCommand{
 				hostID:          hostID,
-				runtimeTargetID: deployment.RuntimeTargetID,
-				deploymentID:    deployment.DeploymentID,
+				runtimeTargetID: runtimeTargetID,
+				deploymentID:    deploymentID,
 				kind:            command.Kind,
 			}
 			if err := registry.Complete(

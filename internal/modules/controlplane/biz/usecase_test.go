@@ -73,6 +73,119 @@ func TestAcceptedProductResourceFlow(t *testing.T) {
 	}
 }
 
+type templateCatalogStub struct {
+	item Template
+}
+
+func (s templateCatalogStub) ListTemplates(context.Context) ([]Template, error) {
+	return []Template{s.item}, nil
+}
+
+func (s templateCatalogStub) GetTemplate(
+	_ context.Context,
+	id string,
+) (Template, error) {
+	if id != s.item.ID {
+		return Template{}, ErrNotFound
+	}
+	return s.item, nil
+}
+
+func TestCreateApplicationFromTemplatePersistsAuditableSnapshot(t *testing.T) {
+	store := &fakeStore{}
+	audits := &fakeAudits{}
+	sequence := 0
+	template := Template{
+		ID: "http-service", Version: 1,
+		Name: LocalizedText{
+			English: "HTTP service", SimplifiedChinese: "HTTP 服务",
+		},
+		Description: LocalizedText{
+			English: "Web service", SimplifiedChinese: "Web 服务",
+		},
+		Preset: TemplatePreset{
+			DockerfilePath: "Dockerfile", ContextPath: ".",
+			RuntimeSpec: runtimespec.Spec{Ports: []runtimespec.Port{{
+				Name: "http", ContainerPort: 8080,
+			}}},
+		},
+	}
+	useCase := NewUseCase(
+		store, store, store, store,
+		transaction.Passthrough{}, audits, audits,
+		func() (string, error) {
+			sequence++
+			return fmt.Sprintf("id-%d", sequence), nil
+		},
+		func() time.Time { return time.Unix(100, 0) },
+	).WithTemplates(templateCatalogStub{item: template})
+	owner := security.Principal{
+		UserID: "owner", OrganizationID: "organization",
+		SessionID: "session", Role: security.RoleOwner,
+	}
+	project, err := useCase.CreateProject(
+		t.Context(), owner, "Delivery", "request-project",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := useCase.CreateApplicationFromTemplate(
+		t.Context(), owner, project.ID, "API", template.ID, "request-app",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template.Preset.RuntimeSpec.Ports[0].ContainerPort = 9090
+	if item.TemplateSnapshot == nil ||
+		item.TemplateSnapshot.TemplateID != "http-service" ||
+		item.TemplateSnapshot.RuntimeSpec.Ports[0].ContainerPort != 8080 ||
+		len(audits.events) != 2 ||
+		audits.events[1].Action != "application.create_from_template" {
+		t.Fatalf("application = %+v, audits = %+v", item, audits.events)
+	}
+	if _, err := useCase.CreateApplicationFromTemplate(
+		t.Context(), owner, project.ID, "Missing", "missing", "request-missing",
+	); err != ErrNotFound {
+		t.Fatalf("missing template error = %v", err)
+	}
+}
+
+func TestTemplateCatalogRequiresIdentityAndConfiguredCatalog(t *testing.T) {
+	template := Template{
+		ID: "worker", Version: 1,
+		Name: LocalizedText{English: "Worker", SimplifiedChinese: "任务"},
+		Description: LocalizedText{
+			English: "Background worker", SimplifiedChinese: "后台任务",
+		},
+		Preset: TemplatePreset{
+			DockerfilePath: "Dockerfile", ContextPath: ".",
+		},
+	}
+	store := &fakeStore{}
+	useCase := NewUseCase(
+		store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "id", nil }, time.Now,
+	)
+	viewer := security.Principal{
+		UserID: "viewer", OrganizationID: "organization",
+		SessionID: "session", Role: security.RoleViewer,
+	}
+	if _, err := useCase.ListTemplates(t.Context(), viewer); err != ErrInvalidTemplate {
+		t.Fatalf("missing catalog error = %v", err)
+	}
+	useCase.WithTemplates(templateCatalogStub{item: template})
+	items, err := useCase.ListTemplates(t.Context(), viewer)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("templates = %+v, error = %v", items, err)
+	}
+	if _, err := useCase.GetTemplate(
+		t.Context(), security.Principal{}, template.ID,
+	); err != security.ErrUnauthenticated {
+		t.Fatalf("unauthenticated template error = %v", err)
+	}
+}
+
 func TestRegistryCredentialMustMatchReleaseImage(t *testing.T) {
 	store := &fakeStore{}
 	audits := &fakeAudits{}

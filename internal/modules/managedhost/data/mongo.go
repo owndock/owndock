@@ -213,6 +213,45 @@ func (r *MongoRepository) ActivateAgent(
 	now time.Time,
 	identity biz.AgentIdentity,
 ) error {
+	return r.activateAgent(ctx, enrollmentID, tokenHash, now, identity, nil)
+}
+
+func (r *MongoRepository) ActivateAgentRecoverable(
+	ctx context.Context,
+	enrollmentID, tokenHash string,
+	now time.Time,
+	identity biz.AgentIdentity,
+	recovery biz.EnrollmentRecovery,
+) error {
+	if len(recovery.RequestSHA256) != 64 ||
+		!recovery.RecoverUntil.After(now) ||
+		len(recovery.CertificatePEM) == 0 || len(recovery.CertificatePEM) > 1024*1024 ||
+		len(recovery.CACertificatePEM) == 0 || len(recovery.CACertificatePEM) > 1024*1024 {
+		return biz.ErrInvalidEnrollment
+	}
+	return r.activateAgent(ctx, enrollmentID, tokenHash, now, identity, &recovery)
+}
+
+func (r *MongoRepository) activateAgent(
+	ctx context.Context,
+	enrollmentID, tokenHash string,
+	now time.Time,
+	identity biz.AgentIdentity,
+	recovery *biz.EnrollmentRecovery,
+) error {
+	set := bson.D{{Key: "consumed_at", Value: now}}
+	if recovery != nil {
+		set = append(set,
+			bson.E{Key: "exchange_request_sha256", Value: recovery.RequestSHA256},
+			bson.E{Key: "exchange_recover_until", Value: recovery.RecoverUntil},
+			bson.E{Key: "issued_identity_id", Value: identity.ID},
+			bson.E{Key: "issued_certificate_serial", Value: identity.CertificateSerial},
+			bson.E{Key: "issued_certificate_sha256", Value: identity.CertificateSHA256},
+			bson.E{Key: "issued_certificate_pem", Value: recovery.CertificatePEM},
+			bson.E{Key: "issued_ca_certificate_pem", Value: recovery.CACertificatePEM},
+			bson.E{Key: "expires_at", Value: recovery.RecoverUntil},
+		)
+	}
 	result := r.enrollments.FindOneAndUpdate(
 		ctx,
 		bson.D{
@@ -223,7 +262,7 @@ func (r *MongoRepository) ActivateAgent(
 			{Key: "consumed_at", Value: bson.D{{Key: "$exists", Value: false}}},
 			{Key: "expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
 		},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "consumed_at", Value: now}}}},
+		bson.D{{Key: "$set", Value: set}},
 	)
 	if err := result.Err(); err == mongo.ErrNoDocuments {
 		return biz.ErrInvalidEnrollment
@@ -263,6 +302,55 @@ func (r *MongoRepository) ActivateAgent(
 		return fmt.Errorf("activate managed host agent identity: %w", err)
 	}
 	return nil
+}
+
+func (r *MongoRepository) RecoverAgentEnrollment(
+	ctx context.Context,
+	tokenHash, requestSHA256 string,
+	now time.Time,
+) (biz.AgentCredentials, bool, error) {
+	if len(tokenHash) != 64 || len(requestSHA256) != 64 {
+		return biz.AgentCredentials{}, false, nil
+	}
+	var enrollment enrollmentDocument
+	err := r.enrollments.FindOne(ctx, bson.D{
+		{Key: "token_hash", Value: tokenHash},
+		{Key: "consumed_at", Value: bson.D{{Key: "$exists", Value: true}}},
+		{Key: "exchange_request_sha256", Value: requestSHA256},
+		{Key: "exchange_recover_until", Value: bson.D{{Key: "$gt", Value: now}}},
+	}).Decode(&enrollment)
+	if err == mongo.ErrNoDocuments {
+		return biz.AgentCredentials{}, false, nil
+	}
+	if err != nil {
+		return biz.AgentCredentials{}, false, fmt.Errorf("recover Agent enrollment: %w", err)
+	}
+	if enrollment.IssuedIdentityID == "" || len(enrollment.IssuedCertificatePEM) == 0 ||
+		len(enrollment.IssuedCACertificatePEM) == 0 ||
+		enrollment.IssuedCertificateSerial == "" || enrollment.IssuedCertificateSHA256 == "" {
+		return biz.AgentCredentials{}, false, biz.ErrInvalidEnrollment
+	}
+	var identity identityDocument
+	err = r.identities.FindOne(ctx, bson.D{
+		{Key: "_id", Value: enrollment.IssuedIdentityID},
+		{Key: "organization_id", Value: enrollment.OrganizationID},
+		{Key: "managed_host_id", Value: enrollment.ManagedHostID},
+		{Key: "certificate_serial", Value: enrollment.IssuedCertificateSerial},
+		{Key: "certificate_sha256", Value: enrollment.IssuedCertificateSHA256},
+		{Key: "certificate_expires_at", Value: bson.D{{Key: "$gt", Value: now}}},
+		{Key: "revoked_at", Value: bson.D{{Key: "$exists", Value: false}}},
+	}).Decode(&identity)
+	if err == mongo.ErrNoDocuments {
+		return biz.AgentCredentials{}, false, nil
+	}
+	if err != nil {
+		return biz.AgentCredentials{}, false, fmt.Errorf("recover Agent identity: %w", err)
+	}
+	return biz.AgentCredentials{
+		Identity:         identity.domain(),
+		CertificatePEM:   append([]byte(nil), enrollment.IssuedCertificatePEM...),
+		CACertificatePEM: append([]byte(nil), enrollment.IssuedCACertificatePEM...),
+	}, true, nil
 }
 
 func (r *MongoRepository) AuthenticateAgent(
@@ -600,14 +688,21 @@ type hostDocument struct {
 }
 
 type enrollmentDocument struct {
-	ID             string    `bson:"_id"`
-	OrganizationID string    `bson:"organization_id"`
-	ManagedHostID  string    `bson:"managed_host_id"`
-	TokenHash      string    `bson:"token_hash"`
-	ExpiresAt      time.Time `bson:"expires_at"`
-	ConsumedAt     time.Time `bson:"consumed_at,omitempty"`
-	CreatedBy      string    `bson:"created_by"`
-	CreatedAt      time.Time `bson:"created_at"`
+	ID                      string    `bson:"_id"`
+	OrganizationID          string    `bson:"organization_id"`
+	ManagedHostID           string    `bson:"managed_host_id"`
+	TokenHash               string    `bson:"token_hash"`
+	ExpiresAt               time.Time `bson:"expires_at"`
+	ConsumedAt              time.Time `bson:"consumed_at,omitempty"`
+	ExchangeRequestSHA256   string    `bson:"exchange_request_sha256,omitempty"`
+	ExchangeRecoverUntil    time.Time `bson:"exchange_recover_until,omitempty"`
+	IssuedIdentityID        string    `bson:"issued_identity_id,omitempty"`
+	IssuedCertificateSerial string    `bson:"issued_certificate_serial,omitempty"`
+	IssuedCertificateSHA256 string    `bson:"issued_certificate_sha256,omitempty"`
+	IssuedCertificatePEM    []byte    `bson:"issued_certificate_pem,omitempty"`
+	IssuedCACertificatePEM  []byte    `bson:"issued_ca_certificate_pem,omitempty"`
+	CreatedBy               string    `bson:"created_by"`
+	CreatedAt               time.Time `bson:"created_at"`
 }
 
 func enrollmentDocumentFromDomain(item biz.Enrollment) enrollmentDocument {

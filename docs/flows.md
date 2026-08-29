@@ -2,7 +2,7 @@
 
 本文用时序图说明 OwnDock 当前已实现的关键链路，以及首个端到端部署用例的目标链路。标题中的“已实现”表示代码、契约和测试已经存在；“目标”表示产品语义已经确定，但执行能力尚未接入，不能据此判断当前版本可以执行生产部署。
 
-TerminalSession 创建、一次性 Cookie、登录会话重新确认、WSS 和执行网关的分层时序见[安全终端会话](terminal-sessions.md)。其中控制面、同域 WSS，以及 direct/Agent 两种连接模式的容器 Docker exec 与主机 PTY/SSH Gateway 已实现；真实远程主机故障和浏览器系统验收仍是目标链路。
+TerminalSession 创建、一次性 Cookie、登录会话重新确认、WSS 和执行网关的分层时序见[安全终端会话](terminal-sessions.md)，Web 入口、连接状态、xterm 边界、客户错误解释和验收清单见[容器与主机终端用户旅程](terminal-user-journey.md)。其中控制面、同域 WSS，以及 direct/Agent 两种连接模式的容器 Docker exec 与主机 PTY/SSH Gateway 已实现；独立 Web 页面、真实远程主机故障和浏览器系统验收仍是目标链路。
 
 ## 已实现：启动、Migration 与就绪
 
@@ -275,7 +275,7 @@ sequenceDiagram
     Note over A,API: 当前 Host 保持 offline；后续 mTLS hello 成功后才进入 online
 ```
 
-过期 token、重复兑换、Host 已禁用、跨 Host 绑定和无效 CSR 都会被拒绝。Owner 禁用 Host 时，当前数据库身份会被标记吊销，所有未消费 enrollment 立即过期。配置和客户可读说明见 [agent-enrollment.md](agent-enrollment.md)。
+过期 token、携带不同 CSR/instance/版本/能力的重复兑换、Host 已禁用、跨 Host 绑定和无效 CSR 都会被拒绝。仅完全相同的请求可在 10 分钟内取回原 Identity 与证书，用来恢复 Server 已提交但响应丢失的情况；不会重复创建身份或审计。Owner 禁用 Host 时，当前数据库身份会被标记吊销，所有未消费 enrollment 立即过期。配置和客户可读说明见 [agent-enrollment.md](agent-enrollment.md)。
 
 ## 已实现基础：Agent mTLS 控制连接与在线状态
 
@@ -574,7 +574,7 @@ stateDiagram-v2
 
 ## 阅读边界
 
-- 当前正式持久化资源：Organization、User、User Invitation、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Member、Project Application、Repository Credential、Source Repository、Build Configuration、Build Trigger、Build Hook、Webhook Delivery、Build（含状态/lease/fence）、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event。
+- 当前正式持久化资源：Organization、User、User Invitation、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Member、Project Application（含可选 Template 快照）、Repository Credential、Source Repository、Build Configuration、Build Trigger、Build Hook、Webhook Delivery、Build（含状态/lease/fence）、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event；内置 Template Catalog 随 Server 版本只读发布。
 - Runtime Target 只保存连接元数据和 `credential_ref`，不保存凭据正文；显式探测会更新 `ready`、`unreachable` 或 `credential_error` 及探测时间。
-- Git 自建 CA/代理矩阵、Template、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
+- Git 自建 CA/代理矩阵、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；只读内置 Template 与 Application 脱钩快照已经落地。独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
 - 顶层 Application、Environment、Deployment 路由是默认关闭的工程样例，与正式 Project 范围 API 相互隔离。

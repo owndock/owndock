@@ -6,8 +6,8 @@ control:
   instance_id: replace-with-installation-instance-id
   boot_id_file: /proc/sys/kernel/random/boot_id
   ca_certificate_file: /etc/owndock/agent-ca.pem
-  client_certificate_file: /etc/owndock/agent-identity.pem
-  client_private_key_file: /etc/owndock/agent-identity.pem
+  client_certificate_file: /var/lib/owndock-agent/identity/agent-identity.pem
+  client_private_key_file: /var/lib/owndock-agent/identity/agent-identity.pem
   handshake_timeout: 10s
   server_silence_timeout: 45s
   reconnect_minimum: 1s
@@ -21,6 +21,7 @@ control:
     - deployment.stage
     - deployment.activate
     - deployment.cancel
+    - deployment.cutover.release
     - runtime.inventory.prepare
     - runtime.inventory.chunk
     - runtime.inventory.release
@@ -36,7 +37,7 @@ runtime:
 
 host_terminal:
   enabled: true
-  user: owndock-terminal
+  user: owndock-agent
   shell: /bin/sh
   termination_grace: 5s
 

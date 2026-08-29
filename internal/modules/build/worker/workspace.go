@@ -9,8 +9,9 @@ import (
 )
 
 var (
-	ErrInvalidWorkspace = errors.New("build workspace is invalid")
-	ErrWorkspaceEscape  = errors.New("build workspace escaped its root")
+	ErrInvalidWorkspace           = errors.New("build workspace is invalid")
+	ErrWorkspaceEscape            = errors.New("build workspace escaped its root")
+	ErrWorkspaceHardQuotaRequired = errors.New("storage requires an independent hard-quota filesystem")
 )
 
 type Workspace interface {
@@ -21,6 +22,13 @@ type Workspace interface {
 type LocalWorkspace struct {
 	root string
 }
+
+type workspaceFilesystem struct {
+	device     uint64
+	totalBytes int64
+}
+
+type workspaceFilesystemInspector func(string) (workspaceFilesystem, error)
 
 func NewLocalWorkspace(root string) (*LocalWorkspace, error) {
 	root = strings.TrimSpace(root)
@@ -36,6 +44,60 @@ func NewLocalWorkspace(root string) (*LocalWorkspace, error) {
 		return nil, ErrInvalidWorkspace
 	}
 	return &LocalWorkspace{root: clean}, nil
+}
+
+// NewHardQuotaWorkspace refuses to use an ordinary directory on the parent
+// filesystem. The mounted filesystem's advertised capacity is the final hard
+// boundary; application-level byte and file counters remain defense in depth.
+func NewHardQuotaWorkspace(root string, maximumFilesystemBytes int64) (*LocalWorkspace, error) {
+	return newHardQuotaWorkspace(root, maximumFilesystemBytes, inspectWorkspaceFilesystem)
+}
+
+func newHardQuotaWorkspace(root string, maximumFilesystemBytes int64,
+	inspect workspaceFilesystemInspector) (*LocalWorkspace, error) {
+	if maximumFilesystemBytes <= 0 || inspect == nil {
+		return nil, ErrWorkspaceHardQuotaRequired
+	}
+	workspace, err := NewLocalWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateHardQuotaFilesystem(workspace.root, maximumFilesystemBytes, inspect); err != nil {
+		return nil, err
+	}
+	return workspace, nil
+}
+
+// ValidateHardQuotaFilesystem is used by deployment preflight containers for
+// storage owned by sibling processes, such as the rootless BuildKit cache.
+func ValidateHardQuotaFilesystem(root string, maximumFilesystemBytes int64) error {
+	root = strings.TrimSpace(root)
+	if root == "" || !filepath.IsAbs(root) {
+		return ErrWorkspaceHardQuotaRequired
+	}
+	clean := filepath.Clean(root)
+	info, err := os.Lstat(clean)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return ErrWorkspaceHardQuotaRequired
+	}
+	return validateHardQuotaFilesystem(clean, maximumFilesystemBytes, inspectWorkspaceFilesystem)
+}
+
+func validateHardQuotaFilesystem(root string, maximumFilesystemBytes int64,
+	inspect workspaceFilesystemInspector) error {
+	if maximumFilesystemBytes <= 0 || inspect == nil {
+		return ErrWorkspaceHardQuotaRequired
+	}
+	current, err := inspect(root)
+	if err != nil {
+		return ErrWorkspaceHardQuotaRequired
+	}
+	parent, err := inspect(filepath.Dir(root))
+	if err != nil || current.device == parent.device || current.totalBytes <= 0 ||
+		current.totalBytes > maximumFilesystemBytes {
+		return ErrWorkspaceHardQuotaRequired
+	}
+	return nil
 }
 
 func (w *LocalWorkspace) Prepare(buildID string, generation uint64) (string, error) {

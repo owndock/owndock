@@ -19,6 +19,8 @@ import (
 	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
+	supplychainbiz "github.com/owndock/owndock/internal/modules/supplychain/biz"
+	supplychaindata "github.com/owndock/owndock/internal/modules/supplychain/data"
 	platformaudit "github.com/owndock/owndock/internal/platform/audit"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/id"
@@ -49,14 +51,27 @@ func run(ctx context.Context, arguments []string) error {
 	flags.SetOutput(os.Stderr)
 	var configPath string
 	var showVersion bool
+	var storageRoot string
+	var storageHardQuotaBytes int64
 	flags.StringVar(&configPath, "conf", "configs/config.yaml", "Build Worker configuration file or directory")
 	flags.BoolVar(&showVersion, "version", false, "print version and exit")
+	flags.StringVar(&storageRoot, "check-storage-root", "", "verify one independent hard-quota filesystem and exit")
+	flags.Int64Var(&storageHardQuotaBytes, "check-storage-hard-quota-bytes", 0, "maximum advertised filesystem capacity for storage preflight")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
 	if showVersion {
 		_, err := fmt.Fprintf(os.Stdout, "%s %s (%s, %s)\n", serviceName, version, commit, buildTime)
 		return err
+	}
+	if storageRoot != "" || storageHardQuotaBytes != 0 {
+		if storageRoot == "" || storageHardQuotaBytes <= 0 {
+			return errors.New("check-storage-root and check-storage-hard-quota-bytes must be provided together")
+		}
+		if err := buildworker.ValidateHardQuotaFilesystem(storageRoot, storageHardQuotaBytes); err != nil {
+			return fmt.Errorf("storage hard-quota preflight failed: %w", err)
+		}
+		return nil
 	}
 	cfg, err := platformconfig.Load(configPath)
 	if err != nil {
@@ -115,7 +130,14 @@ func run(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return fmt.Errorf("create Build execution controller: %w", err)
 	}
-	workspace, err := buildworker.NewLocalWorkspace(workerConfig.WorkspaceRoot)
+	var workspace *buildworker.LocalWorkspace
+	if workerConfig.RequireWorkspaceQuota {
+		workspace, err = buildworker.NewHardQuotaWorkspace(
+			workerConfig.WorkspaceRoot, workerConfig.WorkspaceHardQuotaBytesValue(),
+		)
+	} else {
+		workspace, err = buildworker.NewLocalWorkspace(workerConfig.WorkspaceRoot)
+	}
 	if err != nil {
 		return fmt.Errorf("create Build workspace: %w", err)
 	}
@@ -126,6 +148,10 @@ func run(ctx context.Context, arguments []string) error {
 			Executable: workerConfig.GitExecutable, ExpectedVersion: workerConfig.GitVersion,
 			Timeout: checkoutTimeout, MaxWorkspaceBytes: workerConfig.MaxWorkspaceBytes,
 			MaxWorkspaceFiles: workerConfig.MaxWorkspaceFiles,
+			MaxWorkspaceDepth: workerConfig.MaxWorkspaceDepth,
+			Network: builddata.GitNetworkOptions{
+				CACertFile: cfg.Product.SourceGitCACertFile, HTTPSProxyURL: cfg.Product.SourceGitHTTPSProxy,
+			},
 		},
 	)
 	if err != nil {
@@ -136,7 +162,7 @@ func run(ctx context.Context, arguments []string) error {
 	builder, err := builddata.NewBuildKitGateway(buildKitContext, secretResolver, builddata.BuildKitOptions{
 		Endpoint: workerConfig.BuildKitEndpoint, ServerName: workerConfig.BuildKitServerName,
 		CACertFile: workerConfig.BuildKitCACertFile, ClientCertFile: workerConfig.BuildKitClientCertFile,
-		ClientKeyFile: workerConfig.BuildKitClientKeyFile,
+		ClientKeyFile: workerConfig.BuildKitClientKeyFile, EgressProxyURL: workerConfig.BuildEgressProxyURL,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned BuildKit gateway: %w", err)
@@ -156,6 +182,18 @@ func run(ctx context.Context, arguments []string) error {
 	artifactReleases := builddata.NewArtifactReleaseAdapter(controlPlaneUseCase).
 		WithAutomaticDeployments(deploymentUseCase)
 	controller.WithArtifacts(repository)
+	evidenceRepository := supplychaindata.NewMongoRepository(client.Database())
+	controller.WithArtifactEvidence(supplychaindata.NewArtifactEvidenceScheduler(
+		evidenceRepository, id.New, time.Now,
+	).WithProvenance(repository, supplychaindata.ProvenanceBuilderIdentity{
+		BuilderID:      supplychainbiz.OwnDockBuildKitBuilderIDV1,
+		BuilderVersion: version, BuilderCommit: commit,
+		BuildKitVersion: builddata.PinnedBuildKitVersion,
+		BuildKitImage:   builddata.PinnedBuildKitImage,
+		FrontendImage:   builddata.PinnedDockerfileFrontend,
+	}).WithSignatureTrustPolicies(evidenceRepository).
+		WithSignatureSigningProfiles(evidenceRepository).
+		WithVulnerabilityScanning())
 	runner, err := buildworker.NewRunner(
 		controller, repository, registrySource, checkout, builder, workspace, workerID, leaseDuration,
 	)

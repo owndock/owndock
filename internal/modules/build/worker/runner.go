@@ -381,6 +381,8 @@ func categorizeBuildExecution(err error) biz.BuildFailureCategory {
 		return biz.BuildFailureConfiguration
 	case errors.Is(err, biz.ErrCheckoutResourceLimit), errors.Is(err, biz.ErrBuildResourceLimit):
 		return biz.BuildFailureResourceLimit
+	case errors.Is(err, biz.ErrBuildNetworkDenied):
+		return biz.BuildFailureNetworkPolicy
 	default:
 		return biz.BuildFailureBuild
 	}

@@ -12,6 +12,8 @@ import (
 
 	kratosconfig "github.com/go-kratos/kratos/v2/config"
 	"github.com/go-kratos/kratos/v2/config/file"
+
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
 
 const (
@@ -48,11 +50,29 @@ const (
 	defaultBuildCheckoutTimeout  = 10 * time.Minute
 	defaultBuildWorkspaceRoot    = "/var/lib/owndock/builds"
 	defaultBuildWorkspaceBytes   = int64(5 * 1024 * 1024 * 1024)
+	defaultBuildWorkspaceQuota   = int64(8 * 1024 * 1024 * 1024)
 	defaultBuildWorkspaceFiles   = int64(250000)
+	defaultBuildWorkspaceDepth   = 64
 	defaultBuildLogRetention     = 7 * 24 * time.Hour
 	defaultBuildLogMaxBytes      = int64(10 * 1024 * 1024)
 	defaultBuildLogChunkBytes    = 16 * 1024
 	defaultBuildMetricsAddress   = "127.0.0.1:9091"
+	defaultBuildEgressAddress    = "0.0.0.0:3128"
+	defaultBuildEgressDial       = 10 * time.Second
+	defaultBuildEgressIdle       = 2 * time.Minute
+	defaultBuildEgressConcurrent = 128
+	defaultEvidenceWorkerPoll    = 2 * time.Second
+	defaultEvidenceWorkerLease   = 30 * time.Second
+	defaultEvidenceOperation     = 30 * time.Minute
+	defaultEvidenceSyftPath      = "/usr/local/bin/syft"
+	defaultEvidenceCosignPath    = "/usr/local/bin/cosign"
+	defaultEvidenceTrivyPath     = "/usr/local/bin/trivy"
+	defaultEvidenceTrivyCache    = "/var/lib/owndock/trivy-cache"
+	defaultEvidenceScanFreshness = 24 * time.Hour
+	defaultEvidenceTrustRoots    = "/etc/owndock/trusted-roots"
+	defaultEvidenceDocumentBytes = int64(16 * 1024 * 1024)
+	defaultEvidenceLayerBytes    = int64(256 * 1024 * 1024)
+	defaultEvidenceMetrics       = "127.0.0.1:9092"
 	defaultInventoryPoll         = 2 * time.Second
 	defaultInventorySync         = 5 * time.Minute
 	defaultInventoryRetry        = 30 * time.Second
@@ -138,6 +158,8 @@ type Development struct {
 type Product struct {
 	Enabled                  bool   `json:"enabled"`
 	SourceProbeTimeout       string `json:"source_probe_timeout"`
+	SourceGitCACertFile      string `json:"source_git_ca_cert_file"`
+	SourceGitHTTPSProxy      string `json:"source_git_https_proxy"`
 	BuildTriggerRateLimit    int    `json:"build_trigger_rate_limit"`
 	BuildTriggerRateWindow   string `json:"build_trigger_rate_window"`
 	BuildWebhookRateLimit    int    `json:"build_webhook_rate_limit"`
@@ -149,6 +171,8 @@ type Runtime struct {
 	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
 	InventoryWorker  InventoryWorker  `json:"inventory_worker"`
 	BuildWorker      BuildWorker      `json:"build_worker"`
+	BuildEgress      BuildEgress      `json:"build_egress_gateway"`
+	EvidenceWorker   EvidenceWorker   `json:"evidence_worker"`
 }
 
 type BuildWorker struct {
@@ -158,8 +182,11 @@ type BuildWorker struct {
 	OperationTimeout       string `json:"operation_timeout"`
 	CheckoutTimeout        string `json:"checkout_timeout"`
 	WorkspaceRoot          string `json:"workspace_root"`
+	RequireWorkspaceQuota  bool   `json:"require_workspace_hard_quota"`
+	WorkspaceQuotaBytes    int64  `json:"workspace_hard_quota_bytes"`
 	MaxWorkspaceBytes      int64  `json:"max_workspace_bytes"`
 	MaxWorkspaceFiles      int64  `json:"max_workspace_files"`
+	MaxWorkspaceDepth      int    `json:"max_workspace_depth"`
 	GitExecutable          string `json:"git_executable"`
 	GitVersion             string `json:"git_version"`
 	BuildKitEndpoint       string `json:"buildkit_endpoint"`
@@ -167,9 +194,46 @@ type BuildWorker struct {
 	BuildKitCACertFile     string `json:"buildkit_ca_cert_file"`
 	BuildKitClientCertFile string `json:"buildkit_client_cert_file"`
 	BuildKitClientKeyFile  string `json:"buildkit_client_key_file"`
+	BuildEgressProxyURL    string `json:"build_egress_proxy_url"`
 	LogRetention           string `json:"log_retention"`
 	LogMaxBytes            int64  `json:"log_max_bytes"`
 	LogChunkBytes          int    `json:"log_chunk_bytes"`
+	MetricsAddress         string `json:"metrics_address"`
+}
+
+type BuildEgress struct {
+	Enabled             bool                     `json:"enabled"`
+	Address             string                   `json:"address"`
+	DialTimeout         string                   `json:"dial_timeout"`
+	IdleTimeout         string                   `json:"idle_timeout"`
+	MaximumConnections  int                      `json:"maximum_connections"`
+	AllowedDestinations []BuildEgressDestination `json:"allowed_destinations"`
+}
+
+type BuildEgressDestination struct {
+	Authority    string `json:"authority"`
+	AllowPrivate bool   `json:"allow_private"`
+}
+
+// EvidenceWorker configures the isolated SBOM generation and OCI publication
+// process. It intentionally has no general command or arbitrary Registry
+// endpoint options; each job carries a previously validated digest subject.
+type EvidenceWorker struct {
+	Enabled                bool   `json:"enabled"`
+	PollInterval           string `json:"poll_interval"`
+	LeaseDuration          string `json:"lease_duration"`
+	OperationTimeout       string `json:"operation_timeout"`
+	SyftExecutable         string `json:"syft_executable"`
+	SyftVersion            string `json:"syft_version"`
+	CosignExecutable       string `json:"cosign_executable"`
+	CosignVersion          string `json:"cosign_version"`
+	TrivyExecutable        string `json:"trivy_executable"`
+	TrivyVersion           string `json:"trivy_version"`
+	TrivyCacheDirectory    string `json:"trivy_cache_directory"`
+	VulnerabilityFreshness string `json:"vulnerability_freshness"`
+	TrustedRootsDirectory  string `json:"trusted_roots_directory"`
+	MaxDocumentBytes       int64  `json:"max_document_bytes"`
+	MaxLayerBytes          int64  `json:"max_layer_bytes"`
 	MetricsAddress         string `json:"metrics_address"`
 }
 
@@ -252,7 +316,7 @@ func Load(path string) (Config, error) {
 			MaxFrameBytes:         defaultAgentMaxFrameBytes,
 			OutboundBuffer:        defaultAgentOutboundBuffer,
 			CompletedCommandCache: defaultAgentCompletedCache,
-			ProtocolVersions:      []string{"v1"},
+			ProtocolVersions:      []string{agentprotocol.Version},
 		}},
 		Observability: Observability{
 			Tracing: Tracing{SampleRatio: defaultTraceSampleRatio},
@@ -296,11 +360,29 @@ func Load(path string) (Config, error) {
 			BuildWorker: BuildWorker{
 				PollInterval: defaultBuildWorkerPoll.String(), LeaseDuration: defaultBuildWorkerLease.String(),
 				OperationTimeout: defaultBuildWorkerOperation.String(), CheckoutTimeout: defaultBuildCheckoutTimeout.String(),
-				WorkspaceRoot: defaultBuildWorkspaceRoot, MaxWorkspaceBytes: defaultBuildWorkspaceBytes,
-				MaxWorkspaceFiles: defaultBuildWorkspaceFiles, GitExecutable: "git", GitVersion: "2.55.0",
+				WorkspaceRoot: defaultBuildWorkspaceRoot, RequireWorkspaceQuota: true,
+				WorkspaceQuotaBytes: defaultBuildWorkspaceQuota, MaxWorkspaceBytes: defaultBuildWorkspaceBytes,
+				MaxWorkspaceFiles: defaultBuildWorkspaceFiles, MaxWorkspaceDepth: defaultBuildWorkspaceDepth,
+				GitExecutable: "git", GitVersion: "2.55.0",
 				BuildKitEndpoint: "unix:///run/owndock-buildkit/buildkitd.sock",
 				LogRetention:     defaultBuildLogRetention.String(), LogMaxBytes: defaultBuildLogMaxBytes,
 				LogChunkBytes: defaultBuildLogChunkBytes, MetricsAddress: defaultBuildMetricsAddress,
+			},
+			BuildEgress: BuildEgress{
+				Address: defaultBuildEgressAddress, DialTimeout: defaultBuildEgressDial.String(),
+				IdleTimeout: defaultBuildEgressIdle.String(), MaximumConnections: defaultBuildEgressConcurrent,
+			},
+			EvidenceWorker: EvidenceWorker{
+				PollInterval: defaultEvidenceWorkerPoll.String(), LeaseDuration: defaultEvidenceWorkerLease.String(),
+				OperationTimeout: defaultEvidenceOperation.String(), SyftExecutable: defaultEvidenceSyftPath,
+				SyftVersion: "1.50.0", CosignExecutable: defaultEvidenceCosignPath,
+				CosignVersion: "3.0.6", TrustedRootsDirectory: defaultEvidenceTrustRoots,
+				TrivyExecutable: defaultEvidenceTrivyPath, TrivyVersion: "0.74.0",
+				TrivyCacheDirectory:    defaultEvidenceTrivyCache,
+				VulnerabilityFreshness: defaultEvidenceScanFreshness.String(),
+				MaxDocumentBytes:       defaultEvidenceDocumentBytes,
+				MaxLayerBytes:          defaultEvidenceLayerBytes,
+				MetricsAddress:         defaultEvidenceMetrics,
 			},
 			DeploymentWorker: DeploymentWorker{
 				PollInterval:     defaultWorkerPoll.String(),
@@ -369,6 +451,12 @@ func (c Config) Validate() error {
 	}
 	if err := c.Runtime.BuildWorker.Validate(c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.build_worker: %w", err)
+	}
+	if err := c.Runtime.BuildEgress.Validate(); err != nil {
+		return fmt.Errorf("runtime.build_egress_gateway: %w", err)
+	}
+	if err := c.Runtime.EvidenceWorker.Validate(c.Database.Mongo.Enabled); err != nil {
+		return fmt.Errorf("runtime.evidence_worker: %w", err)
 	}
 	if err := c.Runtime.DeploymentWorker.Validate(c.Product.Enabled, c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.deployment_worker: %w", err)
@@ -439,6 +527,14 @@ func (p Product) Validate() error {
 	if timeout < time.Second || timeout > 30*time.Second {
 		return fmt.Errorf("source_probe_timeout must be between 1s and 30s")
 	}
+	if caFile := strings.TrimSpace(p.SourceGitCACertFile); caFile != p.SourceGitCACertFile ||
+		(caFile != "" && !filepath.IsAbs(caFile)) {
+		return fmt.Errorf("source_git_ca_cert_file must be an absolute path without surrounding whitespace")
+	}
+	if proxy := strings.TrimSpace(p.SourceGitHTTPSProxy); proxy != p.SourceGitHTTPSProxy ||
+		(proxy != "" && !validSourceGitHTTPSProxy(proxy)) {
+		return fmt.Errorf("source_git_https_proxy must be a credential-free canonical HTTP(S) origin")
+	}
 	if p.BuildTriggerRateLimitValue() < 1 || p.BuildTriggerRateLimitValue() > 10_000 {
 		return fmt.Errorf("build_trigger_rate_limit must be between 1 and 10000")
 	}
@@ -463,6 +559,23 @@ func (p Product) Validate() error {
 		return fmt.Errorf("build_webhook_max_body_bytes must be between 1024 and 5242880")
 	}
 	return nil
+}
+
+func validSourceGitHTTPSProxy(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		strings.HasSuffix(parsed.Hostname(), ".") || parsed.Host != strings.ToLower(parsed.Host) {
+		return false
+	}
+	if port := parsed.Port(); port != "" {
+		number, portErr := strconv.Atoi(port)
+		if portErr != nil || number < 1 || number > 65535 {
+			return false
+		}
+	}
+	return parsed.String() == value
 }
 
 func (p Product) SourceProbeTimeoutDuration() (time.Duration, error) {
@@ -543,8 +656,12 @@ func (a Agent) Validate(productEnabled, mongoEnabled, agentPKIEnabled bool) erro
 	seen := make(map[string]struct{}, len(a.ProtocolVersions))
 	for _, version := range a.ProtocolVersions {
 		version = strings.TrimSpace(version)
-		if version == "" {
-			return fmt.Errorf("protocol versions must not be empty")
+		if version != agentprotocol.Version {
+			return fmt.Errorf(
+				"protocol version %q is not implemented; supported version is %q",
+				version,
+				agentprotocol.Version,
+			)
 		}
 		if _, exists := seen[version]; exists {
 			return fmt.Errorf("protocol versions must be unique")
@@ -623,13 +740,138 @@ func (w BuildWorker) Validate(mongoEnabled bool) error {
 		return fmt.Errorf("workspace_root must be absolute and Git must be pinned to 2.55.0")
 	}
 	if w.MaxWorkspaceBytes < 1024*1024 || w.MaxWorkspaceBytes > 200*1024*1024*1024 ||
-		w.MaxWorkspaceFiles < 100 || w.MaxWorkspaceFiles > 1000000 {
+		w.MaxWorkspaceFiles < 100 || w.MaxWorkspaceFiles > 1000000 ||
+		w.MaxWorkspaceDepth < 8 || w.MaxWorkspaceDepth > 256 {
 		return fmt.Errorf("workspace resource limits are invalid")
+	}
+	if w.WorkspaceHardQuotaBytesValue() < w.MaxWorkspaceBytes ||
+		w.WorkspaceHardQuotaBytesValue() > 400*1024*1024*1024 {
+		return fmt.Errorf("workspace_hard_quota_bytes must cover max_workspace_bytes and not exceed 400 GiB")
 	}
 	if err := w.validateBuildKit(); err != nil {
 		return err
 	}
+	if !validBuildEgressProxyURL(w.BuildEgressProxyURL) {
+		return fmt.Errorf("build_egress_proxy_url must be a canonical credential-free HTTP origin")
+	}
 	return nil
+}
+
+func validBuildEgressProxyURL(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || value != strings.ToLower(value) {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Hostname() == "" ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		parsed.String() != value {
+		return false
+	}
+	_, port, err := net.SplitHostPort(parsed.Host)
+	if err != nil {
+		return false
+	}
+	portNumber, err := strconv.Atoi(port)
+	return err == nil && portNumber >= 1 && portNumber <= 65535
+}
+
+func (g BuildEgress) Validate() error {
+	if !g.Enabled {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(strings.TrimSpace(g.AddressValue()))
+	portNumber, portErr := strconv.Atoi(port)
+	if err != nil || portErr != nil || portNumber < 1 || portNumber > 65535 ||
+		(host != "" && net.ParseIP(host) == nil) {
+		return fmt.Errorf("address must be an IP host and valid port")
+	}
+	dial, err := g.DialTimeoutDuration()
+	if err != nil || dial < time.Second || dial > time.Minute {
+		return fmt.Errorf("dial_timeout must be between 1s and 1m")
+	}
+	idle, err := g.IdleTimeoutDuration()
+	if err != nil || idle < 10*time.Second || idle > 30*time.Minute {
+		return fmt.Errorf("idle_timeout must be between 10s and 30m")
+	}
+	if g.MaximumConnectionsValue() < 1 || g.MaximumConnectionsValue() > 4096 {
+		return fmt.Errorf("maximum_connections must be between 1 and 4096")
+	}
+	if len(g.AllowedDestinations) == 0 || len(g.AllowedDestinations) > 256 {
+		return fmt.Errorf("allowed_destinations must contain between 1 and 256 entries")
+	}
+	seen := make(map[string]struct{}, len(g.AllowedDestinations))
+	for _, destination := range g.AllowedDestinations {
+		value := destination.Authority
+		if value == "" || value != strings.TrimSpace(value) || value != strings.ToLower(value) ||
+			strings.ContainsAny(value, "/?#@") {
+			return fmt.Errorf("destination authority must be canonical lowercase host:port")
+		}
+		host, port, splitErr := net.SplitHostPort(value)
+		portNumber, portErr := strconv.Atoi(port)
+		if splitErr != nil || portErr != nil || !validBuildEgressHost(host) || portNumber < 1 || portNumber > 65535 ||
+			strings.HasSuffix(host, ".") {
+			return fmt.Errorf("destination authority must be canonical lowercase host:port")
+		}
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil && prohibitedBuildEgressIP(ip, destination.AllowPrivate) {
+			return fmt.Errorf("destination authority contains a prohibited IP address")
+		}
+		if _, duplicate := seen[value]; duplicate {
+			return fmt.Errorf("destination authorities must be unique")
+		}
+		seen[value] = struct{}{}
+	}
+	return nil
+}
+
+func validBuildEgressHost(host string) bool {
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+	if len(host) < 1 || len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, character := range label {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+func prohibitedBuildEgressIP(ip net.IP, allowPrivate bool) bool {
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	return !allowPrivate && ip.IsPrivate()
+}
+
+func (g BuildEgress) AddressValue() string {
+	if strings.TrimSpace(g.Address) == "" {
+		return defaultBuildEgressAddress
+	}
+	return strings.TrimSpace(g.Address)
+}
+
+func (g BuildEgress) DialTimeoutDuration() (time.Duration, error) {
+	return parseDuration(g.DialTimeout, defaultBuildEgressDial)
+}
+
+func (g BuildEgress) IdleTimeoutDuration() (time.Duration, error) {
+	return parseDuration(g.IdleTimeout, defaultBuildEgressIdle)
+}
+
+func (g BuildEgress) MaximumConnectionsValue() int {
+	if g.MaximumConnections == 0 {
+		return defaultBuildEgressConcurrent
+	}
+	return g.MaximumConnections
 }
 
 func (w BuildWorker) validateBuildKit() error {
@@ -674,6 +916,12 @@ func (w BuildWorker) OperationTimeoutDuration() (time.Duration, error) {
 func (w BuildWorker) CheckoutTimeoutDuration() (time.Duration, error) {
 	return parseDuration(w.CheckoutTimeout, defaultBuildCheckoutTimeout)
 }
+func (w BuildWorker) WorkspaceHardQuotaBytesValue() int64 {
+	if w.WorkspaceQuotaBytes == 0 {
+		return defaultBuildWorkspaceQuota
+	}
+	return w.WorkspaceQuotaBytes
+}
 func (w BuildWorker) BuildLogRetentionDuration() (time.Duration, error) {
 	return parseDuration(w.LogRetention, defaultBuildLogRetention)
 }
@@ -694,6 +942,106 @@ func (w BuildWorker) MetricsAddressValue() string {
 		return defaultBuildMetricsAddress
 	}
 	return strings.TrimSpace(w.MetricsAddress)
+}
+
+func (w EvidenceWorker) Validate(mongoEnabled bool) error {
+	if err := validateWorkerMetricsAddress(w.MetricsAddressValue()); err != nil {
+		return err
+	}
+	if w.MaxDocumentBytesValue() < 1024*1024 || w.MaxDocumentBytesValue() > 64*1024*1024 {
+		return fmt.Errorf("max_document_bytes must be between 1 MiB and 64 MiB")
+	}
+	if w.MaxLayerBytesValue() < 1024*1024 || w.MaxLayerBytesValue() > 4*1024*1024*1024 {
+		return fmt.Errorf("max_layer_bytes must be between 1 MiB and 4 GiB")
+	}
+	if !w.Enabled {
+		return nil
+	}
+	if !mongoEnabled {
+		return fmt.Errorf("enabled requires database.mongo.enabled")
+	}
+	poll, err := w.PollIntervalDuration()
+	if err != nil || poll < 100*time.Millisecond || poll > time.Minute {
+		return fmt.Errorf("poll_interval must be between 100ms and 1m")
+	}
+	lease, err := w.LeaseDurationValue()
+	if err != nil || lease < 3*time.Second || lease > 10*time.Minute {
+		return fmt.Errorf("lease_duration must be between 3s and 10m")
+	}
+	operation, err := w.OperationTimeoutDuration()
+	if err != nil || operation < time.Minute || operation > time.Hour {
+		return fmt.Errorf("operation_timeout must be between 1m and 1h")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.SyftExecutable)) ||
+		strings.TrimPrefix(strings.TrimSpace(w.SyftVersion), "v") != "1.50.0" {
+		return fmt.Errorf("Syft executable must be absolute and version must be pinned to 1.50.0")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.CosignExecutable)) ||
+		strings.TrimPrefix(strings.TrimSpace(w.CosignVersion), "v") != "3.0.6" {
+		return fmt.Errorf("Cosign executable must be absolute and version must be pinned to 3.0.6")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.TrivyExecutable)) ||
+		strings.TrimPrefix(strings.TrimSpace(w.TrivyVersion), "v") != "0.74.0" {
+		return fmt.Errorf("Trivy executable must be absolute and version must be pinned to 0.74.0")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.TrivyCacheDirectory)) {
+		return fmt.Errorf("trivy_cache_directory must be absolute")
+	}
+	freshness, err := w.VulnerabilityFreshnessDuration()
+	if err != nil || freshness < time.Hour || freshness > 30*24*time.Hour {
+		return fmt.Errorf("vulnerability_freshness must be between 1h and 720h")
+	}
+	if !filepath.IsAbs(strings.TrimSpace(w.TrustedRootsDirectory)) {
+		return fmt.Errorf("trusted_roots_directory must be absolute")
+	}
+	return nil
+}
+
+func (w EvidenceWorker) VulnerabilityFreshnessDuration() (time.Duration, error) {
+	return parseDuration(w.VulnerabilityFreshness, defaultEvidenceScanFreshness)
+}
+
+func (w EvidenceWorker) PollIntervalDuration() (time.Duration, error) {
+	return parseDuration(w.PollInterval, defaultEvidenceWorkerPoll)
+}
+
+func (w EvidenceWorker) LeaseDurationValue() (time.Duration, error) {
+	return parseDuration(w.LeaseDuration, defaultEvidenceWorkerLease)
+}
+
+func (w EvidenceWorker) OperationTimeoutDuration() (time.Duration, error) {
+	return parseDuration(w.OperationTimeout, defaultEvidenceOperation)
+}
+
+func (w EvidenceWorker) MaxDocumentBytesValue() int64 {
+	if w.MaxDocumentBytes == 0 {
+		return defaultEvidenceDocumentBytes
+	}
+	return w.MaxDocumentBytes
+}
+
+func (w EvidenceWorker) MaxLayerBytesValue() int64 {
+	if w.MaxLayerBytes == 0 {
+		return defaultEvidenceLayerBytes
+	}
+	return w.MaxLayerBytes
+}
+
+func (w EvidenceWorker) MetricsAddressValue() string {
+	if strings.TrimSpace(w.MetricsAddress) == "" {
+		return defaultEvidenceMetrics
+	}
+	return strings.TrimSpace(w.MetricsAddress)
+}
+
+func validateWorkerMetricsAddress(value string) error {
+	host, port, splitErr := net.SplitHostPort(value)
+	portNumber, portErr := strconv.Atoi(port)
+	if splitErr != nil || portErr != nil || portNumber < 1 || portNumber > 65535 ||
+		(host != "" && net.ParseIP(host) == nil && host != "localhost") {
+		return fmt.Errorf("metrics_address must be a valid host:port")
+	}
+	return nil
 }
 
 func (w DeploymentWorker) Validate(productEnabled, mongoEnabled bool) error {

@@ -143,6 +143,57 @@ func TestInstallClientIdentityBundleRejectsDifferentAgentIdentity(t *testing.T) 
 	}
 }
 
+func TestValidateClientIdentityBundleDoesNotWriteFiles(t *testing.T) {
+	files := writeClientTLSFiles(t)
+	certificatePEM, err := os.ReadFile(files.ClientCertificateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKeyPEM, err := os.ReadFile(files.ClientPrivateKeyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caPEM, err := os.ReadFile(files.CACertificateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if err := ValidateClientIdentityBundle(
+		certificatePEM, privateKeyPEM, caPEM, testBundleIdentity(), now,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateClientIdentityBundle(
+		nil, privateKeyPEM, caPEM, testBundleIdentity(), now,
+	); !errors.Is(err, ErrConfigurationInvalid) {
+		t.Fatalf("empty certificate error = %v", err)
+	}
+	if err := ValidateClientIdentityBundle(
+		certificatePEM, privateKeyPEM, []byte("not a CA"),
+		testBundleIdentity(), now,
+	); !errors.Is(err, ErrConfigurationInvalid) {
+		t.Fatalf("invalid CA error = %v", err)
+	}
+	otherCA, err := os.ReadFile(writeClientTLSFiles(t).CACertificateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateClientIdentityBundle(
+		certificatePEM, privateKeyPEM, otherCA, testBundleIdentity(), now,
+	); !errors.Is(err, ErrConfigurationInvalid) {
+		t.Fatalf("untrusted certificate error = %v", err)
+	}
+	chain := append([]byte(nil), certificatePEM...)
+	chain = append(chain, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: []byte("invalid intermediate"),
+	})...)
+	if err := ValidateClientIdentityBundle(
+		chain, privateKeyPEM, caPEM, testBundleIdentity(), now,
+	); !errors.Is(err, ErrConfigurationInvalid) {
+		t.Fatalf("invalid intermediate error = %v", err)
+	}
+}
+
 func TestNewCertificateRotationRequestUsesFreshLocalKeyAndNoTrustedIdentity(t *testing.T) {
 	first, err := NewCertificateRotationRequest(testBundleIdentity())
 	if err != nil {

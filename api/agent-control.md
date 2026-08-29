@@ -1,6 +1,6 @@
 # Agent Control Protocol v1
 
-> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、持久切换水位、受限容器终端和固定身份主机 PTY 也已实现。Agent 证书已经支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。自动安装、跨控制面实例断流与多主机故障系统验收仍未完成。
+> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、持久切换水位、受限容器终端和固定身份主机 PTY 也已实现。首次 enrollment 已支持本地生成密钥、严格 HTTPS/证书身份校验、完全相同请求的短时响应恢复和原子落盘；Agent 证书也支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。版本化安装包、Sigstore keyless 发布签名/离线验签、systemd unit、原子升级和本机回滚已经具备；首个受保护正式 Tag、跨控制面实例断流与多主机故障系统验收仍未完成。
 
 Agent 控制协议运行在独立的 mTLS 监听端口，不与浏览器 Bearer API 共用认证边界。Agent 主动发起：
 
@@ -73,6 +73,8 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
 
 如果 Agent 在第 2～4 步之间退出，启动恢复会用旧证书和原 pending 请求取回同一张新证书。即使 10 分钟普通连接窗口已经结束，只要旧证书自身仍有效，Server 也仅允许它凭完全相同的 rotation ID 和 CSR hash 读取已经保存的 pending 响应；它不能建立控制流、提交不同 CSR 或创建另一轮换。新身份、CA、权限或文件安全检查失败时，现有 bundle 不会被覆盖；损坏的 pending 文件也不会被静默忽略。
 
+仓库的外部进程门禁会真实中断第一次轮换响应并重启 Agent，确认恢复请求逐字保持相同的 rotation ID 和 CSR。新 bundle 安装后，Agent 会立即丢弃轮换请求留下的空闲 TLS 连接，再建立控制流；门禁要求下一次 mTLS hello 必须呈现新证书，而不是只检查磁盘文件已经变化。
+
 ## Frame 规则
 
 - 默认最大 frame 为 65,536 字节，可配置范围为 1 KiB～1 MiB；
@@ -80,7 +82,7 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
 - Agent `sequence` 必须为大于零的单调递增整数；
 - Server 使用独立的单调递增 `sequence`；
 - Agent 可以发送 `hello`、`heartbeat`、`command_result` 和 `terminal`；Server 可以发送确认、安全错误、严格类型化的 `command` 和 `terminal`；
-- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
+- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel`、`deployment.cutover.release` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
 - frame 中不能携带 Docker endpoint、Socket、SSH 地址、用户选择的 Shell 或任意宿主机命令；
 - 连接建立后的协议错误通过安全 `error` frame 返回，不透传数据库或证书错误。
 
@@ -104,6 +106,7 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
       "deployment.stage",
       "deployment.activate",
       "deployment.cancel",
+      "deployment.cutover.release",
       "runtime.inventory.prepare",
       "runtime.inventory.chunk",
       "runtime.inventory.release",
@@ -366,14 +369,31 @@ sequenceDiagram
 
 ## Agent Deployment 两阶段契约
 
-Agent 部署不能简单地把现有 Server 直连 Docker 操作整体搬到远端。候选容器健康后，Server 必须重新验证 MongoDB 中当前 Deployment 的 worker owner、lease generation、状态、过期时间，以及它仍是部署槽位的当前序号，才能允许候选接管稳定容器名。每个命令还携带同一部署槽位内单调递增的 `cutover_sequence`：lease generation 区分同一 Deployment 的 Worker 尝试，cutover sequence 区分不同 Deployment 的新旧。内部 `v1` 契约因此按下面四种类型化命令拆分：
+Agent 部署不能简单地把现有 Server 直连 Docker 操作整体搬到远端。候选容器健康后，Server 必须重新验证 MongoDB 中当前 Deployment 的 worker owner、lease generation、状态、过期时间，以及它仍是部署槽位的当前序号，才能允许候选接管稳定容器名。每个命令还携带同一部署槽位内单调递增的 `cutover_sequence`：lease generation 区分同一 Deployment 的 Worker 尝试，cutover sequence 区分不同 Deployment 的新旧。内部 `v1` 契约使用下面五种类型化命令：
 
 - `deployment.prepare`：按不可变 digest 检查或拉取镜像；只有该命令可携带有界 Registry authorization；
 - `deployment.stage`：使用受约束的 Runtime Spec 和 Environment 创建候选容器并等待健康，但不切换稳定名称；
 - `deployment.activate`：Server 重新通过 lease fence 后下发，只负责进行幂等的最终名称切换；
 - `deployment.cancel`：只清理由同一 Deployment ID、fencing token 和 cutover sequence 拥有的候选、回退或稳定容器。
+- `deployment.cutover.release`：产品资源已进入不可恢复终态后，精确释放一个槽位水位；只携带 Deployment ID、cutover sequence、Runtime Target ID 和稳定容器名，不携带 Worker、凭据、运行规格或任意 Docker 参数。
 
-`prepare/stage/activate/cancel` 都固定 Deployment、Worker、generation、cutover sequence、Runtime Target 和稳定容器名，不能携带 Docker endpoint 或 Shell。`stage` 的 Environment 必须与 Release Runtime Spec 声明的键完全一致；`activate/cancel` 禁止携带 Registry、Environment 或镜像字段。Agent 会把 cutover sequence 写入候选和稳定容器标签，并在独立的本机文件中保存每个稳定容器槽位的最高 sequence 与 Deployment ID。该水位不随结果缓存淘汰；因此即使 Agent 重启或稳定容器被删除，延迟到达的旧 `prepare/stage/activate` 仍返回 `stale_execution`。较旧 `cancel` 仍可按完整执行身份清理自己的候选，不会删除新 Deployment。水位文件损坏、写入失败或达到配置上限时失败关闭。Agent 本机执行器、Server Gateway、secret-safe 双端结果缓存、跨重启/容器缺失延迟命令回归和单机真实 Engine 两阶段测试已经实现；两台真实主机、网络分区和网络层延迟命令的系统验收仍未完成，因此当前不能据此宣称 Agent 模式生产就绪。
+`prepare/stage/activate/cancel` 都固定 Deployment、Worker、generation、cutover sequence、Runtime Target 和稳定容器名，不能携带 Docker endpoint 或 Shell。`stage` 的 Environment 必须与 Release Runtime Spec 声明的键完全一致；`activate/cancel` 禁止携带 Registry、Environment 或镜像字段。Agent 会把 cutover sequence 写入候选和稳定容器标签，并在独立的本机文件中保存每个稳定容器槽位的最高 sequence 与 Deployment ID。该水位不随结果缓存淘汰；因此即使 Agent 重启或稳定容器被删除，延迟到达的旧 `prepare/stage/activate` 仍返回 `stale_execution`。较旧 `cancel` 仍可按完整执行身份清理自己的候选，不会删除新 Deployment。水位文件损坏、写入失败或达到配置上限时失败关闭。
+
+水位不能用 TTL 或“满了就删最旧记录”回收，因为旧命令可能在网络恢复后才到达。`deployment.cutover.release` 只提供安全的最后一步：Server 必须先把 Application/Environment/Runtime Target 等产品资源置为不再接受部署的终态，停止并等待该槽位所有在途命令，确认受管容器已经退出，再下发精确的当前 Deployment/sequence。Agent 仅在两个值都匹配当前水位时原子删除；不匹配返回 `cutover_conflict` 并保留记录，不存在则按已释放幂等成功。同一 release 的安全结果会持久化，所以响应丢失不会要求构造新的释放请求。当前共享协议、本机执行器和 Agent Gateway 边界已经完成，产品删除 API 的事务/任务编排尚未接入；两台真实主机、网络分区和网络层延迟命令的系统验收也仍未完成，因此当前不能据此宣称 Agent 模式生产就绪。
+
+```json
+{
+  "command_id": "command-release-cutover",
+  "kind": "deployment.cutover.release",
+  "deadline": "2026-07-30T10:00:30Z",
+  "cutover": {
+    "deployment_id": "deployment-id",
+    "cutover_sequence": 42,
+    "runtime_target_id": "runtime-target-id",
+    "container_name": "owndock-stable-slot"
+  }
+}
+```
 
 ```mermaid
 sequenceDiagram
@@ -432,6 +452,32 @@ sequenceDiagram
     A-->>S: stale_execution；稳定容器仍为 B
 ```
 
+产品删除编排必须保持下面的顺序，不能把 release 当作普通定时清理：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant P as Product lifecycle
+    participant Q as Deployment queue
+    participant A as owndock-agent
+    participant D as Docker Engine
+    participant W as Cutover watermark
+
+    P->>P: 资源进入 draining/deleted，禁止新 Deployment
+    P->>Q: 等待槽位在途命令全部终止
+    P->>A: 删除精确受管运行资源
+    A->>D: 核对并移除容器
+    P->>A: deployment.cutover.release(exact ID + sequence)
+    A->>W: compare exact current watermark
+    alt 精确匹配或已经释放
+        W-->>A: 原子删除或幂等成功
+        A-->>P: succeeded
+    else 水位已经被其他 Deployment 推进
+        W-->>A: keep watermark
+        A-->>P: cutover_conflict
+    end
+```
+
 ## 在线、重连与关闭
 
 - hello 通过后，Server 原子写入 `online`、session/boot ID、版本、能力和 `last_seen_at`，并记录 `agent_session.connect`；
@@ -445,4 +491,4 @@ sequenceDiagram
 
 `v1` 的后续 frame 只能加入与已授权领域操作关联的类型化 command/result 或临时会话。每条持久命令必须有唯一 command ID、幂等结果、超时和有界缓冲；临时终端使用独立会话序号、上限与关闭语义。协议不会提供“执行任意宿主机命令”的通用 RPC。
 
-Server 侧 probe/Deployment 类型契约、重复等待、secret-safe 结果缓存和慢消费者 backpressure，以及 Agent 侧 TLS 1.3 客户端、严格帧校验、心跳、抖动退避重连、优雅停止、deadline、本机 Docker executor、并发去重和跨重启持久结果均已完成。双端流一致性测试已覆盖当前 `v1`；在相邻 Agent/Server 版本 conformance 和发行升级矩阵完成前，`AGENT-002` 仍处于进行中。
+Server 侧 probe/Deployment 类型契约、重复等待、secret-safe 结果缓存和慢消费者 backpressure，以及 Agent 侧 TLS 1.3 客户端、严格帧校验、心跳、抖动退避重连、优雅停止、deadline、本机 Docker executor、并发去重和跨重启持久结果均已完成。双端流一致性测试已覆盖当前 `v1`，外部进程门禁还会用真实 Agent 二进制完成精确 mTLS 身份、hello/heartbeat、Server 监听器中断和自动重连。发布后矩阵从第二个正式 Tag 开始交叉执行上一 Agent→当前 fixture 与当前 Agent→上一 fixture；首两个正式 Release 和真实命令/双主机矩阵完成前，`AGENT-002` 仍处于进行中。

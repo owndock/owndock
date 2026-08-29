@@ -157,4 +157,4 @@ Cancel、Retry 和 Rollback 都创建或推进明确的操作记录，不覆盖�
 
 ## 当前开放边界
 
-当前版本仍是 pre-release。Git 自建 CA/企业代理矩阵、完整 Build Worker 进程故障、硬配额磁盘耗尽、生产 egress 策略和多主机生产故障验收尚未全部关闭。启用前先运行 [Git-to-Deploy 安全验收](build-security-acceptance.md)并根据自己的 Git、Registry、内核、文件系统和网络环境完成外部兼容验证。
+当前版本仍是 pre-release。构建出口已经采用无直连 Build Boundary 与精确目标网关，并通过真实绕过/故障恢复门禁；目标内核/文件系统和多主机故障矩阵尚未全部关闭。真实 Server 入口黑盒扫描、工作区与 BuildKit cache 的独立硬配额和真实耗尽恢复门禁也已经落地。启用前先运行 [Git-to-Deploy 安全验收](build-security-acceptance.md)并根据自己的 Git、Registry、内核、文件系统和网络环境完成外部兼容验证。

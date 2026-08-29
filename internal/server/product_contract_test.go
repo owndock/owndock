@@ -2,6 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -17,6 +22,7 @@ import (
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
+	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
 	controlplaneservice "github.com/owndock/owndock/internal/modules/controlplane/service"
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
@@ -31,6 +37,8 @@ import (
 	"github.com/owndock/owndock/internal/modules/meta"
 	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
 	runtimeinventoryservice "github.com/owndock/owndock/internal/modules/runtimeinventory/service"
+	supplychainbiz "github.com/owndock/owndock/internal/modules/supplychain/biz"
+	supplychainservice "github.com/owndock/owndock/internal/modules/supplychain/service"
 	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
 	terminalservice "github.com/owndock/owndock/internal/modules/terminal/service"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
@@ -127,6 +135,7 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		transaction.Passthrough{}, audits, audits, newID, now,
 	).WithManagedHosts(managedHostStore).
 		WithProjectMembers(controlStore).
+		WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
 		WithRuntimeTargetProbe(controlStore, contractRuntimeTargetProber{})
 	controlHTTP := controlplaneservice.NewHTTP(controlUseCase)
 	managedHostHTTP := managedhostservice.NewHTTP(managedhostbiz.NewUseCase(
@@ -174,6 +183,62 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		WithBuildLogs(buildStore))
 	if err := productAPI.WithBuild(buildHTTP, identityHTTP.Authenticate); err != nil {
 		t.Fatalf("WithBuild() error = %v", err)
+	}
+	contractEvidenceRepository := contractArtifactEvidenceRepository{}
+	supplyChainUseCase, err := supplychainbiz.NewUseCase(
+		controlStore, contractArtifactEvidenceLookup{}, contractEvidenceRepository,
+	)
+	if err != nil {
+		t.Fatalf("New supply-chain use case: %v", err)
+	}
+	supplyChainUseCase.WithVerificationRepository(contractEvidenceRepository)
+	trustPolicyRepository := &contractSignatureTrustPolicyRepository{items: make(map[string]supplychainbiz.SignatureTrustPolicy)}
+	privateKey, keyErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	publicDER, keyErr := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	signingTrustPolicy, keyErr := supplychainbiz.NewSignatureTrustPolicy(supplychainbiz.SignatureTrustPolicyInput{
+		ID: "signing-trust-policy", OrganizationID: "test-id", ProjectID: "test-id", Name: "KMS signer",
+		Mode:         supplychainbiz.SignatureTrustPublicKey,
+		PublicKeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: publicDER})),
+		Enabled:      true, Version: 1, CreatedAt: now(), UpdatedAt: now()})
+	if keyErr != nil {
+		t.Fatal(keyErr)
+	}
+	trustPolicyRepository.items[signingTrustPolicy.ID] = signingTrustPolicy
+	trustPolicyUseCase, err := supplychainbiz.NewSignatureTrustPolicyUseCase(
+		controlStore, trustPolicyRepository, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New signature trust policy use case: %v", err)
+	}
+	trustPolicyUseCase.WithAudit(transaction.Passthrough{}, audits)
+	signingProfileRepository := &contractSigningProfileRepository{items: make(map[string]supplychainbiz.SignatureSigningProfile)}
+	signingProfileUseCase, err := supplychainbiz.NewSignatureSigningProfileUseCase(
+		controlStore, trustPolicyRepository, signingProfileRepository, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New signature signing profile use case: %v", err)
+	}
+	signingProfileUseCase.WithAudit(transaction.Passthrough{}, audits)
+	signatureVerificationUseCase, err := supplychainbiz.NewSignatureVerificationUseCase(
+		contractArtifactEvidenceLookup{}, trustPolicyRepository, contractEvidenceJobCreator{}, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New signature verification use case: %v", err)
+	}
+	signatureVerificationUseCase.WithAudit(transaction.Passthrough{}, audits)
+	if err := productAPI.WithSupplyChain(
+		supplychainservice.NewHTTP(supplyChainUseCase).WithSignatureTrustPolicies(trustPolicyUseCase).
+			WithSignatureSigningProfiles(signingProfileUseCase).
+			WithSignatureVerifications(signatureVerificationUseCase),
+		identityHTTP.Authenticate,
+	); err != nil {
+		t.Fatalf("WithSupplyChain() error = %v", err)
 	}
 	terminalStore := &contractTerminalStore{
 		policies: make(map[string]terminalbiz.AccessPolicy),
@@ -975,6 +1040,156 @@ type contractBuildStore struct {
 	deliveries     map[string]buildbiz.WebhookDelivery
 	artifacts      map[string]buildbiz.Artifact
 	logs           map[string][]buildbiz.BuildLogEntry
+}
+
+type contractArtifactEvidenceLookup struct{}
+
+func (contractArtifactEvidenceLookup) ResolveArtifact(
+	context.Context, string, string, string,
+) (supplychainbiz.ArtifactSubject, error) {
+	return supplychainbiz.ArtifactSubject{
+		ID: "test-id", OrganizationID: "test-id", ProjectID: "test-id",
+		SubjectDigest:        "sha256:" + strings.Repeat("a", 64),
+		RegistryRepository:   "registry.example.com/team/api",
+		RegistryCredentialID: "test-id",
+	}, nil
+}
+
+type contractArtifactEvidenceRepository struct{}
+type contractEvidenceJobCreator struct{}
+
+func (contractEvidenceJobCreator) CreateEvidenceJob(_ context.Context,
+	item supplychainbiz.EvidenceJob) (supplychainbiz.EvidenceJob, error) {
+	return item, nil
+}
+
+type contractSignatureTrustPolicyRepository struct {
+	items map[string]supplychainbiz.SignatureTrustPolicy
+}
+
+type contractSigningProfileRepository struct {
+	items map[string]supplychainbiz.SignatureSigningProfile
+}
+
+func (r *contractSigningProfileRepository) CreateSignatureSigningProfile(_ context.Context,
+	item supplychainbiz.SignatureSigningProfile) (supplychainbiz.SignatureSigningProfile, error) {
+	r.items[item.ID] = item
+	return item, nil
+}
+func (r *contractSigningProfileRepository) ListSignatureSigningProfiles(_ context.Context,
+	projectID string) ([]supplychainbiz.SignatureSigningProfile, error) {
+	items := []supplychainbiz.SignatureSigningProfile{}
+	for _, item := range r.items {
+		if item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+func (r *contractSigningProfileRepository) GetSignatureSigningProfile(_ context.Context,
+	projectID, profileID string) (supplychainbiz.SignatureSigningProfile, error) {
+	item, ok := r.items[profileID]
+	if !ok || item.ProjectID != projectID {
+		return supplychainbiz.SignatureSigningProfile{}, supplychainbiz.ErrNotFound
+	}
+	return item, nil
+}
+func (r *contractSigningProfileRepository) SaveSignatureSigningProfile(_ context.Context,
+	item supplychainbiz.SignatureSigningProfile, expected uint64) (supplychainbiz.SignatureSigningProfile, error) {
+	current, ok := r.items[item.ID]
+	if !ok {
+		return supplychainbiz.SignatureSigningProfile{}, supplychainbiz.ErrNotFound
+	}
+	if current.Version != expected {
+		return supplychainbiz.SignatureSigningProfile{}, supplychainbiz.ErrSigningProfileConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractSignatureTrustPolicyRepository) CreateSignatureTrustPolicy(_ context.Context,
+	item supplychainbiz.SignatureTrustPolicy) (supplychainbiz.SignatureTrustPolicy, error) {
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractSignatureTrustPolicyRepository) ListSignatureTrustPolicies(_ context.Context,
+	projectID string) ([]supplychainbiz.SignatureTrustPolicy, error) {
+	items := make([]supplychainbiz.SignatureTrustPolicy, 0, len(r.items))
+	for _, item := range r.items {
+		if item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func (r *contractSignatureTrustPolicyRepository) GetSignatureTrustPolicy(_ context.Context,
+	projectID, policyID string) (supplychainbiz.SignatureTrustPolicy, error) {
+	item, ok := r.items[policyID]
+	if !ok || item.ProjectID != projectID {
+		return supplychainbiz.SignatureTrustPolicy{}, supplychainbiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *contractSignatureTrustPolicyRepository) SaveSignatureTrustPolicy(_ context.Context,
+	item supplychainbiz.SignatureTrustPolicy, expected uint64) (supplychainbiz.SignatureTrustPolicy, error) {
+	current, ok := r.items[item.ID]
+	if !ok {
+		return supplychainbiz.SignatureTrustPolicy{}, supplychainbiz.ErrNotFound
+	}
+	if current.Version != expected {
+		return supplychainbiz.SignatureTrustPolicy{}, supplychainbiz.ErrSignatureTrustPolicyConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func contractArtifactEvidence() supplychainbiz.Evidence {
+	item, _ := supplychainbiz.NewEvidence(supplychainbiz.EvidenceInput{
+		ID: "test-id", OrganizationID: "test-id", ProjectID: "test-id",
+		ArtifactID: "test-id", SubjectDigest: "sha256:" + strings.Repeat("a", 64),
+		Kind: supplychainbiz.EvidenceKindSBOM, MediaType: "application/vnd.cyclonedx+json",
+		FormatVersion: "1.6", Producer: "contract-evidence-worker/1.0.0",
+		RegistryRepository: "registry.example.com/team/api",
+		DescriptorDigest:   "sha256:" + strings.Repeat("b", 64),
+		VerificationStatus: supplychainbiz.VerificationVerified,
+		CreatedAt:          time.Unix(100, 0).UTC(),
+	})
+	return item
+}
+
+func (contractArtifactEvidenceRepository) ListEvidence(
+	context.Context, string, string,
+) ([]supplychainbiz.Evidence, error) {
+	return []supplychainbiz.Evidence{contractArtifactEvidence()}, nil
+}
+
+func (contractArtifactEvidenceRepository) GetEvidence(
+	context.Context, string, string, string,
+) (supplychainbiz.Evidence, error) {
+	return contractArtifactEvidence(), nil
+}
+
+func (contractArtifactEvidenceRepository) CreateEvidence(
+	_ context.Context, item supplychainbiz.Evidence,
+) (supplychainbiz.Evidence, error) {
+	return item, nil
+}
+
+func (contractArtifactEvidenceRepository) ListEvidenceVerifications(
+	context.Context, string, string,
+) ([]supplychainbiz.EvidenceVerification, error) {
+	return []supplychainbiz.EvidenceVerification{{
+		ID: "test-id", OrganizationID: "test-id", ProjectID: "test-id", ArtifactID: "test-id",
+		SubjectDigest: "sha256:" + strings.Repeat("a", 64), PolicyID: "test-id", PolicyVersion: 1,
+		TrustMode: supplychainbiz.SignatureTrustKeyless, TrustRootHash: "sha256:" + strings.Repeat("b", 64),
+		SignerIdentity: "https://git.example.com/team/api/.ci/release@refs/tags/v1.0.0",
+		OIDCIssuer:     "https://issuer.example.com", BundleSetDigest: "sha256:" + strings.Repeat("c", 64),
+		Verifier: "cosign", VerifierVersion: "3.0.6", VerificationStatus: supplychainbiz.VerificationVerified,
+		CreatedAt: time.Unix(100, 0).UTC(),
+	}}, nil
 }
 
 type contractArtifactReleaseCreator struct{}

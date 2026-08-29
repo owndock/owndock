@@ -47,7 +47,184 @@ func Default() []Migration {
 		{Version: 31, Name: "add_ingress_rate_limits", Up: addIngressRateLimits},
 		{Version: 32, Name: "add_terminal_access_and_sessions", Up: addTerminalAccessAndSessions},
 		{Version: 33, Name: "bind_terminal_authentication_sessions", Up: bindTerminalAuthenticationSessions},
+		{Version: 34, Name: "index_artifact_evidence", Up: indexArtifactEvidence},
+		{Version: 35, Name: "index_artifact_evidence_jobs", Up: indexArtifactEvidenceJobs},
+		{Version: 36, Name: "revise_artifact_evidence_idempotency", Up: reviseArtifactEvidenceIdempotency},
+		{Version: 37, Name: "index_signature_trust_policies", Up: indexSignatureTrustPolicies},
+		{Version: 38, Name: "index_evidence_verifications", Up: indexEvidenceVerifications},
+		{Version: 39, Name: "index_signature_signing_profiles", Up: indexSignatureSigningProfiles},
+		{Version: 40, Name: "backfill_signature_job_operation", Up: backfillSignatureJobOperation},
+		{Version: 41, Name: "index_vulnerability_observations", Up: indexVulnerabilityObservations},
 	}
+}
+
+func indexVulnerabilityObservations(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("vulnerability_observations").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+			{Key: "scanner", Value: 1}}, Options: options.Index().SetName("uniq_vulnerability_observation_latest").SetUnique(true)},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "fresh_until", Value: 1},
+			{Key: "highest_severity", Value: 1}}, Options: options.Index().SetName("idx_vulnerability_observation_policy")},
+		{Keys: bson.D{{Key: "subject_digest", Value: 1}, {Key: "descriptor_digest", Value: 1}},
+			Options: options.Index().SetName("idx_vulnerability_observation_evidence")},
+	})
+	if err != nil {
+		return fmt.Errorf("create vulnerability observation indexes: %w", err)
+	}
+	return nil
+}
+
+func backfillSignatureJobOperation(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("artifact_evidence_jobs").UpdateMany(ctx,
+		bson.D{{Key: "kind", Value: "signature"},
+			{Key: "signature_operation", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "signature_operation", Value: "verify"}}}})
+	if err != nil {
+		return fmt.Errorf("backfill signature job operation: %w", err)
+	}
+	return nil
+}
+
+func indexSignatureSigningProfiles(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("signature_signing_profiles").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "name", Value: 1}}, Options: options.Index().SetName("uniq_signature_signing_profile_name").SetUnique(true)},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "trust_policy_id", Value: 1}},
+			Options: options.Index().SetName("uniq_signature_signing_profile_policy").SetUnique(true)},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "enabled", Value: 1},
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("idx_signature_signing_profile_list")},
+	})
+	if err != nil {
+		return fmt.Errorf("create signature signing profile indexes: %w", err)
+	}
+	return nil
+}
+
+func indexEvidenceVerifications(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("evidence_verifications").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("idx_evidence_verification_list")},
+		{Keys: bson.D{{Key: "artifact_id", Value: 1}, {Key: "subject_digest", Value: 1},
+			{Key: "policy_id", Value: 1}, {Key: "policy_version", Value: 1},
+			{Key: "bundle_set_digest", Value: 1}},
+			Options: options.Index().SetName("uniq_evidence_verification_snapshot").SetUnique(true)},
+	})
+	if err != nil {
+		return fmt.Errorf("create evidence verification indexes: %w", err)
+	}
+	return nil
+}
+
+func indexSignatureTrustPolicies(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("signature_trust_policies").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+				{Key: "name", Value: 1}},
+			Options: options.Index().SetName("uniq_signature_trust_policy_name").SetUnique(true),
+		},
+		{
+			Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "enabled", Value: 1},
+				{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}},
+			Options: options.Index().SetName("idx_signature_trust_policy_list"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create signature trust policy indexes: %w", err)
+	}
+	return nil
+}
+
+func reviseArtifactEvidenceIdempotency(ctx context.Context, database *mongo.Database) error {
+	evidence := database.Collection("artifact_evidence")
+	jobs := database.Collection("artifact_evidence_jobs")
+	if _, err := jobs.UpdateMany(ctx,
+		bson.D{{Key: "idempotency_key", Value: bson.D{{Key: "$exists", Value: false}}}},
+		mongo.Pipeline{bson.D{{Key: "$set", Value: bson.D{{Key: "idempotency_key", Value: "$_id"}}}}},
+	); err != nil {
+		return fmt.Errorf("backfill artifact evidence job idempotency: %w", err)
+	}
+	if err := evidence.Indexes().DropOne(ctx, "uniq_artifact_evidence_identity"); err != nil {
+		return fmt.Errorf("drop artifact evidence identity index: %w", err)
+	}
+	if err := jobs.Indexes().DropOne(ctx, "uniq_artifact_evidence_job_identity"); err != nil {
+		return fmt.Errorf("drop artifact evidence job identity index: %w", err)
+	}
+	if _, err := evidence.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+			{Key: "kind", Value: 1}, {Key: "producer", Value: 1},
+			{Key: "format_version", Value: 1}, {Key: "descriptor_digest", Value: 1},
+		},
+		Options: options.Index().SetName("uniq_artifact_evidence_descriptor").SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("create artifact evidence descriptor index: %w", err)
+	}
+	if _, err := jobs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "idempotency_key", Value: 1},
+		},
+		Options: options.Index().SetName("uniq_artifact_evidence_job_idempotency").SetUnique(true),
+	}); err != nil {
+		return fmt.Errorf("create artifact evidence job idempotency index: %w", err)
+	}
+	return nil
+}
+
+func indexArtifactEvidenceJobs(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("artifact_evidence_jobs").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "status", Value: 1}, {Key: "lease.expires_at", Value: 1},
+				{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_artifact_evidence_job_queue"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+				{Key: "kind", Value: 1}, {Key: "producer", Value: 1},
+				{Key: "format_version", Value: 1},
+			},
+			Options: options.Index().SetName("uniq_artifact_evidence_job_identity").SetUnique(true),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create artifact evidence job indexes: %w", err)
+	}
+	return nil
+}
+
+func indexArtifactEvidence(ctx context.Context, database *mongo.Database) error {
+	collection := database.Collection("artifact_evidence")
+	_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+				{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_artifact_evidence_list"),
+		},
+		{
+			Keys: bson.D{
+				{Key: "project_id", Value: 1}, {Key: "artifact_id", Value: 1},
+				{Key: "kind", Value: 1}, {Key: "producer", Value: 1},
+				{Key: "format_version", Value: 1},
+			},
+			Options: options.Index().SetName("uniq_artifact_evidence_identity").SetUnique(true),
+		},
+		{
+			Keys: bson.D{
+				{Key: "subject_digest", Value: 1}, {Key: "descriptor_digest", Value: 1},
+			},
+			Options: options.Index().SetName("idx_artifact_evidence_digest"),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create artifact evidence indexes: %w", err)
+	}
+	return nil
 }
 
 func bindTerminalAuthenticationSessions(ctx context.Context, database *mongo.Database) error {

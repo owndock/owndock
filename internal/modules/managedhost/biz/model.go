@@ -153,6 +153,33 @@ type EnrollmentRepository interface {
 	) error
 }
 
+// RecoverableEnrollmentRepository closes the response-loss window without
+// making an enrollment token reusable. Only the exact original request hash
+// can retrieve the already issued public certificate during a short window.
+type RecoverableEnrollmentRepository interface {
+	RecoverAgentEnrollment(
+		context.Context,
+		string,
+		string,
+		time.Time,
+	) (AgentCredentials, bool, error)
+	ActivateAgentRecoverable(
+		context.Context,
+		string,
+		string,
+		time.Time,
+		AgentIdentity,
+		EnrollmentRecovery,
+	) error
+}
+
+type EnrollmentRecovery struct {
+	RequestSHA256    string
+	RecoverUntil     time.Time
+	CertificatePEM   []byte
+	CACertificatePEM []byte
+}
+
 type AgentCertificateIdentity struct {
 	OrganizationID    string
 	ManagedHostID     string

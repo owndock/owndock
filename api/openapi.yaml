@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser, management, and automation HTTP contract. Identity, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact and Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Template operations are not public management operations yet. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, read-only digest-bound Artifact Evidence metadata and verified content download, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -12,6 +12,7 @@ tags:
   - name: Identity
   - name: Projects
   - name: Product Applications
+  - name: Templates
   - name: Releases
   - name: Managed Hosts
   - name: Runtime Targets
@@ -24,6 +25,7 @@ tags:
   - name: Build Hooks
   - name: Builds
   - name: Artifacts
+  - name: Artifact Evidence
   - name: Audit
   - name: Applications
   - name: Environments
@@ -449,7 +451,7 @@ paths:
       tags: [Managed Hosts]
       operationId: exchangeAgentEnrollment
       summary: Exchange a one-time enrollment token and CSR for an Agent certificate
-      description: This bootstrap endpoint does not accept a user session. The enrollment token is carried only in the JSON body, is consumed atomically, and cannot be replayed.
+      description: This bootstrap endpoint does not accept a user session. The enrollment token is carried only in the JSON body and is consumed atomically. For response-loss recovery, the exact same token, CSR, instance, version, protocol and capability request may retrieve the original identity and certificate for 10 minutes; any changed request is rejected and no second identity or audit event is created.
       security: []
       requestBody:
         required: true
@@ -891,6 +893,46 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/templates:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    get:
+      tags: [Templates]
+      operationId: listBuiltInTemplates
+      summary: List immutable built-in Application presets
+      description: Returns the community catalog. Templates carry no credentials or target bindings and cannot mutate existing Applications.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TemplateList"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/templates/{template_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/TemplateID"
+    get:
+      tags: [Templates]
+      operationId: getBuiltInTemplate
+      summary: Get one immutable built-in Application preset
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/TemplateItem"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/applications:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -923,7 +965,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/CreateNamedResourceRequest"
+              $ref: "#/components/schemas/CreateProductApplicationRequest"
       responses:
         "201":
           $ref: "#/components/responses/ProductApplicationCreated"
@@ -2028,6 +2070,456 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/signature-trust-policies:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Artifact Evidence]
+      operationId: listSignatureTrustPolicies
+      summary: List versioned signature trust policies for a Project
+      description: Viewer or above. Public-key material is represented only by its canonical SHA-256 fingerprint; private signing keys are never accepted or returned.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SignatureTrustPolicyList"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    post:
+      tags: [Artifact Evidence]
+      operationId: createSignatureTrustPolicy
+      summary: Create an exact public-key or keyless signature trust policy
+      description: Maintainer or Owner. Keyless policies pin an offline trusted-root reference and SHA-256 digest plus an exact certificate identity and OIDC issuer. The endpoint never accepts a private key.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignatureTrustPolicyRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/SignatureTrustPolicyResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/signature-trust-policies/{policy_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: policy_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+          maxLength: 128
+    get:
+      tags: [Artifact Evidence]
+      operationId: getSignatureTrustPolicy
+      summary: Get one signature trust policy without private key material
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SignatureTrustPolicyResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+    patch:
+      tags: [Artifact Evidence]
+      operationId: updateSignatureTrustPolicy
+      summary: Rotate or disable a signature trust policy with optimistic locking
+      description: Maintainer or Owner. A successful rotation creates a new immutable policy version; already queued verification work keeps its original trust snapshot.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/SignatureTrustPolicyRequest"
+                - type: object
+                  required: [expected_version]
+                  properties:
+                    expected_version:
+                      type: integer
+                      format: int64
+                      minimum: 1
+      responses:
+        "200":
+          $ref: "#/components/responses/SignatureTrustPolicyResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/signature-signing-profiles:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Artifact Evidence]
+      operationId: listSignatureSigningProfiles
+      summary: List external KMS signing profiles without key references or credentials
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/SignatureSigningProfileList"
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    post:
+      tags: [Artifact Evidence]
+      operationId: createSignatureSigningProfile
+      summary: Configure an external KMS key reference and public-key verification policy
+      description: Maintainer or Owner. Only awskms, gcpkms, azurekms, hashivault, and k8s key references are accepted. Private key bytes and provider credentials are rejected; credentials come from the isolated Evidence Worker execution environment.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SignatureSigningProfileRequest"
+      responses:
+        "201": { $ref: "#/components/responses/SignatureSigningProfileResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/signature-signing-profiles/{profile_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: profile_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      tags: [Artifact Evidence]
+      operationId: getSignatureSigningProfile
+      summary: Get one KMS signing profile without its key reference or credentials
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/SignatureSigningProfileResponse" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    patch:
+      tags: [Artifact Evidence]
+      operationId: updateSignatureSigningProfile
+      summary: Rotate or disable an external KMS signing profile
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/SignatureSigningProfileRequest"
+                - type: object
+                  required: [expected_version]
+                  properties:
+                    expected_version: { type: integer, format: int64, minimum: 1 }
+      responses:
+        "200": { $ref: "#/components/responses/SignatureSigningProfileResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/evidence:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Artifact Evidence]
+      operationId: listArtifactEvidence
+      summary: List bounded evidence metadata for an immutable Artifact digest
+      description: Viewer, Developer, Maintainer, or Owner. This endpoint returns only immutable evidence indexes. Full SBOM, provenance, signature bundle, and vulnerability reports remain OCI artifacts and are not embedded in MongoDB responses.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ArtifactEvidenceList"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/verifications:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Artifact Evidence]
+      operationId: listArtifactEvidenceVerifications
+      summary: List cryptographic verification summaries for an Artifact digest
+      description: Viewer or above. Each result fixes the Artifact digest, signature policy ID and version, trust-root fingerprint, exact signer identity, Cosign version, and a digest of the verified bundle result set. Complete bundles remain in the OCI Registry.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/EvidenceVerificationList"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/vulnerability-observation:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1 }
+    get:
+      tags: [Artifact Evidence]
+      operationId: getLatestArtifactVulnerabilityObservation
+      summary: Get the bounded latest vulnerability summary for one immutable Artifact digest
+      description: Viewer or above. The detailed Trivy report remains an OCI referrer. `stale` is evaluated at request time from the recorded freshness boundary; a stale observation must not be presented as a current clean scan.
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityObservationResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/vulnerability-scans:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1 }
+    post:
+      tags: [Artifact Evidence]
+      operationId: scheduleArtifactVulnerabilityScan
+      summary: Schedule a new digest-bound vulnerability scan attempt
+      description: Developer, Maintainer, or Owner. Reusing the same Idempotency-Key returns the same Job; use a new key for an intentional rescan. A new successful report replaces only the bounded latest observation while every OCI report and immutable Evidence index remains available.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      responses:
+        "202": { $ref: "#/components/responses/VulnerabilityScanScheduleResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/signature-verifications:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    post:
+      tags: [Artifact Evidence]
+      operationId: scheduleArtifactSignatureVerification
+      summary: Schedule digest-bound signature verification with one enabled policy version
+      description: Developer, Maintainer, or Owner. The queued job freezes the selected policy version, exact public key or keyless identity, and trusted-root digest. Reusing the same Idempotency-Key returns the same Job; use a new key to retry after a terminal failure without rewriting history.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [policy_id]
+              properties:
+                policy_id:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+      responses:
+        "202":
+          $ref: "#/components/responses/SignatureVerificationScheduleResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/evidence/{evidence_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      - name: evidence_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Artifact Evidence]
+      operationId: getArtifactEvidence
+      summary: Get one digest-bound Artifact Evidence metadata record
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ArtifactEvidenceResponse"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/artifacts/{artifact_id}/evidence/{evidence_id}:download:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: artifact_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+      - name: evidence_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    get:
+      tags: [Artifact Evidence]
+      operationId: downloadArtifactEvidence
+      summary: Download one verified digest-bound evidence document
+      description: Viewer, Developer, Maintainer, or Owner. OwnDock reads the immutable OCI manifest by descriptor digest, verifies its Artifact subject, media type, size and layer digest, validates the supported document schema, and only then returns the JSON attachment. This verifies storage integrity; an unverified provenance record is not presented as cryptographically signed.
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          $ref: "#/components/responses/ArtifactEvidenceContentResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/environments:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2532,6 +3024,14 @@ components:
       schema:
         type: string
         minLength: 1
+    TemplateID:
+      name: template_id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 80
     DeploymentID:
       name: deployment_id
       in: path
@@ -2850,6 +3350,31 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ProductApplication"
+    TemplateList:
+      description: Immutable built-in Template collection.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Template"
+    TemplateItem:
+      description: One immutable built-in Template.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Template"
     ReleaseList:
       description: Release collection.
       headers:
@@ -2900,6 +3425,162 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Artifact"
+    ArtifactEvidenceList:
+      description: Bounded evidence metadata collection for one immutable Artifact digest.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ArtifactEvidence"
+    SignatureTrustPolicyList:
+      description: Versioned Project signature trust policies without private signing key material.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SignatureTrustPolicy"
+    SignatureTrustPolicyResponse:
+      description: One versioned Project signature trust policy. Public keys are returned only as canonical fingerprints.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SignatureTrustPolicy"
+    SignatureSigningProfileList:
+      description: External KMS signing profile metadata without key references or credentials.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items: { $ref: "#/components/schemas/SignatureSigningProfile" }
+    SignatureSigningProfileResponse:
+      description: One external KMS signing profile without key reference or credential material.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/SignatureSigningProfile" }
+    EvidenceVerificationList:
+      description: Immutable bounded cryptographic verification summaries for one Artifact.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items:
+                  $ref: "#/components/schemas/EvidenceVerification"
+    VulnerabilityObservationResponse:
+      description: Bounded latest vulnerability summary. Finding details remain in the digest-bound OCI report identified by evidence_id and descriptor_digest.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/VulnerabilityObservation" }
+    VulnerabilityScanScheduleResponse:
+      description: Vulnerability scan scheduling result. `scheduled=false` means the same Artifact and Idempotency-Key attempt already exists.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [job_id, scheduled]
+            properties:
+              job_id: { type: string, minLength: 1, maxLength: 128 }
+              scheduled: { type: boolean }
+    SignatureVerificationScheduleResponse:
+      description: Signature verification scheduling result. `scheduled=false` means this Artifact, policy version, and Idempotency-Key combination was already queued or processed. A new key creates a new attempt without changing the old Job.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [job_id, policy_id, policy_version, scheduled]
+            properties:
+              job_id:
+                type: string
+                minLength: 1
+              policy_id:
+                type: string
+                minLength: 1
+              policy_version:
+                type: integer
+                format: int64
+                minimum: 1
+              scheduled:
+                type: boolean
+    ArtifactEvidenceResponse:
+      description: One immutable digest-bound evidence metadata record.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ArtifactEvidence"
+    ArtifactEvidenceContentResponse:
+      description: A bounded JSON evidence document verified against its immutable OCI manifest and Artifact subject before download.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+        Content-Disposition:
+          schema:
+            type: string
+        ETag:
+          schema:
+            type: string
+        X-OwnDock-Content-Digest:
+          description: SHA-256 digest of the returned evidence layer.
+          schema:
+            type: string
+            pattern: '^sha256:[0-9a-f]{64}$'
+      content:
+        application/vnd.cyclonedx+json:
+          schema:
+            type: object
+            additionalProperties: true
+        application/vnd.in-toto+json:
+          schema:
+            type: object
+            additionalProperties: true
     RegistryCredentialList:
       description: Registry credential metadata collection.
       headers:
@@ -3473,6 +4154,200 @@ components:
           schema:
             $ref: "#/components/schemas/TerminalCredential"
   schemas:
+    SignatureTrustPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, mode, enabled]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        mode:
+          type: string
+          enum: [public_key, keyless]
+        public_key_pem:
+          type: string
+          minLength: 64
+          maxLength: 65536
+          description: PEM-encoded verification public key. Mutually exclusive with all keyless fields. Private keys are rejected.
+        trusted_root_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Reference to an externally supplied offline Sigstore trusted-root document.
+        trusted_root_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Pinned digest of the referenced trusted root; rotation requires a new policy version.
+        certificate_identity:
+          type: string
+          minLength: 1
+          maxLength: 1024
+          description: Exact certificate identity; regular expressions and wildcards are not accepted.
+        oidc_issuer:
+          type: string
+          format: uri
+          maxLength: 2048
+          description: Exact HTTPS OIDC issuer.
+        enabled:
+          type: boolean
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+    SignatureTrustPolicy:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, name, mode, enabled, version, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+        mode:
+          type: string
+          enum: [public_key, keyless]
+        public_key_fingerprint:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        trusted_root_id:
+          type: string
+          minLength: 1
+        trusted_root_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        certificate_identity:
+          type: string
+          minLength: 1
+          maxLength: 1024
+        oidc_issuer:
+          type: string
+          format: uri
+        enabled:
+          type: boolean
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    SignatureSigningProfileRequest:
+      type: object
+      additionalProperties: false
+      required: [name, key_reference, trust_policy_id, enabled]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        key_reference:
+          type: string
+          minLength: 1
+          maxLength: 2048
+          description: External KMS URI using awskms, gcpkms, azurekms, hashivault, or k8s. File and env private-key references are rejected.
+        trust_policy_id: { type: string, minLength: 1, maxLength: 128 }
+        enabled: { type: boolean }
+        expected_version: { type: integer, format: int64, minimum: 1 }
+    SignatureSigningProfile:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, name, provider, key_reference_fingerprint, trust_policy_id, enabled, version, created_at, updated_at]
+      properties:
+        id: { type: string, minLength: 1 }
+        organization_id: { type: string, minLength: 1 }
+        project_id: { type: string, minLength: 1 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        provider:
+          type: string
+          enum: [aws_kms, gcp_kms, azure_kms, hashicorp_vault, kubernetes]
+        key_reference_fingerprint:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        trust_policy_id: { type: string, minLength: 1 }
+        enabled: { type: boolean }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    EvidenceVerification:
+      type: object
+      additionalProperties: false
+      description: Bounded verification summary. It contains no Registry credential, private key, public-key body, trusted-root body, or complete Sigstore bundle.
+      required: [id, organization_id, project_id, artifact_id, subject_digest, policy_id, policy_version, trust_mode, trust_root_hash, bundle_set_digest, verifier, verifier_version, verification_status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+        organization_id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        artifact_id:
+          type: string
+          minLength: 1
+        subject_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        policy_id:
+          type: string
+          minLength: 1
+        policy_version:
+          type: integer
+          format: int64
+          minimum: 1
+        signing_profile_id:
+          type: string
+          minLength: 1
+        signing_profile_version:
+          type: integer
+          format: int64
+          minimum: 1
+        signing_key_provider:
+          type: string
+          enum: [aws_kms, gcp_kms, azure_kms, hashicorp_vault, kubernetes]
+        signing_key_fingerprint:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        trust_mode:
+          type: string
+          enum: [public_key, keyless]
+        trust_root_hash:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        signer_identity:
+          type: string
+          maxLength: 1024
+        oidc_issuer:
+          type: string
+          format: uri
+          maxLength: 2048
+        bundle_set_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+        verifier:
+          type: string
+          enum: [cosign]
+        verifier_version:
+          type: string
+          enum: [3.0.6]
+        verification_status:
+          type: string
+          enum: [verified]
+        created_at:
+          type: string
+          format: date-time
     TerminalPolicyRequest:
       type: object
       additionalProperties: false
@@ -3977,12 +4852,80 @@ components:
           type: string
           minLength: 2
           maxLength: 80
+        template_snapshot:
+          $ref: "#/components/schemas/ApplicationTemplateSnapshot"
         created_by:
           type: string
           minLength: 1
         created_at:
           type: string
           format: date-time
+    LocalizedTemplateText:
+      type: object
+      additionalProperties: false
+      required: [en-US, zh-CN]
+      properties:
+        en-US:
+          type: string
+          minLength: 1
+        zh-CN:
+          type: string
+          minLength: 1
+    TemplatePreset:
+      type: object
+      additionalProperties: false
+      required: [dockerfile_path, context_path, runtime_spec]
+      properties:
+        dockerfile_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        context_path:
+          type: string
+          minLength: 1
+          maxLength: 255
+        runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
+    Template:
+      type: object
+      additionalProperties: false
+      required: [id, version, name, description, preset]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 80
+        version:
+          type: integer
+          format: int64
+          minimum: 1
+        name:
+          $ref: "#/components/schemas/LocalizedTemplateText"
+        description:
+          $ref: "#/components/schemas/LocalizedTemplateText"
+        preset:
+          $ref: "#/components/schemas/TemplatePreset"
+    ApplicationTemplateSnapshot:
+      type: object
+      additionalProperties: false
+      required: [template_id, template_version, dockerfile_path, context_path, runtime_spec]
+      description: Detached copy selected at Application creation. A later Template version never changes this value.
+      properties:
+        template_id:
+          type: string
+          minLength: 1
+        template_version:
+          type: integer
+          format: int64
+          minimum: 1
+        dockerfile_path:
+          type: string
+          minLength: 1
+        context_path:
+          type: string
+          minLength: 1
+        runtime_spec:
+          $ref: "#/components/schemas/ReleaseRuntimeSpec"
     Release:
       type: object
       additionalProperties: false
@@ -4018,7 +4961,7 @@ components:
     RegistryCredential:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, server, username, password_ref, created_by, created_at]
+      required: [id, project_id, name, server, username, password_configured, created_by, created_at]
       properties:
         id:
           type: string
@@ -4037,9 +4980,9 @@ components:
           type: string
           minLength: 1
           maxLength: 255
-        password_ref:
-          type: string
-          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+        password_configured:
+          type: boolean
+          readOnly: true
         created_by:
           type: string
           minLength: 1
@@ -4377,7 +5320,7 @@ components:
           enum: [queued, checking_out, building, pushing, succeeded, failed, canceling, canceled]
         failure_category:
           type: string
-          enum: [repository_authentication, repository_unreachable, revision_not_found, checkout_failed, build_configuration, build_resource_limit, build_failed, registry_authentication, registry_push, canceled, unknown]
+          enum: [repository_authentication, repository_unreachable, revision_not_found, checkout_failed, build_configuration, build_resource_limit, build_network_policy, build_failed, registry_authentication, registry_push, canceled, unknown]
         version:
           type: integer
           format: int64
@@ -4506,6 +5449,98 @@ components:
         released_at:
           type: string
           format: date-time
+    ArtifactEvidence:
+      type: object
+      additionalProperties: false
+      description: A bounded index for evidence stored as an OCI artifact. It never embeds a complete SBOM, attestation, signature bundle, vulnerability report, or secret.
+      required: [id, organization_id, project_id, artifact_id, subject_digest, kind, media_type, format_version, producer, registry_repository, descriptor_digest, verification_status, created_at]
+      properties:
+        id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        organization_id:
+          type: string
+          minLength: 1
+        project_id:
+          type: string
+          minLength: 1
+        artifact_id:
+          type: string
+          minLength: 1
+        subject_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        kind:
+          type: string
+          enum: [sbom, provenance, signature, vulnerability_report]
+        media_type:
+          type: string
+          minLength: 1
+          maxLength: 255
+        format_version:
+          type: string
+          minLength: 1
+          maxLength: 64
+        predicate_type:
+          type: string
+          format: uri
+          maxLength: 512
+        producer:
+          type: string
+          minLength: 1
+          maxLength: 200
+        registry_repository:
+          type: string
+          minLength: 1
+          maxLength: 255
+        descriptor_digest:
+          type: string
+          pattern: "^sha256:[a-f0-9]{64}$"
+        verification_status:
+          type: string
+          enum: [unverified, verified, rejected]
+        created_at:
+          type: string
+          format: date-time
+    VulnerabilityCounts:
+      type: object
+      additionalProperties: false
+      required: [unknown, low, medium, high, critical, total, fixable]
+      properties:
+        unknown: { type: integer, format: int64, minimum: 0 }
+        low: { type: integer, format: int64, minimum: 0 }
+        medium: { type: integer, format: int64, minimum: 0 }
+        high: { type: integer, format: int64, minimum: 0 }
+        critical: { type: integer, format: int64, minimum: 0 }
+        total: { type: integer, format: int64, minimum: 0, maximum: 1000000 }
+        fixable: { type: integer, format: int64, minimum: 0, maximum: 1000000 }
+    VulnerabilityObservation:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, artifact_id, subject_digest, evidence_id, descriptor_digest, scanner, scanner_version, database_schema_version, database_updated_at, database_downloaded_at, scanned_at, fresh_until, stale, counts, highest_severity]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        organization_id: { type: string, minLength: 1 }
+        project_id: { type: string, minLength: 1 }
+        artifact_id: { type: string, minLength: 1 }
+        subject_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        evidence_id: { type: string, minLength: 1, maxLength: 128 }
+        descriptor_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        scanner: { type: string, enum: [trivy] }
+        scanner_version: { type: string, enum: [0.74.0] }
+        database_schema_version: { type: integer, format: int64, minimum: 1 }
+        database_updated_at: { type: string, format: date-time }
+        database_downloaded_at: { type: string, format: date-time }
+        scanned_at: { type: string, format: date-time }
+        fresh_until: { type: string, format: date-time }
+        stale:
+          type: boolean
+          description: True once the scan-age limit or the scanner database next-update boundary has been reached.
+        counts: { $ref: "#/components/schemas/VulnerabilityCounts" }
+        highest_severity:
+          type: string
+          enum: [none, unknown, low, medium, high, critical]
     BuildTrigger:
       type: object
       additionalProperties: false
@@ -4862,7 +5897,7 @@ components:
     RuntimeTarget:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, managed_host_id, connection_mode, status, created_by, created_at]
+      required: [id, project_id, name, managed_host_id, connection_mode, credential_configured, status, created_by, created_at]
       properties:
         id:
           type: string
@@ -4886,9 +5921,9 @@ components:
         tls_server_name:
           type: string
           minLength: 1
-        credential_ref:
-          type: string
-          pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+        credential_configured:
+          type: boolean
+          readOnly: true
         status:
           type: string
           enum: [pending, ready, unreachable, credential_error]
@@ -4942,6 +5977,20 @@ components:
           type: string
           minLength: 2
           maxLength: 80
+    CreateProductApplicationRequest:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 2
+          maxLength: 80
+        template_id:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Optional immutable built-in Template to copy into the new Application snapshot.
     CreateReleaseRequest:
       type: object
       additionalProperties: false
@@ -5378,7 +6427,7 @@ components:
     ProjectEnvironment:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, stage, variables, created_by, created_at]
+      required: [id, project_id, name, stage, variable_keys, created_by, created_at]
       properties:
         id:
           type: string
@@ -5393,11 +6442,13 @@ components:
         stage:
           type: string
           enum: [development, staging, production]
-        variables:
-          type: object
-          additionalProperties:
+        variable_keys:
+          type: array
+          maxItems: 100
+          items:
             type: string
-            maxLength: 4096
+            pattern: "^[A-Za-z_][A-Za-z0-9_]*$"
+          readOnly: true
         created_by:
           type: string
           minLength: 1

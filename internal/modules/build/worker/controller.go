@@ -32,10 +32,22 @@ type Controller struct {
 	leaseDuration time.Duration
 	claimStatuses []biz.BuildStatus
 	artifacts     biz.ArtifactRepository
+	evidence      ArtifactEvidenceScheduler
+}
+
+// ArtifactEvidenceScheduler is a narrow transaction participant. Build owns
+// Artifact publication; the supply-chain adapter owns the Evidence Job shape.
+type ArtifactEvidenceScheduler interface {
+	EnsureArtifactEvidence(context.Context, biz.Artifact) error
 }
 
 func (c *Controller) WithArtifacts(repository biz.ArtifactRepository) *Controller {
 	c.artifacts = repository
+	return c
+}
+
+func (c *Controller) WithArtifactEvidence(scheduler ArtifactEvidenceScheduler) *Controller {
+	c.evidence = scheduler
 	return c
 }
 
@@ -139,6 +151,11 @@ func (c *Controller) PublishArtifact(ctx context.Context, item biz.Build, worker
 			return createErr
 		}
 		artifact = created
+		if c.evidence != nil {
+			if evidenceErr := c.evidence.EnsureArtifactEvidence(transactionContext, artifact); evidenceErr != nil {
+				return evidenceErr
+			}
+		}
 		var saveErr error
 		saved, saveErr = c.queue.SaveClaimedBuild(transactionContext, item, expectedVersion, workerID, generation, now)
 		if saveErr != nil {

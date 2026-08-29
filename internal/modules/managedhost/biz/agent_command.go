@@ -25,6 +25,7 @@ type AgentCommandKind = agentprotocol.AgentCommandKind
 type AgentCommand = agentprotocol.AgentCommand
 type RuntimeProbeCommand = agentprotocol.RuntimeProbeCommand
 type DeploymentCommand = agentprotocol.DeploymentCommand
+type CutoverCommand = agentprotocol.CutoverCommand
 type RuntimeInventoryCommand = agentprotocol.RuntimeInventoryCommand
 type AgentCommandStatus = agentprotocol.AgentCommandStatus
 type RuntimeProbeStatus = agentprotocol.RuntimeProbeStatus
@@ -39,6 +40,7 @@ const (
 	AgentCommandDeploymentStage    = agentprotocol.AgentCommandDeploymentStage
 	AgentCommandDeploymentActivate = agentprotocol.AgentCommandDeploymentActivate
 	AgentCommandDeploymentCancel   = agentprotocol.AgentCommandDeploymentCancel
+	AgentCommandCutoverRelease     = agentprotocol.AgentCommandCutoverRelease
 	AgentCommandInventoryPrepare   = agentprotocol.AgentCommandInventoryPrepare
 	AgentCommandInventoryChunk     = agentprotocol.AgentCommandInventoryChunk
 	AgentCommandInventoryRelease   = agentprotocol.AgentCommandInventoryRelease

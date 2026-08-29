@@ -1,0 +1,53 @@
+[Unit]
+Description=OwnDock Agent
+Documentation=https://owndock.net/docs/agent
+Wants=network-online.target
+After=network-online.target docker.service
+ConditionPathIsExecutable=/opt/owndock-agent/current/owndock-agent
+ConditionPathExists=/etc/owndock/agent.yaml
+ConditionPathExists=/etc/owndock/agent-ca.pem
+ConditionPathExists=/var/lib/owndock-agent/identity/agent-identity.pem
+StartLimitIntervalSec=60s
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=owndock-agent
+Group=owndock-agent
+SupplementaryGroups=docker
+ExecStart=/opt/owndock-agent/current/owndock-agent -conf /etc/owndock/agent.yaml
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+KillMode=control-group
+UMask=0077
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/owndock-agent
+
+LimitNOFILE=65536
+TasksMax=2048
+OOMScoreAdjust=-100
+
+[Install]
+WantedBy=multi-user.target

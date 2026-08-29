@@ -1,4 +1,53 @@
 services:
+  buildkit-storage-preflight:
+    # The same immutable Worker image provides a dependency-free statfs check.
+    image: ${OWNDOCK_BUILD_WORKER_IMAGE:?set an immutable image digest}
+    command:
+      - -check-storage-root
+      - /var/lib/owndock/buildkit-cache
+      - -check-storage-hard-quota-bytes
+      - ${OWNDOCK_BUILDKIT_CACHE_HARD_QUOTA_BYTES:-12884901888}
+    volumes:
+      - ${OWNDOCK_BUILDKIT_CACHE:?required}:/var/lib/owndock/buildkit-cache:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,mode=0700,uid=1000,gid=1000
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+    network_mode: none
+
+  build-egress-gateway:
+    # Publish Dockerfile.build-egress-gateway first and provide only an
+    # immutable image@sha256 reference. This process receives no MongoDB,
+    # Registry password, Git credential, Docker socket, or BuildKit mTLS key.
+    image: ${OWNDOCK_BUILD_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}
+    command: ["-conf", "/etc/owndock/config.yaml"]
+    volumes:
+      - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/owndock-build-egress-gateway", "-conf", "/etc/owndock/config.yaml", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      build-boundary:
+        ipv4_address: ${OWNDOCK_BUILD_EGRESS_GATEWAY_IP:-172.31.240.2}
+      build-egress-uplink:
+
   buildkit:
     image: moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
     command:
@@ -7,6 +56,15 @@ services:
       - --tlscacert=/etc/owndock/buildkit/ca.pem
       - --tlscert=/etc/owndock/buildkit/server-cert.pem
       - --tlskey=/etc/owndock/buildkit/server-key.pem
+    environment:
+      # BuildKit daemon image resolution and Registry push use the same
+      # allowlisted gateway as Dockerfile RUN. The daemon has no direct route.
+      HTTP_PROXY: ${OWNDOCK_BUILD_EGRESS_PROXY_URL:-http://172.31.240.2:3128}
+      HTTPS_PROXY: ${OWNDOCK_BUILD_EGRESS_PROXY_URL:-http://172.31.240.2:3128}
+      http_proxy: ${OWNDOCK_BUILD_EGRESS_PROXY_URL:-http://172.31.240.2:3128}
+      https_proxy: ${OWNDOCK_BUILD_EGRESS_PROXY_URL:-http://172.31.240.2:3128}
+      NO_PROXY: ""
+      no_proxy: ""
     ports:
       # mTLS is mandatory; bind only on loopback for local diagnostics.
       - 127.0.0.1:${OWNDOCK_BUILDKIT_PORT:-1234}:1234
@@ -17,9 +75,12 @@ services:
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/server-key.pem:/etc/owndock/buildkit/server-key.pem:ro
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-cert.pem:/etc/owndock/buildkit/worker-cert.pem:ro
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-key.pem:/etc/owndock/buildkit/worker-key.pem:ro
-      # Put this volume on a filesystem with an enforced quota. BuildKit GC is
-      # a reclamation policy, not a hard protection against a sudden disk fill.
-      - buildkit-cache:/home/user/.local/share/buildkit
+      # Must be a dedicated filesystem whose advertised capacity is no larger
+      # than OWNDOCK_BUILDKIT_CACHE_HARD_QUOTA_BYTES. The preflight service
+      # fails closed before BuildKit starts; GC remains a reclamation policy.
+      # Do not mount noexec: rootless BuildKit executes its pinned frontend
+      # from this private cache. It is never shared with application runtimes.
+      - ${OWNDOCK_BUILDKIT_CACHE:?required}:/home/user/.local/share/buildkit
     tmpfs:
       - /run/user/1000:rw,nosuid,nodev,size=67108864,mode=0700,uid=1000,gid=1000
       - /home/user/.local/tmp:rw,noexec,nosuid,nodev,size=536870912,mode=0700,uid=1000,gid=1000
@@ -48,6 +109,13 @@ services:
       timeout: 5s
       retries: 12
       start_period: 20s
+    depends_on:
+      buildkit-storage-preflight:
+        condition: service_completed_successfully
+      build-egress-gateway:
+        condition: service_healthy
+    networks:
+      - build-boundary
 
   build-worker:
     # The release pipeline must provide an immutable image@sha256 reference.
@@ -57,11 +125,14 @@ services:
       OWNDOCK_MONGODB_URI: ${OWNDOCK_MONGODB_URI:?required}
     volumes:
       - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
+      # If product.source_git_ca_cert_file is configured, mount the same CA
+      # bundle read-only at that absolute path in Server and Build Worker.
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/ca.pem:/etc/owndock/buildkit/ca.pem:ro
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-cert.pem:/etc/owndock/buildkit/worker-cert.pem:ro
       - ${OWNDOCK_BUILDKIT_CERT_DIR:?required}/worker-key.pem:/etc/owndock/buildkit/worker-key.pem:ro
-      # This host path must be a dedicated filesystem/project quota no larger
-      # than runtime.build_worker.max_workspace_bytes.
+      # This host path must be a dedicated filesystem whose capacity is no
+      # larger than runtime.build_worker.workspace_hard_quota_bytes. Worker
+      # startup independently verifies that boundary and fails closed.
       - ${OWNDOCK_BUILD_WORKSPACE:?required}:/var/lib/owndock/builds
     read_only: true
     tmpfs:
@@ -77,6 +148,17 @@ services:
     depends_on:
       buildkit:
         condition: service_healthy
+    networks:
+      - default
+      - build-boundary
 
-volumes:
-  buildkit-cache:
+networks:
+  build-boundary:
+    # Untrusted Dockerfile RUN and BuildKit daemon traffic have no direct
+    # default route. Only build-egress-gateway joins the uplink network.
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OWNDOCK_BUILD_BOUNDARY_SUBNET:-172.31.240.0/24}
+  build-egress-uplink:
+    driver: bridge

@@ -187,7 +187,7 @@ func (m *Metrics) RecordWorkerPoll(worker, result string, duration time.Duration
 
 func safeWorkerName(value string) string {
 	switch value {
-	case "build", "deployment", "runtime_inventory", "runtime_inventory_events":
+	case "build", "deployment", "evidence", "runtime_inventory", "runtime_inventory_events":
 		return value
 	default:
 		return "unknown"

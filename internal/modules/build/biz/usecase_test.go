@@ -1119,11 +1119,19 @@ func TestBuildHookLifecycleWebhookAndReplay(t *testing.T) {
 		t.Fatalf("forged replay changed state: resolver=%d builds=%d", resolver.called, len(repository.builds))
 	}
 	verifier.err = nil
+	verifier.event = WebhookEvent{Supported: true, Ref: "refs/heads/main", CommitSHA: "b975c10d68a2d7461634f13b15c52a2efba72d16"}
+	resolver.err = ErrRevisionMismatch
+	stale, err := useCase.HandleWebhook(context.Background(), WebhookProviderGitHub, hook.ID,
+		WebhookEnvelope{DeliveryID: "delivery-stale", Event: "push", Body: []byte("signed")}, "request-stale")
+	if err != nil || stale.Status != WebhookDeliveryStatusIgnored || stale.BuildID != "" || len(repository.builds) != 1 {
+		t.Fatalf("stale delivery = %+v builds=%d err=%v", stale, len(repository.builds), err)
+	}
+	resolver.err = nil
 
 	verifier.event = WebhookEvent{Supported: false}
 	ignored, err := useCase.HandleWebhook(context.Background(), WebhookProviderGitHub, hook.ID,
 		WebhookEnvelope{DeliveryID: "delivery-2", Event: "issues", Body: []byte("signed")}, "request-ignored")
-	if err != nil || ignored.Status != WebhookDeliveryStatusIgnored || ignored.BuildID != "" || len(repository.deliveries) != 2 {
+	if err != nil || ignored.Status != WebhookDeliveryStatusIgnored || ignored.BuildID != "" || len(repository.deliveries) != 3 {
 		t.Fatalf("ignored = %+v deliveries=%d err=%v", ignored, len(repository.deliveries), err)
 	}
 	revoked, err := useCase.RevokeBuildHook(context.Background(), testPrincipal(security.RoleMaintainer),

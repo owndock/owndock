@@ -57,6 +57,40 @@ type controlTerminalStreamStub struct {
 	once    sync.Once
 }
 
+type closeIdleTransport struct {
+	closed atomic.Int32
+}
+
+func (transport *closeIdleTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("unexpected request")
+}
+
+func (transport *closeIdleTransport) CloseIdleConnections() {
+	transport.closed.Add(1)
+}
+
+func TestReconnectClosesIdleTLSConnectionsBeforeAControlSessionExists(t *testing.T) {
+	transport := &closeIdleTransport{}
+	client, err := NewClient(
+		&http.Client{Transport: transport},
+		&probeExecutorStub{},
+		ClientConfig{
+			Endpoint: "https://control.example.com/api/v1/agent/connect",
+			Identity: testIdentity(), HandshakeTimeout: time.Second,
+			ServerSilenceTimeout: 2 * time.Second, MaxFrameBytes: 64 * 1024,
+			MaxConcurrentCommands: 1,
+			Capabilities:          []string{agentprotocol.CapabilityRuntimeProbe},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.Reconnect()
+	if closed := transport.closed.Load(); closed != 1 {
+		t.Fatalf("idle TLS cleanup count = %d, want 1", closed)
+	}
+}
+
 func newControlTerminalStreamStub() *controlTerminalStreamStub {
 	return &controlTerminalStreamStub{
 		writes: make(chan []byte, 1), resizes: make(chan [2]uint16, 1),
@@ -339,8 +373,8 @@ func TestClientReconnectDiscardsOldTLSConnection(t *testing.T) {
 	if err := <-result; !errors.Is(err, ErrReconnectRequested) {
 		t.Fatalf("reconnect result = %v", err)
 	}
-	if calls := transport.closeCalls.Load(); calls != 1 {
-		t.Fatalf("CloseIdleConnections calls = %d", calls)
+	if calls := transport.closeCalls.Load(); calls != 2 {
+		t.Fatalf("CloseIdleConnections calls = %d, want immediate and post-stream cleanup", calls)
 	}
 }
 

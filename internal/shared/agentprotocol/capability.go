@@ -6,6 +6,7 @@ const (
 	CapabilityDeploymentStage    = "deployment.stage"
 	CapabilityDeploymentActivate = "deployment.activate"
 	CapabilityDeploymentCancel   = "deployment.cancel"
+	CapabilityCutoverRelease     = "deployment.cutover.release"
 	CapabilityInventoryPrepare   = "runtime.inventory.prepare"
 	CapabilityInventoryChunk     = "runtime.inventory.chunk"
 	CapabilityInventoryRelease   = "runtime.inventory.release"
@@ -20,6 +21,7 @@ var supportedCapabilities = []string{
 	CapabilityDeploymentStage,
 	CapabilityDeploymentActivate,
 	CapabilityDeploymentCancel,
+	CapabilityCutoverRelease,
 	CapabilityInventoryPrepare,
 	CapabilityInventoryChunk,
 	CapabilityInventoryRelease,
@@ -57,6 +59,8 @@ func RequiredCapability(kind AgentCommandKind) (string, bool) {
 		return CapabilityDeploymentActivate, true
 	case AgentCommandDeploymentCancel:
 		return CapabilityDeploymentCancel, true
+	case AgentCommandCutoverRelease:
+		return CapabilityCutoverRelease, true
 	case AgentCommandInventoryPrepare:
 		return CapabilityInventoryPrepare, true
 	case AgentCommandInventoryChunk:

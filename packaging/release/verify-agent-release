@@ -1,0 +1,90 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf '%s\n' "OwnDock Agent release verification failed: $1" >&2
+    exit 1
+}
+
+if [ "$#" -ne 4 ]; then
+    printf '%s\n' \
+        "usage: verify-agent-release VERSION ARCHIVE SHA256SUMS SIGSTORE_BUNDLE" >&2
+    exit 2
+fi
+
+version=$1
+archive=$2
+checksums=$3
+bundle=$4
+
+case "$version" in
+    ''|v*|*[!0-9A-Za-z.+-]*) fail "invalid version" ;;
+esac
+printf '%s\n' "$version" | grep -Eq \
+    '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || \
+    fail "invalid version"
+
+archive_name=${archive##*/}
+case "$archive_name" in
+    "owndock-agent_${version}_linux_amd64.tar.gz"|\
+    "owndock-agent_${version}_linux_arm64.tar.gz") ;;
+    *) fail "archive name does not match the requested version or supported architecture" ;;
+esac
+
+for release_file in "$archive" "$checksums" "$bundle"; do
+    [ -f "$release_file" ] && [ ! -L "$release_file" ] && [ -r "$release_file" ] || \
+        fail "release input must be a readable regular file, not a symlink"
+done
+
+amd64_name="owndock-agent_${version}_linux_amd64.tar.gz"
+arm64_name="owndock-agent_${version}_linux_arm64.tar.gz"
+awk -v amd64="$amd64_name" -v arm64="$arm64_name" '
+    BEGIN {
+        allowed["RELEASE.txt"] = 1
+        allowed[amd64] = 1
+        allowed[arm64] = 1
+        allowed["verify-owndock-agent-release"] = 1
+    }
+    {
+        if (NF != 2 || length($1) != 64 || $1 ~ /[^0-9a-f]/ ||
+            substr($0, 65, 2) != "  " || length($0) != 66 + length($2) ||
+            !($2 in allowed) || seen[$2]++) {
+            exit 1
+        }
+        count++
+    }
+    END {
+        if (count != 4) exit 1
+        for (name in allowed) if (!seen[name]) exit 1
+    }
+' "$checksums" || fail "checksum manifest is malformed, incomplete, or contains an unsafe name"
+
+cosign_binary=${OWNDOCK_COSIGN_BINARY:-cosign}
+command -v "$cosign_binary" >/dev/null 2>&1 || fail "cosign is not installed"
+
+identity="https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v${version}"
+set -- verify-blob "$checksums" \
+    --bundle "$bundle" \
+    --certificate-identity "$identity" \
+    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+    --offline
+if [ -n "${OWNDOCK_SIGSTORE_TRUSTED_ROOT:-}" ]; then
+    trusted_root=$OWNDOCK_SIGSTORE_TRUSTED_ROOT
+    [ -f "$trusted_root" ] && [ ! -L "$trusted_root" ] && [ -r "$trusted_root" ] || \
+        fail "trusted root must be a readable regular file, not a symlink"
+    set -- "$@" --trusted-root "$trusted_root"
+fi
+"$cosign_binary" "$@" >/dev/null || fail "Sigstore signature or release identity is invalid"
+
+expected_digest=$(awk -v name="$archive_name" '$2 == name { print $1 }' "$checksums")
+[ -n "$expected_digest" ] || fail "archive is not present in the signed checksum manifest"
+if command -v sha256sum >/dev/null 2>&1; then
+    actual_digest=$(sha256sum "$archive" | awk '{ print $1 }')
+elif command -v shasum >/dev/null 2>&1; then
+    actual_digest=$(shasum -a 256 "$archive" | awk '{ print $1 }')
+else
+    fail "sha256sum or shasum is required"
+fi
+[ "$actual_digest" = "$expected_digest" ] || fail "archive checksum does not match the signed manifest"
+
+printf '%s\n' "Verified OwnDock Agent ${version}: ${archive_name}"

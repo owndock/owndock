@@ -141,6 +141,27 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if cfg.Runtime.DeploymentWorker.Enabled {
 		t.Fatal("deployment worker must be disabled by default")
 	}
+	if !cfg.Runtime.BuildWorker.RequireWorkspaceQuota ||
+		cfg.Runtime.BuildWorker.WorkspaceHardQuotaBytesValue() != defaultBuildWorkspaceQuota {
+		t.Fatalf("Build Worker hard quota defaults = %t/%d",
+			cfg.Runtime.BuildWorker.RequireWorkspaceQuota,
+			cfg.Runtime.BuildWorker.WorkspaceHardQuotaBytesValue())
+	}
+	if cfg.Runtime.EvidenceWorker.Enabled ||
+		cfg.Runtime.EvidenceWorker.SyftExecutable != defaultEvidenceSyftPath ||
+		cfg.Runtime.EvidenceWorker.SyftVersion != "1.50.0" ||
+		cfg.Runtime.EvidenceWorker.CosignExecutable != defaultEvidenceCosignPath ||
+		cfg.Runtime.EvidenceWorker.CosignVersion != "3.0.6" ||
+		cfg.Runtime.EvidenceWorker.TrivyExecutable != defaultEvidenceTrivyPath ||
+		cfg.Runtime.EvidenceWorker.TrivyVersion != "0.74.0" ||
+		cfg.Runtime.EvidenceWorker.TrivyCacheDirectory != defaultEvidenceTrivyCache ||
+		cfg.Runtime.EvidenceWorker.TrustedRootsDirectory != defaultEvidenceTrustRoots ||
+		cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue() != defaultEvidenceDocumentBytes ||
+		cfg.Runtime.EvidenceWorker.MaxLayerBytesValue() != defaultEvidenceLayerBytes ||
+		cfg.Runtime.EvidenceWorker.VulnerabilityFreshness != defaultEvidenceScanFreshness.String() ||
+		cfg.Runtime.EvidenceWorker.MetricsAddressValue() != defaultEvidenceMetrics {
+		t.Fatalf("evidence worker defaults = %+v", cfg.Runtime.EvidenceWorker)
+	}
 	if cfg.Runtime.InventoryWorker.Enabled ||
 		cfg.Runtime.InventoryWorker.ConcurrencyValue() != defaultInventoryConcurrency ||
 		cfg.Runtime.InventoryWorker.EventConcurrencyValue() != defaultInventoryEventWorkers ||
@@ -249,11 +270,16 @@ func TestAgentServerValidationAndMaterialLoading(t *testing.T) {
 		HandshakeTimeout:     "5s", HeartbeatInterval: "10s",
 		HeartbeatTimeout: "30s", MaxFrameBytes: 65536,
 		OutboundBuffer: 32, CompletedCommandCache: 256,
-		ProtocolVersions: []string{"v1", "v1.1"},
+		ProtocolVersions: []string{"v1"},
 	}
 	if err := agent.Validate(true, true, true); err != nil {
 		t.Fatal(err)
 	}
+	agent.ProtocolVersions = []string{"v2"}
+	if err := agent.Validate(true, true, true); err == nil {
+		t.Fatal("Agent server accepted a protocol without an implemented wire adapter")
+	}
+	agent.ProtocolVersions = []string{"v1"}
 	t.Setenv("TEST_AGENT_SERVER_CERT", "certificate")
 	t.Setenv("TEST_AGENT_SERVER_KEY", "private-key")
 	certificate, privateKey, err := agent.Materials()
@@ -298,13 +324,34 @@ func TestBuildWorkerRequiresDedicatedBuildKitEndpoint(t *testing.T) {
 	worker := BuildWorker{
 		Enabled: true, PollInterval: "2s", LeaseDuration: "30s", OperationTimeout: "2h15m",
 		CheckoutTimeout: "10m", WorkspaceRoot: "/var/lib/owndock/builds",
-		MaxWorkspaceBytes: 5 * 1024 * 1024 * 1024, MaxWorkspaceFiles: 250000,
+		MaxWorkspaceBytes: 5 * 1024 * 1024 * 1024, MaxWorkspaceFiles: 250000, MaxWorkspaceDepth: 64,
 		GitExecutable: "git", GitVersion: "2.55.0",
-		BuildKitEndpoint: "unix:///run/owndock-buildkit/buildkitd.sock",
+		BuildKitEndpoint:    "unix:///run/owndock-buildkit/buildkitd.sock",
+		BuildEgressProxyURL: "http://build-egress-gateway:3128",
 	}
 	if err := worker.Validate(true); err != nil {
 		t.Fatalf("dedicated Unix BuildKit endpoint rejected: %v", err)
 	}
+	for _, proxyURL := range []string{
+		"", "https://build-egress-gateway:3128", "http://user:secret@build-egress-gateway:3128",
+		"http://build-egress-gateway:3128/path", "http://Build-Egress-Gateway:3128",
+	} {
+		invalid := worker
+		invalid.BuildEgressProxyURL = proxyURL
+		if err := invalid.Validate(true); err == nil {
+			t.Fatalf("Build Worker accepted unsafe egress proxy URL %q", proxyURL)
+		}
+	}
+	worker.MaxWorkspaceDepth = 7
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted an unsafe workspace path depth")
+	}
+	worker.MaxWorkspaceDepth = 64
+	worker.WorkspaceQuotaBytes = worker.MaxWorkspaceBytes - 1
+	if err := worker.Validate(true); err == nil {
+		t.Fatal("Build Worker accepted a hard quota smaller than the workspace byte limit")
+	}
+	worker.WorkspaceQuotaBytes = 8 * 1024 * 1024 * 1024
 	worker.BuildKitEndpoint = "unix:///var/run/docker.sock"
 	if err := worker.Validate(true); err == nil {
 		t.Fatal("Docker socket was accepted as BuildKit endpoint")
@@ -338,6 +385,97 @@ func TestBuildWorkerRequiresDedicatedBuildKitEndpoint(t *testing.T) {
 	worker.MetricsAddress = "http://127.0.0.1:9091"
 	if err := worker.Validate(true); err == nil {
 		t.Fatal("Build Worker accepted an invalid metrics address")
+	}
+}
+
+func TestBuildEgressGatewayRequiresExplicitSafeDestinations(t *testing.T) {
+	gateway := BuildEgress{
+		Enabled: true, Address: "0.0.0.0:3128", DialTimeout: "10s", IdleTimeout: "2m",
+		MaximumConnections: 128,
+		AllowedDestinations: []BuildEgressDestination{
+			{Authority: "registry-1.docker.io:443"},
+			{Authority: "registry.internal:5000", AllowPrivate: true},
+		},
+	}
+	if err := gateway.Validate(); err != nil {
+		t.Fatalf("valid Build egress gateway error = %v", err)
+	}
+	for name, mutate := range map[string]func(*BuildEgress){
+		"empty": func(item *BuildEgress) { item.AllowedDestinations = nil },
+		"duplicate": func(item *BuildEgress) {
+			item.AllowedDestinations = append(item.AllowedDestinations, item.AllowedDestinations[0])
+		},
+		"uppercase": func(item *BuildEgress) {
+			item.AllowedDestinations = []BuildEgressDestination{{Authority: "Registry.Example:443"}}
+		},
+		"userinfo": func(item *BuildEgress) {
+			item.AllowedDestinations = []BuildEgressDestination{{Authority: "user@registry.example:443"}}
+		},
+		"private without opt in": func(item *BuildEgress) {
+			item.AllowedDestinations = []BuildEgressDestination{{Authority: "10.0.0.1:443"}}
+		},
+		"loopback with opt in": func(item *BuildEgress) {
+			item.AllowedDestinations = []BuildEgressDestination{{Authority: "127.0.0.1:443", AllowPrivate: true}}
+		},
+		"link local with opt in": func(item *BuildEgress) {
+			item.AllowedDestinations = []BuildEgressDestination{{Authority: "169.254.169.254:80", AllowPrivate: true}}
+		},
+		"hostname bind": func(item *BuildEgress) { item.Address = "gateway:3128" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := gateway
+			invalid.AllowedDestinations = append([]BuildEgressDestination(nil), gateway.AllowedDestinations...)
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("unsafe Build egress gateway configuration accepted")
+			}
+		})
+	}
+}
+
+func TestEvidenceWorkerRequiresPinnedSyftAndMongoDB(t *testing.T) {
+	worker := EvidenceWorker{
+		Enabled: true, PollInterval: "2s", LeaseDuration: "30s", OperationTimeout: "30m",
+		SyftExecutable: "/usr/local/bin/syft", SyftVersion: "1.50.0",
+		CosignExecutable: "/usr/local/bin/cosign", CosignVersion: "3.0.6",
+		TrivyExecutable: "/usr/local/bin/trivy", TrivyVersion: "0.74.0",
+		TrivyCacheDirectory: "/var/lib/owndock/trivy-cache", VulnerabilityFreshness: "24h",
+		TrustedRootsDirectory: "/etc/owndock/trusted-roots",
+		MaxDocumentBytes:      16 * 1024 * 1024, MaxLayerBytes: 256 * 1024 * 1024,
+		MetricsAddress: "127.0.0.1:9092",
+	}
+	if err := worker.Validate(false); err == nil {
+		t.Fatal("Evidence Worker accepted disabled MongoDB")
+	}
+	if err := worker.Validate(true); err != nil {
+		t.Fatalf("valid Evidence Worker error = %v", err)
+	}
+	for name, mutate := range map[string]func(*EvidenceWorker){
+		"relative Syft":     func(item *EvidenceWorker) { item.SyftExecutable = "syft" },
+		"unpinned Syft":     func(item *EvidenceWorker) { item.SyftVersion = "1.51.0" },
+		"relative Cosign":   func(item *EvidenceWorker) { item.CosignExecutable = "cosign" },
+		"unpinned Cosign":   func(item *EvidenceWorker) { item.CosignVersion = "3.0.7" },
+		"relative Trivy":    func(item *EvidenceWorker) { item.TrivyExecutable = "trivy" },
+		"unpinned Trivy":    func(item *EvidenceWorker) { item.TrivyVersion = "0.75.0" },
+		"relative Trivy DB": func(item *EvidenceWorker) { item.TrivyCacheDirectory = "trivy-cache" },
+		"short freshness":   func(item *EvidenceWorker) { item.VulnerabilityFreshness = "30m" },
+		"relative roots":    func(item *EvidenceWorker) { item.TrustedRootsDirectory = "trusted-roots" },
+		"small report":      func(item *EvidenceWorker) { item.MaxDocumentBytes = 1024 },
+		"small layer":       func(item *EvidenceWorker) { item.MaxLayerBytes = 1024 },
+		"long operation": func(item *EvidenceWorker) {
+			item.OperationTimeout = "2h"
+		},
+		"remote metrics hostname": func(item *EvidenceWorker) {
+			item.MetricsAddress = "metrics.example.com:9092"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := worker
+			mutate(&invalid)
+			if err := invalid.Validate(true); err == nil {
+				t.Fatalf("invalid Evidence Worker accepted: %+v", invalid)
+			}
+		})
 	}
 }
 
@@ -402,6 +540,32 @@ func TestProductSourceProbeTimeoutValidation(t *testing.T) {
 	for _, value := range []string{"500ms", "31s", "invalid"} {
 		if err := (Product{SourceProbeTimeout: value}).Validate(); err == nil {
 			t.Errorf("Product timeout %q accepted", value)
+		}
+	}
+}
+
+func TestProductSourceGitNetworkValidation(t *testing.T) {
+	for _, product := range []Product{
+		{},
+		{SourceGitCACertFile: "/etc/owndock/git/ca.pem"},
+		{SourceGitHTTPSProxy: "http://proxy.internal:3128"},
+		{SourceGitHTTPSProxy: "https://127.0.0.1:8443"},
+	} {
+		if err := product.Validate(); err != nil {
+			t.Errorf("Product %+v error = %v", product, err)
+		}
+	}
+	for _, product := range []Product{
+		{SourceGitCACertFile: "relative/ca.pem"},
+		{SourceGitCACertFile: " /etc/ca.pem"},
+		{SourceGitHTTPSProxy: "http://user:secret@proxy.internal:3128"},
+		{SourceGitHTTPSProxy: "http://proxy.internal:3128/path"},
+		{SourceGitHTTPSProxy: "socks5://proxy.internal:1080"},
+		{SourceGitHTTPSProxy: "http://PROXY.internal:3128"},
+		{SourceGitHTTPSProxy: "http://proxy.internal:65536"},
+	} {
+		if err := product.Validate(); err == nil {
+			t.Errorf("Product %+v accepted", product)
 		}
 	}
 }

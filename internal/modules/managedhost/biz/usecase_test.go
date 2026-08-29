@@ -17,6 +17,52 @@ type repositoryStub struct {
 	identities  []AgentIdentity
 }
 
+type enrollmentRecoveryRecord struct {
+	tokenHash    string
+	requestHash  string
+	recoverUntil time.Time
+	credentials  AgentCredentials
+}
+
+type recoverableRepositoryStub struct {
+	*repositoryStub
+	recovery enrollmentRecoveryRecord
+}
+
+func (r *recoverableRepositoryStub) ActivateAgentRecoverable(
+	ctx context.Context,
+	enrollmentID, tokenHash string,
+	now time.Time,
+	identity AgentIdentity,
+	recovery EnrollmentRecovery,
+) error {
+	if err := r.ActivateAgent(ctx, enrollmentID, tokenHash, now, identity); err != nil {
+		return err
+	}
+	r.recovery = enrollmentRecoveryRecord{
+		tokenHash: tokenHash, requestHash: recovery.RequestSHA256,
+		recoverUntil: recovery.RecoverUntil,
+		credentials: AgentCredentials{
+			Identity:         identity,
+			CertificatePEM:   append([]byte(nil), recovery.CertificatePEM...),
+			CACertificatePEM: append([]byte(nil), recovery.CACertificatePEM...),
+		},
+	}
+	return nil
+}
+
+func (r *recoverableRepositoryStub) RecoverAgentEnrollment(
+	_ context.Context,
+	tokenHash, requestHash string,
+	now time.Time,
+) (AgentCredentials, bool, error) {
+	if r.recovery.tokenHash == tokenHash && r.recovery.requestHash == requestHash &&
+		r.recovery.recoverUntil.After(now) {
+		return r.recovery.credentials, true, nil
+	}
+	return AgentCredentials{}, false, nil
+}
+
 func (r *repositoryStub) AuthenticateAgent(
 	_ context.Context,
 	certificate AgentCertificateIdentity,
@@ -499,6 +545,85 @@ func TestAgentEnrollmentTokenIsOneTimeAndCreatesFixedIdentity(t *testing.T) {
 		nil, []byte("csr"), "request-3",
 	); err != ErrInvalidEnrollment {
 		t.Fatalf("replay error = %v", err)
+	}
+}
+
+func TestAgentEnrollmentRecoversOnlyTheExactOriginalExchange(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	repository := &recoverableRepositoryStub{repositoryStub: &repositoryStub{
+		items: []ManagedHost{{
+			ID: "host-1", OrganizationID: "organization-1",
+			Name: "Private Host", Status: StatusEnrolling,
+			ConnectionMode: runtimeaccess.ModeAgent,
+		}},
+	}}
+	audits := &auditStub{}
+	issuer := &countingCertificateIssuerStub{}
+	ids := []string{"enrollment-1", "audit-1", "identity-1", "audit-2"}
+	useCase := NewUseCase(
+		repository, transaction.Passthrough{}, audits,
+		func() (string, error) {
+			value := ids[0]
+			ids = ids[1:]
+			return value, nil
+		},
+		func() time.Time { return now },
+	).WithEnrollment(repository, enrollmentTokensStub{}, issuer, 15*time.Minute)
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleOwner,
+	}
+	enrollment, err := useCase.CreateEnrollment(t.Context(), owner, "host-1", "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	arguments := []string{"runtime.probe", "deployment.prepare"}
+	first, err := useCase.ExchangeEnrollment(
+		t.Context(), enrollment.Token, "instance-1", "1.0.0", "v1",
+		arguments, []byte("same-csr"), "request-2",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := useCase.ExchangeEnrollment(
+		t.Context(), enrollment.Token, "instance-1", "1.0.0", "v1",
+		arguments, []byte("same-csr"), "request-retry",
+	)
+	if err != nil || recovered.Identity.ID != first.Identity.ID ||
+		string(recovered.CertificatePEM) != string(first.CertificatePEM) ||
+		issuer.calls != 1 || len(audits.events) != 2 {
+		t.Fatalf("first=%+v recovered=%+v err=%v calls=%d audits=%d", first, recovered, err, issuer.calls, len(audits.events))
+	}
+	if _, err := useCase.ExchangeEnrollment(
+		t.Context(), enrollment.Token, "instance-1", "1.0.0", "v1",
+		arguments, []byte("different-csr"), "request-conflict",
+	); err != ErrInvalidEnrollment {
+		t.Fatalf("conflicting recovery error = %v", err)
+	}
+	now = now.Add(agentEnrollmentRecoveryWindow + time.Second)
+	if _, err := useCase.ExchangeEnrollment(
+		t.Context(), enrollment.Token, "instance-1", "1.0.0", "v1",
+		arguments, []byte("same-csr"), "request-expired",
+	); err != ErrInvalidEnrollment {
+		t.Fatalf("expired recovery error = %v", err)
+	}
+}
+
+func TestEnrollmentRequestHashUsesUnambiguousOrderedParts(t *testing.T) {
+	first := enrollmentRequestHash("instance", "1.0.0", "v1", []string{"ab", "c"}, []byte("csr"))
+	if first == "" || first != enrollmentRequestHash(
+		"instance", "1.0.0", "v1", []string{"ab", "c"}, []byte("csr"),
+	) {
+		t.Fatalf("request hash is not stable: %q", first)
+	}
+	for _, conflict := range []string{
+		enrollmentRequestHash("instance", "1.0.0", "v1", []string{"a", "bc"}, []byte("csr")),
+		enrollmentRequestHash("instance", "1.0.0", "v1", []string{"c", "ab"}, []byte("csr")),
+		enrollmentRequestHash("instance", "1.0.0", "v1", []string{"ab", "c"}, []byte("other")),
+	} {
+		if conflict == first {
+			t.Fatal("distinct enrollment requests shared a fingerprint")
+		}
 	}
 }
 

@@ -45,6 +45,7 @@ type UseCase struct {
 	managedHosts     ManagedHostLookup
 	registries       RegistryCredentialRepository
 	environments     EnvironmentRepository
+	templates        TemplateCatalog
 	transaction      transaction.Manager
 	audit            sharedaudit.Recorder
 	auditReader      sharedaudit.Reader
@@ -54,6 +55,11 @@ type UseCase struct {
 
 func (u *UseCase) WithProjectMembers(repository ProjectMemberRepository) *UseCase {
 	u.members = repository
+	return u
+}
+
+func (u *UseCase) WithTemplates(catalog TemplateCatalog) *UseCase {
+	u.templates = catalog
 	return u
 }
 
@@ -335,6 +341,43 @@ func (u *UseCase) CreateApplication(
 	principal security.Principal,
 	projectID, name, requestID string,
 ) (Application, error) {
+	return u.CreateApplicationFromTemplate(
+		ctx, principal, projectID, name, "", requestID,
+	)
+}
+
+func (u *UseCase) ListTemplates(
+	ctx context.Context,
+	principal security.Principal,
+) ([]Template, error) {
+	if err := principal.Require(security.PermissionApplicationRead); err != nil {
+		return nil, err
+	}
+	if u.templates == nil {
+		return nil, ErrInvalidTemplate
+	}
+	return u.templates.ListTemplates(ctx)
+}
+
+func (u *UseCase) GetTemplate(
+	ctx context.Context,
+	principal security.Principal,
+	templateID string,
+) (Template, error) {
+	if err := principal.Require(security.PermissionApplicationRead); err != nil {
+		return Template{}, err
+	}
+	if u.templates == nil {
+		return Template{}, ErrInvalidTemplate
+	}
+	return u.templates.GetTemplate(ctx, strings.TrimSpace(templateID))
+}
+
+func (u *UseCase) CreateApplicationFromTemplate(
+	ctx context.Context,
+	principal security.Principal,
+	projectID, name, templateID, requestID string,
+) (Application, error) {
 	if err := principal.Require(security.PermissionApplicationWrite); err != nil {
 		return Application{}, err
 	}
@@ -345,7 +388,21 @@ func (u *UseCase) CreateApplication(
 	if err != nil {
 		return Application{}, err
 	}
-	item, err := NewApplication(id, projectID, name, principal.UserID, now)
+	var selected *Template
+	templateID = strings.TrimSpace(templateID)
+	if templateID != "" {
+		if u.templates == nil {
+			return Application{}, ErrInvalidTemplate
+		}
+		template, templateErr := u.templates.GetTemplate(ctx, templateID)
+		if templateErr != nil {
+			return Application{}, templateErr
+		}
+		selected = &template
+	}
+	item, err := NewApplicationFromTemplate(
+		id, projectID, name, principal.UserID, now, selected,
+	)
 	if err != nil {
 		return Application{}, err
 	}
@@ -355,7 +412,11 @@ func (u *UseCase) CreateApplication(
 			return err
 		}
 		item = created
-		return u.record(transactionContext, principal, auditID, "application.create", "application", item.ID, projectID, requestID, now)
+		action := "application.create"
+		if item.TemplateSnapshot != nil {
+			action = "application.create_from_template"
+		}
+		return u.record(transactionContext, principal, auditID, action, "application", item.ID, projectID, requestID, now)
 	})
 	return item, err
 }

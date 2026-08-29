@@ -2,7 +2,7 @@
 
 OwnDock Agent 适合控制面无法主动访问的内网主机。主机上的 Agent 后续会主动向 OwnDock Server 建立出站连接；管理员不需要为了部署而把 Docker API 或 SSH 端口暴露到公网。
 
-当前已实现首次接入身份、双端控制连接和认证证书轮换：Owner 创建一次性接入凭据，Agent 在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。兑换时提交的 capabilities 会写入 Agent Identity，成为该身份的能力授权上限；后续 mTLS hello 只能声明其子集，不能通过重连自行增加权限。`owndock-agent` 可以使用已落盘的证书通过独立 TLS 1.3 端口完成身份校验、`v1` 协商、心跳和安全重连，Server 据此维护 `online/offline`；受控协议可执行本机 Docker probe、两阶段 Deployment、Runtime Inventory，以及分别授权的 `terminal.container` 和 `terminal.host` 临时会话。证书到期前由 Agent 本地生成新私钥和 CSR，以可恢复的幂等请求轮换，并在新证书 hello 成功后立即清除旧证书。自动生成首次私钥、兑换 enrollment 并安装配置的发行安装器仍未实现；真实双主机、断线、轮换故障注入和网络分区系统验收也仍待完成。
+当前已实现首次接入身份、自动安装客户端、双端控制连接和认证证书轮换：Owner 创建一次性接入凭据，安装器在主机本地生成私钥和 CSR，Server 签发只用于客户端认证的证书，并把证书固定到 Organization、Managed Host、Agent Identity 和本次安装实例。兑换时提交的 capabilities 会写入 Agent Identity，成为该身份的能力授权上限；后续 mTLS hello 只能声明其子集，不能通过重连自行增加权限。`owndock-agent` 可以使用已落盘的证书通过独立 TLS 1.3 端口完成身份校验、`v1` 协商、心跳和安全重连，Server 据此维护 `online/offline`；受控协议可执行本机 Docker probe、两阶段 Deployment、Runtime Inventory，以及分别授权的 `terminal.container` 和 `terminal.host` 临时会话。首次兑换和后续证书轮换都支持严格的同请求响应丢失恢复。真实双主机、断线、轮换故障注入和网络分区系统验收仍待完成。
 
 ## 通俗理解
 
@@ -32,6 +32,12 @@ sequenceDiagram
     API->>CA: 校验 CSR 并签发 clientAuth 证书
     API->>DB: 同一事务消费 token、创建固定身份、绑定 Host、写审计
     API-->>A: Agent 证书 + CA 证书
+    A->>A: 先持久化 pending，再原子安装 CA/identity/config
+    opt 原响应丢失，10 分钟内恢复
+        A->>API: 相同 token + CSR + instance/version/capabilities
+        API->>DB: 精确请求 SHA-256 匹配
+        API-->>A: 返回原 Identity 和原证书，不重复审计
+    end
     Note over A: 私钥始终只保存在 Agent 主机
     Note over A,API: 后续使用证书建立独立 mTLS 控制连接
 ```
@@ -43,12 +49,14 @@ sequenceDiagram
 3. Server 返回 `enrollment_token` 和 `expires_at`，并设置 `Cache-Control: no-store`。原始 token 不写入 MongoDB，也不会再次显示；
 4. Agent 在目标主机本地生成私钥和 CSR；
 5. Agent 调用无需用户 Bearer token 的 `POST /api/v1/agent/enrollments:exchange`，提交一次性 token、CSR、instance ID、Agent/协议版本和能力；
-6. Server 返回 Agent 证书、CA 证书和证书过期时间，并原子消费 token。过期、重复使用、Host 已禁用或跨 Host 的请求都会失败；
+6. Server 返回 Agent 证书、CA 证书和证书过期时间，并原子消费 token。token 不能用于不同 CSR、instance、版本或能力；仅允许完全相同的请求在 10 分钟内取回同一响应，用于处理提交后响应丢失；
 7. Owner 可调用 `POST /api/v1/managed-hosts/{managed_host_id}:disable` 禁用 Host。该操作同时使未使用 enrollment 过期，并在数据库中吊销当前 Agent Identity。
 
 完整字段和错误码以 [OpenAPI](../api/openapi.yaml) 为准。
 
-当前安装步骤仍需要管理员或安装脚本把兑换得到的 CA、Agent 证书和本机私钥安全写入主机，然后填写 Agent 配置；正式自动化安装器尚未交付。推荐把 Agent 证书与私钥组合为同一个 `0600` identity bundle，并让两个配置路径都指向它，这样后续轮换可以一次原子替换证书/密钥对，不会因进程崩溃只更新一半。进程构建和运行配置见 [Agent 运行与配置](agent.md)。
+`owndock-agentctl enroll` 只从 root 私有普通文件读取 token，不接受 token 参数或环境变量；它生成稳定 instance ID、Ed25519 私钥和 CSR，禁用代理与重定向，严格校验 HTTPS、证书链、clientAuth、有效期、密钥配对和固定 SPIFFE 身份。CSR 和私钥会在请求前先进入 `0600` pending，网络结果不确定时用原 token 和参数重跑会复用同一 CSR；响应持久化后，再原子安装只读 CA、单文件 identity bundle 和配置。`enroll --recover` 用于响应已经落入 pending、但本地配置提交中断的情况，不会再次使用 token。安装流程见 [Agent 安装、升级与回滚](agent-installation.md)，进程配置见 [Agent 运行与配置](agent.md)。
+
+Linux 系统门禁还会通过真实 `owndock-agent enroll` 进程验证两段恢复路径：bootstrap 服务收到请求后直接断开连接时，本机会保留请求阶段并在重试时发送完全相同的 CSR 和元数据；服务返回证书后，如果本地目标被符号链接安全检查拒绝，响应阶段会保留，删除不安全目标后可用 `enroll --recover` 在 token 已删除的情况下完成安装。测试同时检查 token 不进入 pending、配置、身份文件或日志。该流程已在隔离 Linux 容器中以 root 使用真实系统路径完整通过，并会继续由 GitHub Linux runner 执行。
 
 ## Server 配置
 
@@ -93,11 +101,11 @@ server:
 
 ## 安全边界
 
-- MongoDB 只保存 enrollment token 的 SHA-256 hash、证书序列号和 SHA-256 指纹；
+- MongoDB 永不保存原始 enrollment token，只保存 SHA-256 hash；首次提交后的 10 分钟恢复窗口还会保存精确请求 hash、Identity ID 与已签发的公开证书/CA，TTL 到期后自动删除；
 - Server 不接受 Agent 上传的证书身份字段，证书 Subject 和 SPIFFE URI 由服务端生成；
 - CSR 必须自签名有效，并使用 RSA 2048 位以上、ECDSA P-256 以上或 Ed25519 公钥；
 - 签发证书只有 `clientAuth` 用途，不可充当 Server 证书；
-- 同一 Host 只能激活一个首次接入身份；重复请求依赖 MongoDB 事务和条件更新拒绝；
-- Host 禁用后的数据库吊销、当前单实例连接取消以及重连/heartbeat 身份检查已经实现；证书安全轮换已实现本地 pending 恢复、Server 幂等响应、最多 10 分钟旧证书普通连接过渡和新 hello 确认；窗口结束后，仍有效的旧证书只能取回完全匹配的 pending 响应。仍需多控制面实例跨进程断流与真实故障系统验收；
+- 同一 Host 只能激活一个首次接入身份；仅原 token 与完全相同 CSR/元数据可在 10 分钟内返回原响应，任何冲突重放都由 MongoDB 条件更新拒绝；
+- Host 禁用后的数据库吊销、当前单实例连接取消以及重连/heartbeat 身份检查已经实现；证书安全轮换已实现本地 pending 恢复、Server 幂等响应、最多 10 分钟旧证书普通连接过渡和新 hello 确认；窗口结束后，仍有效的旧证书只能取回完全匹配的 pending 响应。enrollment 的真实进程断连与本地提交中断门禁已在隔离 Linux root 路径通过；证书轮换的真实进程响应丢失、Agent 重启、同请求恢复和新证书 hello 也已通过。仍需 GitHub Linux 系统门禁首次执行、更多精确崩溃点以及多控制面实例跨进程断流系统验收；
 - enrollment 保存的 capabilities 是身份授权上限；hello 能力必须是其子集，Server 路由还会在每次命令或终端会话入队前检查对应 capability；
 - API、Access Log、Trace、审计和测试产物不得记录原始 token、私钥或 CSR 私钥材料。

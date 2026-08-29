@@ -12,6 +12,7 @@ import (
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	agentcontrol "github.com/owndock/owndock/internal/agent/control"
 	agentruntime "github.com/owndock/owndock/internal/agent/runtime"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
 
 const serviceName = "owndock-agent"
@@ -36,6 +37,9 @@ func main() {
 }
 
 func run(ctx context.Context, arguments []string) error {
+	if len(arguments) > 0 && arguments[0] == "enroll" {
+		return runEnrollment(ctx, arguments[1:])
+	}
 	flags := flag.NewFlagSet(serviceName, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	var configPath string
@@ -211,7 +215,7 @@ func run(ctx context.Context, arguments []string) error {
 	logger.Info(
 		"Agent started",
 		"runtime", "docker",
-		"protocol.version", "v1",
+		"protocol.version", agentprotocol.Version,
 	)
 	if certificateRotator == nil {
 		err = runner.Run(ctx)

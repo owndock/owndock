@@ -65,7 +65,7 @@ func TestBuildKitGatewayUsesPinnedFrontendAndReturnsCanonicalDigest(t *testing.T
 		}},
 	}
 	gateway, err := newBuildKitGateway(t.Context(), registrySecretResolverStub{secret: secret},
-		PinnedBuildKitVersion, func(context.Context) (buildKitClient, error) { return client, nil })
+		PinnedBuildKitVersion, "http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,6 +81,16 @@ func TestBuildKitGatewayUsesPinnedFrontendAndReturnsCanonicalDigest(t *testing.T
 		client.opt.FrontendAttrs["filename"] != "Dockerfile" ||
 		client.opt.FrontendAttrs["platform"] != "linux/amd64" {
 		t.Fatalf("frontend options = %+v", client.opt)
+	}
+	for _, name := range []string{
+		"build-arg:HTTP_PROXY", "build-arg:HTTPS_PROXY", "build-arg:http_proxy", "build-arg:https_proxy",
+	} {
+		if client.opt.FrontendAttrs[name] != "http://build-egress-gateway:3128" {
+			t.Fatalf("%s = %q", name, client.opt.FrontendAttrs[name])
+		}
+	}
+	if client.opt.FrontendAttrs["build-arg:NO_PROXY"] != "" || client.opt.FrontendAttrs["build-arg:no_proxy"] != "" {
+		t.Fatalf("NO_PROXY bypass was configured: %+v", client.opt.FrontendAttrs)
 	}
 	if len(client.opt.Exports) != 1 || client.opt.Exports[0].Attrs["push"] != "true" ||
 		client.opt.Exports[0].Attrs["name-canonical"] != "true" ||
@@ -115,7 +125,7 @@ func TestBuildKitGatewayPersistsOnlyRedactedStreamingStatus(t *testing.T) {
 		},
 	}
 	gateway, err := newBuildKitGateway(t.Context(), registrySecretResolverStub{secret: secret},
-		PinnedBuildKitVersion, func(context.Context) (buildKitClient, error) { return client, nil })
+		PinnedBuildKitVersion, "http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +151,7 @@ func TestBuildKitGatewayRejectsMutableDockerfileFrontend(t *testing.T) {
 	}
 	client := &buildKitClientStub{version: PinnedBuildKitVersion}
 	gateway, err := newBuildKitGateway(t.Context(), registrySecretResolverStub{secret: []byte("secret")},
-		PinnedBuildKitVersion, func(context.Context) (buildKitClient, error) { return client, nil })
+		PinnedBuildKitVersion, "http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +198,7 @@ func TestBuildKitGatewayRejectsOversizedAndSymlinkedBuildInputsBeforeSolve(t *te
 			client := &buildKitClientStub{version: PinnedBuildKitVersion}
 			secret := []byte("must-not-be-resolved")
 			gateway, err := newBuildKitGateway(t.Context(), registrySecretResolverStub{secret: secret},
-				PinnedBuildKitVersion, func(context.Context) (buildKitClient, error) { return client, nil })
+				PinnedBuildKitVersion, "http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -208,7 +218,7 @@ func TestBuildKitGatewayRejectsOversizedAndSymlinkedBuildInputsBeforeSolve(t *te
 func TestBuildKitGatewayRequiresExactDaemonVersion(t *testing.T) {
 	client := &buildKitClientStub{version: "v0.31.1"}
 	_, err := newBuildKitGateway(t.Context(), registrySecretResolverStub{secret: []byte("secret")},
-		PinnedBuildKitVersion, func(context.Context) (buildKitClient, error) { return client, nil })
+		PinnedBuildKitVersion, "http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
 	if err != ErrBuildKitVersionMismatch {
 		t.Fatalf("version mismatch error = %v", err)
 	}
@@ -232,6 +242,14 @@ func TestBuildKitGatewayPreservesCancellationAndClassifiesSafeErrors(t *testing.
 		if err := classifyBuildKitError(t.Context(), t.Context(), errors.New(message)); err != biz.ErrBuildResourceLimit {
 			t.Fatalf("resource error %q classified as %v", message, err)
 		}
+	}
+	if err := classifyBuildKitError(t.Context(), t.Context(),
+		errors.New("wget: server returned error: HTTP/1.1 451 Unavailable For Legal Reasons")); err != biz.ErrBuildNetworkDenied {
+		t.Fatalf("egress policy error classified as %v", err)
+	}
+	if err := classifyBuildKitError(t.Context(), t.Context(),
+		errors.New("process failed while contacting denied-egress.example")); err != biz.ErrBuildExecutionFailed {
+		t.Fatalf("hostname containing denied classified as %v", err)
 	}
 }
 

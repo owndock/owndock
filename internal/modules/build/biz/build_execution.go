@@ -10,6 +10,7 @@ var (
 	ErrInvalidBuildExecution     = errors.New("build execution request is invalid")
 	ErrBuildKitUnavailable       = errors.New("BuildKit is unavailable")
 	ErrBuildExecutionFailed      = errors.New("image build failed")
+	ErrBuildNetworkDenied        = errors.New("build network policy denied egress")
 	ErrBuildResourceLimit        = errors.New("build resource limit exceeded")
 	ErrRegistryAuthentication    = errors.New("registry authentication failed")
 	ErrRegistryPushFailed        = errors.New("registry push failed")

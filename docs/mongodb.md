@@ -36,7 +36,7 @@ database:
 - Kratos 停止接收请求后关闭连接池；
 - 业务模块不能直接创建 Client，也不能从 `internal/platform/mongo` 推导业务 schema。
 
-正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`user_invitations`、`sessions`、`login_attempts`、`managed_hosts`、`agent_enrollments`、`agent_identities`、`projects`、`project_members`、`product_applications`、`releases`、`registry_credentials`、`repository_credentials`、`source_repositories`、`build_configurations`、`build_triggers`、`build_trigger_rate_limits`、`build_hooks`、`webhook_deliveries`、`builds`、`environments`、`runtime_targets`、`deployments`、`deployment_cutover_sequences`、`runtime_inventory_observations`、`runtime_inventory_chunks`、`runtime_inventory_resources`、`runtime_inventory_heads`、`runtime_inventory_counters`、`runtime_inventory_schedule`、`runtime_inventory_current`、`runtime_inventory_event_hints`、`ingress_rate_limits`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。
+正式资源创建与对应审计事件在同一 MongoDB 事务中提交。Bootstrap 的 Organization、Owner、Session 与审计同样保持原子性。当前 collection 包括 `organizations`、`users`、`user_invitations`、`sessions`、`login_attempts`、`managed_hosts`、`agent_enrollments`、`agent_identities`、`projects`、`project_members`、`product_applications`、`releases`、`registry_credentials`、`repository_credentials`、`source_repositories`、`build_configurations`、`build_triggers`、`build_trigger_rate_limits`、`build_hooks`、`webhook_deliveries`、`builds`、`artifacts`、`artifact_evidence`、`environments`、`runtime_targets`、`deployments`、`deployment_cutover_sequences`、`runtime_inventory_observations`、`runtime_inventory_chunks`、`runtime_inventory_resources`、`runtime_inventory_heads`、`runtime_inventory_counters`、`runtime_inventory_schedule`、`runtime_inventory_current`、`runtime_inventory_event_hints`、`ingress_rate_limits`、`audit_events` 和 migration 元数据；索引只由版本化 migration 管理。
 
 Repository Credential 文档保存 `secret_ref`，公开列表查询在 MongoDB projection 层直接排除该字段。Source Repository 探测不保存 Token、私钥、远端 refs 或原始 Git 错误，只在同一事务中更新安全 `status`、`last_probed_at`、`updated_at` 和对应 Audit Event。
 
@@ -48,11 +48,15 @@ Build queue 直接复用 `builds` collection，不额外引入消息队列。Wor
 
 Build 日志使用 `build_log_streams` 保存每个 Build 的总字节、下一序号、截断和到期元数据，使用 `build_log_chunks` 保存按 sequence 排序的脱敏文本。每块分配 sequence 与插入正文处于同一 Replica Set 事务；Project + Build + sequence 索引用于 cursor 增量读取，两个 collection 都有 TTL 索引。默认每 Build 10 MiB、每块 16 KiB、保留 7 天；达到上限后只把 stream 标记为 `truncated`，不继续增长。详见 [Build 日志与排障](build-logs.md)。
 
+`artifact_evidence` 只保存绑定 Artifact/subject digest 的证据索引，包括 kind、媒体类型、格式版本、producer、OCI descriptor digest 和验证状态。完整 SBOM、Provenance、签名 bundle 或漏洞报告不嵌入 MongoDB。Project + Artifact + 创建时间支持稳定列表；Project + Artifact + kind + producer + format version + descriptor digest 只拒绝完全相同的证据，允许以后重新扫描并保留历史。持久化数据读取时重新执行领域校验，损坏 digest 或枚举值失败关闭。详见 [Artifact Evidence](artifact-evidence.md)。
+
+`artifact_evidence_jobs` 保存 Evidence Worker 的有界执行状态，不保存报告正文。队列按状态、lease 到期时间和创建时间领取；Organization + Project + 请求幂等键防止同一次请求重复排队，同时允许使用新幂等键重试或重扫。Worker 接管时递增 generation，最终 Evidence 索引与 Job 成功状态在 MongoDB Replica Set 事务内共同提交，过期 generation 的事务失败并回滚。
+
 Build Trigger 保存绑定范围、精确允许 ref、状态和 Token SHA-256 哈希，不保存可调用的明文 Token；列表查询在 MongoDB projection 层排除 `token_hash`。Project + normalized name 和 Token hash 分别唯一。`build_trigger_rate_limits` 使用 revision 条件更新实现多 Server 共享固定窗口，并由 TTL 索引自动回收过期计数；Trigger 和 Webhook Hook 使用不同键前缀，ID 相同也不会共享计数。该集合不保存请求正文、Commit、Token、Webhook 签名或 Secret。
 
 Build Hook 保存平台、Build Configuration、精确允许 ref 和外部 `secret_ref`；公开列表 projection 不返回该引用，只返回 `secret_configured`。`webhook_deliveries` 以 provider + Hook + delivery ID 唯一，并在同一事务内关联 queued Build 和审计。该 collection 不保存原始 body、签名或 Secret，也不设置 TTL，避免自动过期后的旧 delivery 再次触发。
 
-`login_attempts` 只保存 normalized email 的 SHA-256 键、窗口、计数和阻断/过期时间，通过 revision 条件更新避免多实例并发绕过限制，成功登录会删除记录。新 Session 与“只保留该用户最新 N 个未过期 Session”的清理处于同一事务；Session 查询和撤销都固定当前 `user_id`，撤销与审计也原子提交，API 永不返回 `token_hash`。Agent enrollment 只保存 token 的 SHA-256 hash；兑换时在事务中条件消费 token、创建固定身份并绑定 Host，重复兑换会整体回滚。Agent 连接在 `managed_hosts` 保存当前 boot/session fence、版本、能力和 `last_seen_at`；heartbeat 与 disconnect 必须匹配当前 session，避免旧连接覆盖新连接状态，连接/断开审计仍使用事务。
+`login_attempts` 只保存 normalized email 的 SHA-256 键、窗口、计数和阻断/过期时间，通过 revision 条件更新避免多实例并发绕过限制，成功登录会删除记录。新 Session 与“只保留该用户最新 N 个未过期 Session”的清理处于同一事务；Session 查询和撤销都固定当前 `user_id`，撤销与审计也原子提交，API 永不返回 `token_hash`。Agent enrollment 只保存 token 的 SHA-256 hash；首次兑换在事务中条件消费 token、创建固定身份并绑定 Host。为恢复提交后的响应丢失，enrollment 最多 10 分钟保存精确请求 SHA-256、已签发的公开证书/CA 和 Identity ID；只有同 token hash 与同请求 hash 可以取回原响应，不创建第二身份或审计，不同请求仍整体拒绝。Agent 连接在 `managed_hosts` 保存当前 boot/session fence、版本、能力和 `last_seen_at`；heartbeat 与 disconnect 必须匹配当前 session，避免旧连接覆盖新连接状态，连接/断开审计仍使用事务。
 
 Owner 管理员会话接口先按 Organization 读取目标用户，再以目标 `user_id` 查询或删除 Session。单会话和全部会话撤销都在事务中写入管理员审计；跨 Organization 用户按不存在处理。当前 Owner 不能从管理员入口撤销自己的当前 Session 或批量撤销自己，避免误操作切断唯一管理入口。
 
@@ -82,7 +86,7 @@ Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Targe
 make check
 ```
 
-MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、共享登录尝试并发阈值与成功清理、活跃 Session 上限/自助及管理员撤销、来源入口并发阈值与 TTL 索引、Agent token 只存哈希/原子消费/重放回滚、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、Runtime Inventory open TTL/分块幂等/显式 present/absent/恢复/旧批次 fence/1,202 资源批量归属核验/Project 与 Host 最大页长分页隔离/全量与 Event 并发租约/Event 与 Finish 竞态/失败不推进游标、审计原子回滚和注销失效：
+MongoDB 集成测试使用 Testcontainers 启动固定镜像的单节点 Replica Set，并验证连接、Ping、事务、migration 幂等、认证会话、共享登录尝试并发阈值与成功清理、活跃 Session 上限/自助及管理员撤销、来源入口并发阈值与 TTL 索引、Agent token 只存哈希/原子消费/同请求恢复/冲突重放拒绝、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、Runtime Inventory open TTL/分块幂等/显式 present/absent/恢复/旧批次 fence/1,202 资源批量归属核验/Project 与 Host 最大页长分页隔离/全量与 Event 并发租约/Event 与 Finish 竞态/失败不推进游标、审计原子回滚和注销失效：
 
 ```bash
 make test-integration

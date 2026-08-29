@@ -56,6 +56,18 @@ type artifactReleaseCreatorStub struct {
 	err       error
 }
 
+type artifactEvidenceSchedulerStub struct {
+	artifact biz.Artifact
+	err      error
+}
+
+func (s *artifactEvidenceSchedulerStub) EnsureArtifactEvidence(
+	_ context.Context, artifact biz.Artifact,
+) error {
+	s.artifact = artifact
+	return s.err
+}
+
 type buildLogWriterStub struct {
 	items []biz.BuildLogAppend
 	err   error
@@ -94,6 +106,8 @@ func TestRunnerChecksOutBuildsAndRecordsPushedDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	controller.WithArtifacts(queue)
+	evidence := &artifactEvidenceSchedulerStub{}
+	controller.WithArtifactEvidence(evidence)
 	checkout := &checkoutStub{}
 	builder := &buildExecutorStub{output: biz.BuildExecutionOutput{
 		ImageDigest: "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
@@ -137,6 +151,9 @@ func TestRunnerChecksOutBuildsAndRecordsPushedDigest(t *testing.T) {
 		audit.events[5].Action != "build.succeeded" || len(queue.artifacts) != 1 ||
 		queue.item.ArtifactID != queue.artifacts[0].ID {
 		t.Fatalf("audit events = %+v", audit.events)
+	}
+	if evidence.artifact.ID != queue.artifacts[0].ID || evidence.artifact.ImageDigest != builder.output.ImageDigest {
+		t.Fatalf("Evidence scheduling Artifact = %+v", evidence.artifact)
 	}
 	if len(logs.items) < 6 || logs.items[0].Stage != biz.BuildLogStageSystem ||
 		logs.items[1].Stage != biz.BuildLogStageCheckout ||
@@ -302,6 +319,35 @@ func TestRunnerMapsBuildKitDiskExhaustionWithoutPublishingOrLeaking(t *testing.T
 	}
 	if strings.Contains(err.Error(), "/secret/customer/path") || errors.Is(err, builderCause) {
 		t.Fatalf("disk exhaustion detail leaked: %v", err)
+	}
+}
+
+func TestRunnerMapsBuildNetworkPolicyWithoutPublishingOrLeaking(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	queue := &queueStub{item: checkoutTestBuild(now)}
+	controller, err := NewController(queue, transaction.Passthrough{}, &auditStub{},
+		func() (string, error) { return "audit-1", nil }, func() time.Time { return now }, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	controller.WithArtifacts(queue)
+	workspace, err := NewLocalWorkspace(filepath.Join(t.TempDir(), "builds"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cause := fmt.Errorf("destination token=do-not-leak: %w", biz.ErrBuildNetworkDenied)
+	runner, err := NewRunner(controller, checkoutSources(), checkoutRegistries(), &checkoutStub{},
+		&buildExecutorStub{err: cause}, workspace, "source-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = runner.RunOnce(t.Context())
+	if err == nil || queue.item.Status != biz.BuildStatusFailed ||
+		queue.item.FailureCategory != biz.BuildFailureNetworkPolicy || len(queue.artifacts) != 0 {
+		t.Fatalf("network policy RunOnce() = %v build=%+v artifacts=%+v", err, queue.item, queue.artifacts)
+	}
+	if strings.Contains(err.Error(), "do-not-leak") || errors.Is(err, cause) {
+		t.Fatalf("network policy detail leaked: %v", err)
 	}
 }
 

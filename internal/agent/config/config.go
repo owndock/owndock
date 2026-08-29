@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	kratosconfig "github.com/go-kratos/kratos/v2/config"
 	"github.com/go-kratos/kratos/v2/config/file"
 
@@ -39,66 +41,57 @@ const (
 var ErrInvalidConfig = errors.New("Agent configuration is invalid")
 
 type Config struct {
-	Control             Control             `json:"control"`
-	Runtime             Runtime             `json:"runtime"`
-	HostTerminal        HostTerminal        `json:"host_terminal"`
-	CertificateRotation CertificateRotation `json:"certificate_rotation"`
+	Control             Control             `json:"control" yaml:"control"`
+	Runtime             Runtime             `json:"runtime" yaml:"runtime"`
+	HostTerminal        HostTerminal        `json:"host_terminal" yaml:"host_terminal"`
+	CertificateRotation CertificateRotation `json:"certificate_rotation" yaml:"certificate_rotation"`
 }
 
 type Control struct {
-	Endpoint              string   `json:"endpoint"`
-	OrganizationID        string   `json:"organization_id"`
-	ManagedHostID         string   `json:"managed_host_id"`
-	IdentityID            string   `json:"identity_id"`
-	InstanceID            string   `json:"instance_id"`
-	BootIDFile            string   `json:"boot_id_file"`
-	CACertificateFile     string   `json:"ca_certificate_file"`
-	ClientCertificateFile string   `json:"client_certificate_file"`
-	ClientPrivateKeyFile  string   `json:"client_private_key_file"`
-	HandshakeTimeout      string   `json:"handshake_timeout"`
-	ServerSilenceTimeout  string   `json:"server_silence_timeout"`
-	ReconnectMinimum      string   `json:"reconnect_minimum"`
-	ReconnectMaximum      string   `json:"reconnect_maximum"`
-	ReconnectStableAfter  string   `json:"reconnect_stable_after"`
-	MaxFrameBytes         int      `json:"max_frame_bytes"`
-	MaxConcurrentCommands int      `json:"max_concurrent_commands"`
-	Capabilities          []string `json:"capabilities"`
+	Endpoint              string   `json:"endpoint" yaml:"endpoint"`
+	OrganizationID        string   `json:"organization_id" yaml:"organization_id"`
+	ManagedHostID         string   `json:"managed_host_id" yaml:"managed_host_id"`
+	IdentityID            string   `json:"identity_id" yaml:"identity_id"`
+	InstanceID            string   `json:"instance_id" yaml:"instance_id"`
+	BootIDFile            string   `json:"boot_id_file" yaml:"boot_id_file"`
+	CACertificateFile     string   `json:"ca_certificate_file" yaml:"ca_certificate_file"`
+	ClientCertificateFile string   `json:"client_certificate_file" yaml:"client_certificate_file"`
+	ClientPrivateKeyFile  string   `json:"client_private_key_file" yaml:"client_private_key_file"`
+	HandshakeTimeout      string   `json:"handshake_timeout" yaml:"handshake_timeout"`
+	ServerSilenceTimeout  string   `json:"server_silence_timeout" yaml:"server_silence_timeout"`
+	ReconnectMinimum      string   `json:"reconnect_minimum" yaml:"reconnect_minimum"`
+	ReconnectMaximum      string   `json:"reconnect_maximum" yaml:"reconnect_maximum"`
+	ReconnectStableAfter  string   `json:"reconnect_stable_after" yaml:"reconnect_stable_after"`
+	MaxFrameBytes         int      `json:"max_frame_bytes" yaml:"max_frame_bytes"`
+	MaxConcurrentCommands int      `json:"max_concurrent_commands" yaml:"max_concurrent_commands"`
+	Capabilities          []string `json:"capabilities" yaml:"capabilities"`
 }
 
 type Runtime struct {
-	DockerSocket         string `json:"docker_socket"`
-	StateDirectory       string `json:"state_directory"`
-	ResultCacheSize      int    `json:"result_cache_size"`
-	CutoverWatermarkSize int    `json:"cutover_watermark_size"`
+	DockerSocket         string `json:"docker_socket" yaml:"docker_socket"`
+	StateDirectory       string `json:"state_directory" yaml:"state_directory"`
+	ResultCacheSize      int    `json:"result_cache_size" yaml:"result_cache_size"`
+	CutoverWatermarkSize int    `json:"cutover_watermark_size" yaml:"cutover_watermark_size"`
 }
 
 type HostTerminal struct {
-	Enabled          bool   `json:"enabled"`
-	User             string `json:"user"`
-	Shell            string `json:"shell"`
-	TerminationGrace string `json:"termination_grace"`
+	Enabled          bool   `json:"enabled" yaml:"enabled"`
+	User             string `json:"user" yaml:"user"`
+	Shell            string `json:"shell" yaml:"shell"`
+	TerminationGrace string `json:"termination_grace" yaml:"termination_grace"`
 }
 
 type CertificateRotation struct {
-	Enabled        bool   `json:"enabled"`
-	RenewBefore    string `json:"renew_before"`
-	RetryDelay     string `json:"retry_delay"`
-	RequestTimeout string `json:"request_timeout"`
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	RenewBefore    string `json:"renew_before" yaml:"renew_before"`
+	RetryDelay     string `json:"retry_delay" yaml:"retry_delay"`
+	RequestTimeout string `json:"request_timeout" yaml:"request_timeout"`
 }
 
-func Load(path string) (Config, error) {
-	sourcePath := strings.TrimSpace(path)
-	if sourcePath == "" {
-		return Config{}, ErrInvalidConfig
-	}
-	loader := kratosconfig.New(
-		kratosconfig.WithSource(file.NewSource(sourcePath)),
-	)
-	defer func() { _ = loader.Close() }()
-	if err := loader.Load(); err != nil {
-		return Config{}, fmt.Errorf("load Agent config: %w", err)
-	}
-	config := Config{
+// Defaults returns a detached Agent configuration with operational defaults.
+// Identity, endpoints and credential paths remain caller-owned values.
+func Defaults() Config {
+	return Config{
 		Control: Control{
 			BootIDFile:            defaultBootIDFile,
 			HandshakeTimeout:      defaultHandshakeTimeout.String(),
@@ -126,6 +119,33 @@ func Load(path string) (Config, error) {
 			RequestTimeout: defaultRotationRequestTimeout.String(),
 		},
 	}
+}
+
+// MarshalYAML validates a generated configuration before serializing it.
+func MarshalYAML(config Config) ([]byte, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	value, err := yaml.Marshal(config)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Agent config: %w", err)
+	}
+	return value, nil
+}
+
+func Load(path string) (Config, error) {
+	sourcePath := strings.TrimSpace(path)
+	if sourcePath == "" {
+		return Config{}, ErrInvalidConfig
+	}
+	loader := kratosconfig.New(
+		kratosconfig.WithSource(file.NewSource(sourcePath)),
+	)
+	defer func() { _ = loader.Close() }()
+	if err := loader.Load(); err != nil {
+		return Config{}, fmt.Errorf("load Agent config: %w", err)
+	}
+	config := Defaults()
 	if err := loader.Scan(&config); err != nil {
 		return Config{}, fmt.Errorf("scan Agent config: %w", err)
 	}
@@ -272,6 +292,15 @@ func baselineCapabilities() []string {
 		agentprotocol.CapabilityDeploymentActivate,
 		agentprotocol.CapabilityDeploymentCancel,
 	}
+}
+
+// ValidateCapabilities applies the same supported-capability and inventory
+// grouping rules used when loading the runtime configuration.
+func ValidateCapabilities(values []string) error {
+	if !validCapabilities(values) {
+		return fmt.Errorf("%w: control.capabilities", ErrInvalidConfig)
+	}
+	return nil
 }
 
 func validCapabilities(values []string) bool {

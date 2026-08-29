@@ -181,10 +181,8 @@ func TestGitCheckoutWithRealHTTPSRemoteVerifiesCommitAndCleansConfig(t *testing.
 	}
 	gateway := &GitCheckoutGateway{
 		executable: gitPath, timeout: time.Minute, maxBytes: 10 * 1024 * 1024, maxFiles: 1000,
+		network: gitNetworkPolicy{caBundle: mustReadTestFile(t, certificateFile)},
 		lookupEnv: func(name string) (string, bool) {
-			if name == "SSL_CERT_FILE" || name == "GIT_SSL_CAINFO" {
-				return certificateFile, true
-			}
 			if name == "PATH" {
 				return os.Getenv("PATH"), true
 			}
@@ -215,6 +213,233 @@ func TestGitCheckoutWithRealHTTPSRemoteVerifiesCommitAndCleansConfig(t *testing.
 	}
 	if err := gateway.Checkout(t.Context(), wrong); err != biz.ErrCheckoutRevision {
 		t.Fatalf("wrong Commit error = %v", err)
+	}
+}
+
+func TestGitCheckoutRejectsHighlyCompressedRepositoryExpansion(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git CLI is unavailable")
+	}
+	projectRoot := t.TempDir()
+	work := filepath.Join(t.TempDir(), "source")
+	runFixtureGit(t, gitPath, "", "init", "--quiet", "--initial-branch=main", work)
+	payload := bytes.Repeat([]byte("highly-compressible-source-line\n"), 64*1024)
+	if err := os.WriteFile(filepath.Join(work, "expanded.txt"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "add", "expanded.txt")
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "commit", "--quiet", "-m", "compressed fixture")
+	commitSHA := strings.TrimSpace(runFixtureGit(t, gitPath, work, "rev-parse", "HEAD"))
+	bare := filepath.Join(projectRoot, "repository.git")
+	runFixtureGit(t, gitPath, "", "clone", "--quiet", "--bare", work, bare)
+	server := httptest.NewTLSServer(gitHTTPBackend(t, gitPath, projectRoot))
+	defer server.Close()
+	caBundle := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+	const maximumBytes = int64(128 * 1024)
+	gateway := &GitCheckoutGateway{
+		executable: gitPath, timeout: time.Minute, maxBytes: maximumBytes, maxFiles: 1000,
+		network: gitNetworkPolicy{caBundle: caBundle},
+		lookupEnv: func(name string) (string, bool) {
+			if name == "PATH" {
+				return os.Getenv("PATH"), true
+			}
+			return "", false
+		},
+	}
+	gateway.run = func(ctx context.Context, directory string, environment []string, arguments ...string) ([]byte, error) {
+		return runGitCommand(ctx, gitPath, directory, environment, arguments...)
+	}
+	destination := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err = gateway.Checkout(t.Context(), biz.CheckoutRequest{
+		Source: biz.SourceRepository{
+			ID: "source-1", ProjectID: "project-1", RepositoryURL: server.URL + "/repository.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		Revision: biz.SourceRevision{
+			SourceRepositoryID: "source-1", Ref: "refs/heads/main", CommitSHA: commitSHA,
+		},
+		Destination: destination,
+	})
+	if !errors.Is(err, biz.ErrCheckoutResourceLimit) {
+		t.Fatalf("Checkout(highly compressed repository) = %v", err)
+	}
+	info, statErr := os.Stat(filepath.Join(destination, "expanded.txt"))
+	if statErr != nil || info.Size() <= maximumBytes || info.Size() != int64(len(payload)) {
+		t.Fatalf("expanded file = %+v, %v", info, statErr)
+	}
+}
+
+func TestGitCheckoutRejectsLargeIncompressiblePackBeforeCheckout(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git CLI is unavailable")
+	}
+	projectRoot := t.TempDir()
+	work := filepath.Join(t.TempDir(), "source")
+	runFixtureGit(t, gitPath, "", "init", "--quiet", "--initial-branch=main", work)
+	payload := make([]byte, 4*1024*1024)
+	if _, err := io.ReadFull(rand.Reader, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "large.bin"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "add", "large.bin")
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "commit", "--quiet", "-m", "large pack fixture")
+	commitSHA := strings.TrimSpace(runFixtureGit(t, gitPath, work, "rev-parse", "HEAD"))
+	bare := filepath.Join(projectRoot, "repository.git")
+	runFixtureGit(t, gitPath, "", "clone", "--quiet", "--bare", work, bare)
+	server := httptest.NewTLSServer(gitHTTPBackend(t, gitPath, projectRoot))
+	defer server.Close()
+	caFile := filepath.Join(t.TempDir(), "git-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: server.Certificate().Raw,
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	version := strings.TrimPrefix(strings.TrimSpace(runFixtureGit(t, gitPath, "", "--version")), "git version ")
+	gateway, err := NewGitCheckoutGateway(nil, GitCheckoutOptions{
+		Executable: gitPath, ExpectedVersion: version, Timeout: time.Minute,
+		MaxWorkspaceBytes: 1024 * 1024, MaxWorkspaceFiles: 1000,
+		MaxWorkspaceDepth: 64, Network: GitNetworkOptions{CACertFile: caFile},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := filepath.Join(t.TempDir(), "checkout")
+	if err := os.Mkdir(destination, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	err = gateway.Checkout(t.Context(), biz.CheckoutRequest{
+		Source: biz.SourceRepository{
+			ID: "source-1", ProjectID: "project-1", RepositoryURL: server.URL + "/repository.git",
+			Protocol: biz.RepositoryProtocolHTTPS,
+		},
+		Revision: biz.SourceRevision{
+			SourceRepositoryID: "source-1", Ref: "refs/heads/main", CommitSHA: commitSHA,
+		},
+		Destination: destination,
+	})
+	if !errors.Is(err, biz.ErrCheckoutResourceLimit) {
+		t.Fatalf("Checkout(large incompressible pack) = %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(destination, "large.bin")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("large worktree file was materialized: %v", statErr)
+	}
+}
+
+func TestGitTreeInspectionRejectsUntrustedExpansionBeforeCheckout(t *testing.T) {
+	valid := strings.Join([]string{
+		"100644 blob " + strings.Repeat("a", 40) + " 4\tREADME.md\x00",
+		"100644 blob " + strings.Repeat("b", 40) + " 6\tdocs/guide.md\x00",
+	}, "")
+	if err := inspectGitTreeRecords(strings.NewReader(valid), 10, 2, 2); err != nil {
+		t.Fatalf("valid tree rejected: %v", err)
+	}
+	cases := map[string]struct {
+		input string
+		bytes int64
+		files int64
+		depth int
+	}{
+		"expanded bytes": {input: valid, bytes: 9, files: 2, depth: 2},
+		"file count":     {input: valid, bytes: 10, files: 1, depth: 2},
+		"path depth":     {input: valid, bytes: 10, files: 2, depth: 1},
+		"parent segment": {input: "100644 blob " + strings.Repeat("c", 40) + " 1\ta/../escape\x00", bytes: 1, files: 1, depth: 3},
+		"truncated":      {input: strings.TrimSuffix(valid, "\x00"), bytes: 10, files: 2, depth: 2},
+		"invalid size":   {input: "100644 blob " + strings.Repeat("d", 40) + " nope\tfile\x00", bytes: 10, files: 1, depth: 1},
+	}
+	for name, candidate := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := inspectGitTreeRecords(strings.NewReader(candidate.input), candidate.bytes, candidate.files, candidate.depth)
+			if !errors.Is(err, biz.ErrCheckoutResourceLimit) {
+				t.Fatalf("inspection error = %v", err)
+			}
+		})
+	}
+}
+
+func TestGitCheckoutRejectsDeepAndHighFileCountRepositoriesBeforeMaterialization(t *testing.T) {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("Git CLI is unavailable")
+	}
+	projectRoot := t.TempDir()
+	work := filepath.Join(t.TempDir(), "source")
+	runFixtureGit(t, gitPath, "", "init", "--quiet", "--initial-branch=main", work)
+	for index := 0; index < 80; index++ {
+		name := filepath.Join(work, fmt.Sprintf("files/file-%03d.txt", index))
+		if err := os.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte("bounded\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deepRelative := strings.Repeat("nested/", 12) + "sentinel.txt"
+	deepFile := filepath.Join(work, filepath.FromSlash(deepRelative))
+	if err := os.MkdirAll(filepath.Dir(deepFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(deepFile, []byte("must-not-materialize\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "add", ".")
+	runFixtureGit(t, gitPath, work, "-c", "user.name=OwnDock Test", "-c", "user.email=test@owndock.net", "commit", "--quiet", "-m", "hostile tree fixtures")
+	commitSHA := strings.TrimSpace(runFixtureGit(t, gitPath, work, "rev-parse", "HEAD"))
+	bare := filepath.Join(projectRoot, "repository.git")
+	runFixtureGit(t, gitPath, "", "clone", "--quiet", "--bare", work, bare)
+	server := httptest.NewTLSServer(gitHTTPBackend(t, gitPath, projectRoot))
+	defer server.Close()
+	caFile := filepath.Join(t.TempDir(), "git-ca.pem")
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: server.Certificate().Raw,
+	}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	version := strings.TrimPrefix(strings.TrimSpace(runFixtureGit(t, gitPath, "", "--version")), "git version ")
+	source := biz.SourceRepository{
+		ID: "source-1", ProjectID: "project-1", RepositoryURL: server.URL + "/repository.git",
+		Protocol: biz.RepositoryProtocolHTTPS,
+	}
+	revision := biz.SourceRevision{
+		SourceRepositoryID: source.ID, Ref: "refs/heads/main", CommitSHA: commitSHA,
+	}
+	for name, options := range map[string]GitCheckoutOptions{
+		"file count": {
+			Executable: gitPath, ExpectedVersion: version, Timeout: time.Minute,
+			MaxWorkspaceBytes: 10 * 1024 * 1024, MaxWorkspaceFiles: 64,
+			MaxWorkspaceDepth: 64, Network: GitNetworkOptions{CACertFile: caFile},
+		},
+		"path depth": {
+			Executable: gitPath, ExpectedVersion: version, Timeout: time.Minute,
+			MaxWorkspaceBytes: 10 * 1024 * 1024, MaxWorkspaceFiles: 1000,
+			MaxWorkspaceDepth: 8, Network: GitNetworkOptions{CACertFile: caFile},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			gateway, err := NewGitCheckoutGateway(nil, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			destination := filepath.Join(t.TempDir(), "checkout")
+			if err := os.Mkdir(destination, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			err = gateway.Checkout(t.Context(), biz.CheckoutRequest{
+				Source: source, Revision: revision, Destination: destination,
+			})
+			if !errors.Is(err, biz.ErrCheckoutResourceLimit) {
+				t.Fatalf("Checkout(hostile tree) = %v", err)
+			}
+			if _, statErr := os.Stat(filepath.Join(destination, filepath.FromSlash(deepRelative))); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("deep path was materialized before rejection: %v", statErr)
+			}
+		})
 	}
 }
 
@@ -479,4 +704,25 @@ func environmentNamed(environment []string, name string) string {
 		}
 	}
 	return ""
+}
+
+func TestGitCheckoutClassifiesFilesystemExhaustionAsResourceLimit(t *testing.T) {
+	for _, message := range []string{
+		"fatal: cannot create directory: No space left on device",
+		"fatal: write error: Disk quota exceeded",
+	} {
+		err := classifyCheckoutCommand(t.Context(), &gitCommandError{output: []byte(message)})
+		if !errors.Is(err, biz.ErrCheckoutResourceLimit) {
+			t.Fatalf("classification for %q = %v", message, err)
+		}
+	}
+}
+
+func mustReadTestFile(t *testing.T, path string) []byte {
+	t.Helper()
+	value, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return value
 }

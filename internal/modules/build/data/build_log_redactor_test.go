@@ -44,6 +44,19 @@ func TestBuildKitStatusLoggerRedactsSecretSplitAcrossFrames(t *testing.T) {
 	}
 }
 
+func TestBuildKitStatusLoggerDetectsEgressPolicyMarkerWithoutPublicLogSink(t *testing.T) {
+	logger := newBuildKitStatusLogger(nil, "", nil)
+	statuses := make(chan *buildkitclient.SolveStatus, 1)
+	statuses <- &buildkitclient.SolveStatus{Logs: []*buildkitclient.VertexLog{{
+		Stream: 2, Data: []byte("wget: server returned error: HTTP/1.1 451 Unavailable For Legal Reasons\n"),
+	}}}
+	close(statuses)
+	logger.Consume(t.Context(), statuses)
+	if !logger.NetworkDenied() {
+		t.Fatal("Build egress policy marker was not detected")
+	}
+}
+
 func TestSplitBuildLogMessagePreservesUTF8AndBounds(t *testing.T) {
 	chunks := splitBuildLogMessage("开始构建镜像", 7)
 	if len(chunks) < 2 || strings.Join(chunks, "") != "开始构建镜像" {

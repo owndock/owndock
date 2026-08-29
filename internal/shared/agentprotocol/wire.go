@@ -15,11 +15,19 @@ type CommandDocument struct {
 	Deadline     time.Time                 `json:"deadline"`
 	RuntimeProbe *RuntimeProbeDocument     `json:"runtime_probe,omitempty"`
 	Deployment   *DeploymentDocument       `json:"deployment,omitempty"`
+	Cutover      *CutoverDocument          `json:"cutover,omitempty"`
 	Inventory    *RuntimeInventoryDocument `json:"runtime_inventory,omitempty"`
 }
 
 type RuntimeProbeDocument struct {
 	RuntimeTargetID string `json:"runtime_target_id"`
+}
+
+type CutoverDocument struct {
+	DeploymentID    string `json:"deployment_id"`
+	CutoverSequence uint64 `json:"cutover_sequence"`
+	RuntimeTargetID string `json:"runtime_target_id"`
+	ContainerName   string `json:"container_name"`
 }
 
 type RuntimeInventoryDocument struct {
@@ -89,6 +97,14 @@ func NewCommandDocument(command AgentCommand) *CommandDocument {
 	if command.Deployment != nil {
 		document.Deployment = newDeploymentDocument(*command.Deployment)
 	}
+	if command.Cutover != nil {
+		document.Cutover = &CutoverDocument{
+			DeploymentID:    command.Cutover.DeploymentID,
+			CutoverSequence: command.Cutover.CutoverSequence,
+			RuntimeTargetID: command.Cutover.RuntimeTargetID,
+			ContainerName:   command.Cutover.ContainerName,
+		}
+	}
 	if command.Inventory != nil {
 		document.Inventory = &RuntimeInventoryDocument{
 			RuntimeTargetID:  command.Inventory.RuntimeTargetID,
@@ -115,6 +131,14 @@ func (d CommandDocument) Domain() AgentCommand {
 	}
 	if d.Deployment != nil {
 		command.Deployment = d.Deployment.domain()
+	}
+	if d.Cutover != nil {
+		command.Cutover = &CutoverCommand{
+			DeploymentID:    d.Cutover.DeploymentID,
+			CutoverSequence: d.Cutover.CutoverSequence,
+			RuntimeTargetID: d.Cutover.RuntimeTargetID,
+			ContainerName:   d.Cutover.ContainerName,
+		}
 	}
 	if d.Inventory != nil {
 		command.Inventory = &RuntimeInventoryCommand{

@@ -250,6 +250,38 @@ func TestProductAPIRoutesBuildBeforeControlPlane(t *testing.T) {
 	}
 }
 
+func TestProductAPIRoutesSupplyChainBeforeBuild(t *testing.T) {
+	identity := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	wrong := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "wrong handler", http.StatusTeapot)
+	})
+	authenticate := func(next http.Handler) http.Handler { return next }
+	api, err := NewProductAPI(identity, wrong, authenticate)
+	if err != nil {
+		t.Fatalf("NewProductAPI() error = %v", err)
+	}
+	if err := api.WithBuild(wrong, authenticate); err != nil {
+		t.Fatalf("WithBuild() error = %v", err)
+	}
+	if err := api.WithSupplyChain(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), authenticate); err != nil {
+		t.Fatalf("WithSupplyChain() error = %v", err)
+	}
+	for _, path := range []string{
+		"/api/v1/projects/project-1/artifacts/artifact-1/evidence",
+		"/api/v1/projects/project-1/artifacts/artifact-1/evidence/evidence-1",
+	} {
+		recorder := httptest.NewRecorder()
+		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK {
+			t.Errorf("GET %s status = %d, body = %s", path, recorder.Code, recorder.Body.String())
+		}
+	}
+}
+
 func newTestHTTPHandler(t *testing.T, enableEngineeringSamples bool) http.Handler {
 	return newTestHTTPHandlerWithConfig(t, enableEngineeringSamples, platformconfig.HTTP{
 		Address: "127.0.0.1:0", Timeout: "1s",

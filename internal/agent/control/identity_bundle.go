@@ -85,24 +85,60 @@ func InstallClientIdentityBundle(
 	if err := validateBundleTarget(path); err != nil {
 		return err
 	}
+	bundle, err := validatedIdentityBundle(
+		certificatePEM, privateKeyPEM, caCertificatePEM, identity, now,
+	)
+	if err != nil {
+		return err
+	}
+	defer clearTLSBytes(bundle)
+	return replaceIdentityBundle(path, bundle)
+}
+
+// ValidateClientIdentityBundle verifies the certificate chain, private key,
+// usage, validity and fixed SPIFFE identity without writing any file.
+func ValidateClientIdentityBundle(
+	certificatePEM, privateKeyPEM, caCertificatePEM []byte,
+	identity Identity,
+	now time.Time,
+) error {
+	if !validBundleIdentity(identity) || len(certificatePEM) == 0 ||
+		len(privateKeyPEM) == 0 || len(caCertificatePEM) == 0 ||
+		len(certificatePEM) > maximumTLSMaterialBytes ||
+		len(privateKeyPEM) > maximumTLSMaterialBytes ||
+		len(caCertificatePEM) > maximumTLSMaterialBytes {
+		return ErrConfigurationInvalid
+	}
+	bundle, err := validatedIdentityBundle(
+		certificatePEM, privateKeyPEM, caCertificatePEM, identity, now,
+	)
+	clearTLSBytes(bundle)
+	return err
+}
+
+func validatedIdentityBundle(
+	certificatePEM, privateKeyPEM, caCertificatePEM []byte,
+	identity Identity,
+	now time.Time,
+) ([]byte, error) {
 	pair, err := tls.X509KeyPair(certificatePEM, privateKeyPEM)
 	if err != nil || len(pair.Certificate) == 0 {
-		return fmt.Errorf("%w: parse rotated Agent identity", ErrConfigurationInvalid)
+		return nil, fmt.Errorf("%w: parse Agent identity", ErrConfigurationInvalid)
 	}
 	leaf, err := x509.ParseCertificate(pair.Certificate[0])
 	if err != nil || now.Before(leaf.NotBefore) || !now.Before(leaf.NotAfter) ||
 		!allowsClientAuthentication(leaf) || !certificateMatchesIdentity(leaf, identity) {
-		return fmt.Errorf("%w: rotated Agent certificate identity", ErrConfigurationInvalid)
+		return nil, fmt.Errorf("%w: Agent certificate identity", ErrConfigurationInvalid)
 	}
 	roots := x509.NewCertPool()
 	if !roots.AppendCertsFromPEM(caCertificatePEM) {
-		return fmt.Errorf("%w: rotated Agent CA", ErrConfigurationInvalid)
+		return nil, fmt.Errorf("%w: Agent CA", ErrConfigurationInvalid)
 	}
 	intermediates := x509.NewCertPool()
 	for _, encoded := range pair.Certificate[1:] {
 		certificate, parseErr := x509.ParseCertificate(encoded)
 		if parseErr != nil {
-			return fmt.Errorf("%w: rotated Agent certificate chain", ErrConfigurationInvalid)
+			return nil, fmt.Errorf("%w: Agent certificate chain", ErrConfigurationInvalid)
 		}
 		intermediates.AddCert(certificate)
 	}
@@ -110,7 +146,7 @@ func InstallClientIdentityBundle(
 		Roots: roots, Intermediates: intermediates,
 		CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 	}); err != nil {
-		return fmt.Errorf("%w: verify rotated Agent certificate", ErrConfigurationInvalid)
+		return nil, fmt.Errorf("%w: verify Agent certificate", ErrConfigurationInvalid)
 	}
 	bundle := make([]byte, 0, len(certificatePEM)+len(privateKeyPEM)+2)
 	bundle = append(bundle, certificatePEM...)
@@ -118,8 +154,7 @@ func InstallClientIdentityBundle(
 		bundle = append(bundle, '\n')
 	}
 	bundle = append(bundle, privateKeyPEM...)
-	defer clearTLSBytes(bundle)
-	return replaceIdentityBundle(path, bundle)
+	return bundle, nil
 }
 
 func validateBundleTarget(path string) error {

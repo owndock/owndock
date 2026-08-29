@@ -1,0 +1,110 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v[0-9]*.[0-9]*.[0-9]*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  agent:
+    if: github.repository == 'owndock/owndock'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Validate immutable release tag
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=${GITHUB_REF_NAME}
+          version=${tag#v}
+          if [[ "v${version}" != "${tag}" ]] || \
+             [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "release tags must use vMAJOR.MINOR.PATCH SemVer" >&2
+            exit 2
+          fi
+          if [[ "$(git rev-parse HEAD)" != "${GITHUB_SHA}" ]] || \
+             [[ "$(git rev-parse "${tag}^{commit}")" != "${GITHUB_SHA}" ]]; then
+            echo "release tag does not resolve to the checked out commit" >&2
+            exit 2
+          fi
+          if [[ -n "$(git status --porcelain --untracked-files=normal)" ]]; then
+            echo "release checkout is not clean" >&2
+            exit 2
+          fi
+          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
+          printf 'identity=%s\n' \
+            "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${tag}" \
+            >> "${GITHUB_OUTPUT}"
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.5
+          cache: true
+      - run: go mod download
+      - run: make check
+      - run: make test-agent-package test-agent-release
+      - name: Build deterministic Agent release
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: make package-agent-release VERSION="${VERSION}" COMMIT="${GITHUB_SHA}"
+      - name: Install fixed Cosign release
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Sign and verify the release manifest
+        env:
+          CERTIFICATE_IDENTITY: ${{ steps.release.outputs.identity }}
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            dist/SHA256SUMS
+          cosign verify-blob dist/SHA256SUMS \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify-blob dist/SHA256SUMS \
+            --bundle dist/SHA256SUMS.sigstore.json \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --offline
+      - name: Publish immutable GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; refusing to replace assets" >&2
+            exit 2
+          fi
+          flags=()
+          if [[ "${VERSION}" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "${GITHUB_REF_NAME}" \
+            --verify-tag \
+            --title "OwnDock ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            "${flags[@]}" \
+            "dist/owndock-agent_${VERSION}_linux_amd64.tar.gz" \
+            "dist/owndock-agent_${VERSION}_linux_arm64.tar.gz" \
+            dist/RELEASE.txt \
+            dist/SHA256SUMS \
+            dist/SHA256SUMS.sigstore.json \
+            dist/verify-owndock-agent-release

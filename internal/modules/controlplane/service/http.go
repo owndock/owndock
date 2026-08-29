@@ -3,6 +3,7 @@ package service
 import (
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +41,14 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(segments) == 3 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "audit-events" {
 		s.auditEvents(w, r, principal)
+		return
+	}
+	if len(segments) == 3 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "templates" {
+		s.templates(w, r, principal)
+		return
+	}
+	if len(segments) == 4 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "templates" {
+		s.template(w, r, principal, segments[3])
 		return
 	}
 	if len(segments) >= 5 && segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects" {
@@ -221,13 +230,15 @@ func (s *HTTP) applications(
 		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 	case http.MethodPost:
 		var request struct {
-			Name string `json:"name"`
+			Name       string `json:"name"`
+			TemplateID string `json:"template_id"`
 		}
 		if !decodeRequest(w, r, &request) {
 			return
 		}
-		item, err := s.useCase.CreateApplication(
-			r.Context(), principal, projectID, request.Name, httpx.RequestIDFromContext(r.Context()),
+		item, err := s.useCase.CreateApplicationFromTemplate(
+			r.Context(), principal, projectID, request.Name, request.TemplateID,
+			httpx.RequestIDFromContext(r.Context()),
 		)
 		if writeError(w, r, err) {
 			return
@@ -236,6 +247,43 @@ func (s *HTTP) applications(
 	default:
 		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
+}
+
+func (s *HTTP) templates(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal security.Principal,
+) {
+	if r.Method != http.MethodGet {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	items, err := s.useCase.ListTemplates(r.Context(), principal)
+	if writeError(w, r, err) {
+		return
+	}
+	responses := make([]templateResponse, len(items))
+	for i, item := range items {
+		responses[i] = templateResponseFromDomain(item)
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
+}
+
+func (s *HTTP) template(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal security.Principal,
+	templateID string,
+) {
+	if r.Method != http.MethodGet {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	item, err := s.useCase.GetTemplate(r.Context(), principal, templateID)
+	if writeError(w, r, err) {
+		return
+	}
+	httpx.JSON(w, http.StatusOK, templateResponseFromDomain(item))
 }
 
 func (s *HTTP) releases(
@@ -514,17 +562,80 @@ func projectResponseFromDomain(item biz.Project) projectResponse {
 }
 
 type applicationResponse struct {
-	ID        string    `json:"id"`
-	ProjectID string    `json:"project_id"`
-	Name      string    `json:"name"`
-	CreatedBy string    `json:"created_by"`
-	CreatedAt time.Time `json:"created_at"`
+	ID               string                               `json:"id"`
+	ProjectID        string                               `json:"project_id"`
+	Name             string                               `json:"name"`
+	TemplateSnapshot *applicationTemplateSnapshotResponse `json:"template_snapshot,omitempty"`
+	CreatedBy        string                               `json:"created_by"`
+	CreatedAt        time.Time                            `json:"created_at"`
 }
 
 func applicationResponseFromDomain(item biz.Application) applicationResponse {
 	return applicationResponse{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name,
+		TemplateSnapshot: applicationTemplateSnapshotResponseFromDomain(
+			item.TemplateSnapshot,
+		),
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+	}
+}
+
+type localizedTextResponse struct {
+	English           string `json:"en-US"`
+	SimplifiedChinese string `json:"zh-CN"`
+}
+
+type templatePresetResponse struct {
+	DockerfilePath string             `json:"dockerfile_path"`
+	ContextPath    string             `json:"context_path"`
+	RuntimeSpec    runtimeSpecPayload `json:"runtime_spec"`
+}
+
+type templateResponse struct {
+	ID          string                 `json:"id"`
+	Version     uint64                 `json:"version"`
+	Name        localizedTextResponse  `json:"name"`
+	Description localizedTextResponse  `json:"description"`
+	Preset      templatePresetResponse `json:"preset"`
+}
+
+func templateResponseFromDomain(item biz.Template) templateResponse {
+	return templateResponse{
+		ID: item.ID, Version: item.Version,
+		Name: localizedTextResponse{
+			English:           item.Name.English,
+			SimplifiedChinese: item.Name.SimplifiedChinese,
+		},
+		Description: localizedTextResponse{
+			English:           item.Description.English,
+			SimplifiedChinese: item.Description.SimplifiedChinese,
+		},
+		Preset: templatePresetResponse{
+			DockerfilePath: item.Preset.DockerfilePath,
+			ContextPath:    item.Preset.ContextPath,
+			RuntimeSpec:    runtimeSpecPayloadFromDomain(item.Preset.RuntimeSpec),
+		},
+	}
+}
+
+type applicationTemplateSnapshotResponse struct {
+	TemplateID      string             `json:"template_id"`
+	TemplateVersion uint64             `json:"template_version"`
+	DockerfilePath  string             `json:"dockerfile_path"`
+	ContextPath     string             `json:"context_path"`
+	RuntimeSpec     runtimeSpecPayload `json:"runtime_spec"`
+}
+
+func applicationTemplateSnapshotResponseFromDomain(
+	item *biz.ApplicationTemplateSnapshot,
+) *applicationTemplateSnapshotResponse {
+	if item == nil {
+		return nil
+	}
+	return &applicationTemplateSnapshotResponse{
+		TemplateID: item.TemplateID, TemplateVersion: item.TemplateVersion,
+		DockerfilePath: item.DockerfilePath, ContextPath: item.ContextPath,
+		RuntimeSpec: runtimeSpecPayloadFromDomain(item.RuntimeSpec),
 	}
 }
 
@@ -551,54 +662,59 @@ func releaseResponseFromDomain(item biz.Release) releaseResponse {
 }
 
 type registryCredentialResponse struct {
-	ID          string    `json:"id"`
-	ProjectID   string    `json:"project_id"`
-	Name        string    `json:"name"`
-	Server      string    `json:"server"`
-	Username    string    `json:"username"`
-	PasswordRef string    `json:"password_ref"`
-	CreatedBy   string    `json:"created_by"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID                 string    `json:"id"`
+	ProjectID          string    `json:"project_id"`
+	Name               string    `json:"name"`
+	Server             string    `json:"server"`
+	Username           string    `json:"username"`
+	PasswordConfigured bool      `json:"password_configured"`
+	CreatedBy          string    `json:"created_by"`
+	CreatedAt          time.Time `json:"created_at"`
 }
 
 func registryCredentialResponseFromDomain(item biz.RegistryCredential) registryCredentialResponse {
 	return registryCredentialResponse{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name,
-		Server: item.Server, Username: item.Username, PasswordRef: item.PasswordRef,
+		Server: item.Server, Username: item.Username, PasswordConfigured: item.PasswordRef != "",
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
 	}
 }
 
 type runtimeTargetResponse struct {
-	ID             string                  `json:"id"`
-	ProjectID      string                  `json:"project_id"`
-	Name           string                  `json:"name"`
-	ManagedHostID  string                  `json:"managed_host_id"`
-	ConnectionMode runtimeaccess.Mode      `json:"connection_mode"`
-	Endpoint       string                  `json:"endpoint,omitempty"`
-	TLSServerName  string                  `json:"tls_server_name,omitempty"`
-	CredentialRef  string                  `json:"credential_ref,omitempty"`
-	Status         biz.RuntimeTargetStatus `json:"status"`
-	LastProbedAt   *time.Time              `json:"last_probed_at,omitempty"`
-	CreatedBy      string                  `json:"created_by"`
-	CreatedAt      time.Time               `json:"created_at"`
+	ID                   string                  `json:"id"`
+	ProjectID            string                  `json:"project_id"`
+	Name                 string                  `json:"name"`
+	ManagedHostID        string                  `json:"managed_host_id"`
+	ConnectionMode       runtimeaccess.Mode      `json:"connection_mode"`
+	Endpoint             string                  `json:"endpoint,omitempty"`
+	TLSServerName        string                  `json:"tls_server_name,omitempty"`
+	CredentialConfigured bool                    `json:"credential_configured"`
+	Status               biz.RuntimeTargetStatus `json:"status"`
+	LastProbedAt         *time.Time              `json:"last_probed_at,omitempty"`
+	CreatedBy            string                  `json:"created_by"`
+	CreatedAt            time.Time               `json:"created_at"`
 }
 
 type environmentResponse struct {
-	ID        string            `json:"id"`
-	ProjectID string            `json:"project_id"`
-	Name      string            `json:"name"`
-	Stage     string            `json:"stage"`
-	Variables map[string]string `json:"variables"`
-	CreatedBy string            `json:"created_by"`
-	CreatedAt time.Time         `json:"created_at"`
+	ID           string    `json:"id"`
+	ProjectID    string    `json:"project_id"`
+	Name         string    `json:"name"`
+	Stage        string    `json:"stage"`
+	VariableKeys []string  `json:"variable_keys"`
+	CreatedBy    string    `json:"created_by"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 func environmentResponseFromDomain(item biz.Environment) environmentResponse {
+	variableKeys := make([]string, 0, len(item.Variables))
+	for name := range item.Variables {
+		variableKeys = append(variableKeys, name)
+	}
+	sort.Strings(variableKeys)
 	return environmentResponse{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name, Stage: item.Stage,
-		Variables: item.Variables,
-		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+		VariableKeys: variableKeys,
+		CreatedBy:    item.CreatedBy, CreatedAt: item.CreatedAt,
 	}
 }
 
@@ -687,9 +803,9 @@ func runtimeTargetResponseFromDomain(item biz.RuntimeTarget) runtimeTargetRespon
 	return runtimeTargetResponse{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name,
 		ManagedHostID: item.ManagedHostID, ConnectionMode: item.ConnectionMode,
-		Endpoint:      item.Endpoint,
-		TLSServerName: item.TLSServerName, CredentialRef: item.CredentialRef,
-		Status: item.Status, LastProbedAt: lastProbedAt,
+		Endpoint: item.Endpoint, TLSServerName: item.TLSServerName,
+		CredentialConfigured: item.CredentialRef != "",
+		Status:               item.Status, LastProbedAt: lastProbedAt,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
 	}
 }

@@ -129,6 +129,45 @@ func (g *AgentDockerGateway) Cancel(
 	)
 }
 
+// ReleaseCutoverWatermark is the narrow Agent boundary used by future product
+// deletion orchestration. The caller must first prevent new work for the slot,
+// wait for every in-flight Deployment command, and remove the managed runtime
+// resource. The Agent then releases only this exact Deployment/sequence pair.
+func (g *AgentDockerGateway) ReleaseCutoverWatermark(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
+	if err := plan.TargetConnection.Validate(); err != nil ||
+		plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
+		if err == nil {
+			err = runtimeaccess.ErrUnsupportedMode
+		}
+		return executionError(biz.FailureConfiguration, err)
+	}
+	commandID, err := g.newID()
+	if err != nil {
+		return executionError(
+			biz.FailureRuntime,
+			fmt.Errorf("generate Agent command ID: %w", err),
+		)
+	}
+	return g.dispatchCommand(
+		ctx,
+		plan.TargetConnection.ManagedHostID,
+		managedhostbiz.AgentCommand{
+			ID:       commandID,
+			Kind:     agentprotocol.AgentCommandCutoverRelease,
+			Deadline: g.commandDeadline(ctx),
+			Cutover: &agentprotocol.CutoverCommand{
+				DeploymentID:    plan.DeploymentID,
+				CutoverSequence: plan.CutoverSequence,
+				RuntimeTargetID: plan.RuntimeTargetID,
+				ContainerName:   plan.ContainerName,
+			},
+		},
+	)
+}
+
 func (g *AgentDockerGateway) dispatch(
 	ctx context.Context,
 	hostID string,
@@ -142,17 +181,29 @@ func (g *AgentDockerGateway) dispatch(
 			fmt.Errorf("generate Agent command ID: %w", err),
 		)
 	}
-	deadline := g.now().UTC().Add(g.timeout)
-	if contextDeadline, ok := ctx.Deadline(); ok &&
-		contextDeadline.Before(deadline) {
-		deadline = contextDeadline.UTC()
-	}
 	command := managedhostbiz.AgentCommand{
 		ID:         commandID,
 		Kind:       kind,
-		Deadline:   deadline,
+		Deadline:   g.commandDeadline(ctx),
 		Deployment: &deployment,
 	}
+	return g.dispatchCommand(ctx, hostID, command)
+}
+
+func (g *AgentDockerGateway) commandDeadline(ctx context.Context) time.Time {
+	deadline := g.now().UTC().Add(g.timeout)
+	if contextDeadline, ok := ctx.Deadline(); ok &&
+		contextDeadline.Before(deadline) {
+		return contextDeadline.UTC()
+	}
+	return deadline
+}
+
+func (g *AgentDockerGateway) dispatchCommand(
+	ctx context.Context,
+	hostID string,
+	command managedhostbiz.AgentCommand,
+) error {
 	result, err := g.dispatcher.Dispatch(ctx, hostID, command)
 	if err != nil {
 		return g.dispatchError(ctx, err)

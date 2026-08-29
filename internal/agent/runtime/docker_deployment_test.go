@@ -202,6 +202,55 @@ func TestAgentDockerDeploymentPrepareIsIdempotentAndForwardsAuth(
 	}
 }
 
+func TestAgentCutoverReleaseIsExactDurableAndReclaimsCapacity(t *testing.T) {
+	stateDirectory := filepath.Join(t.TempDir(), "state")
+	cache, err := NewFileResultCache(stateDirectory, 16)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cutovers, err := NewFileCutoverStore(stateDirectory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cutovers.Observe(
+		"owndock-project-1-app-1", "deployment-2", 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewDockerExecutor(
+		"/var/run/docker.sock", cache, cutovers,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := cutoverReleaseCommand("release-1", "deployment-1", 2)
+	result, err := executor.Execute(t.Context(), command)
+	if err != nil || result.Status != agentprotocol.AgentCommandFailed ||
+		result.ErrorCode != "cutover_conflict" {
+		t.Fatalf("mismatched release = %+v, %v", result, err)
+	}
+	if _, err := cutovers.Observe(
+		"owndock-project-2-app-2", "deployment-1", 1,
+	); err == nil {
+		t.Fatal("mismatched release reclaimed capacity")
+	}
+
+	command = cutoverReleaseCommand("release-2", "deployment-2", 2)
+	first, err := executor.Execute(t.Context(), command)
+	if err != nil || first.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("exact release = %+v, %v", first, err)
+	}
+	second, err := executor.Execute(t.Context(), command)
+	if err != nil || !first.Equivalent(second) {
+		t.Fatalf("release replay = %+v, %v", second, err)
+	}
+	if _, err := cutovers.Observe(
+		"owndock-project-2-app-2", "deployment-1", 1,
+	); err != nil {
+		t.Fatalf("released capacity = %v", err)
+	}
+}
+
 func TestAgentDockerDeploymentStagesAndActivatesCandidate(t *testing.T) {
 	executor, engine := newDeploymentExecutor(t)
 	stage := deploymentCommand(
@@ -581,6 +630,23 @@ func deploymentCommand(
 		Kind:       kind,
 		Deadline:   time.Now().Add(time.Minute),
 		Deployment: deployment,
+	}
+}
+
+func cutoverReleaseCommand(
+	commandID, deploymentID string,
+	sequence uint64,
+) agentprotocol.AgentCommand {
+	return agentprotocol.AgentCommand{
+		ID:       commandID,
+		Kind:     agentprotocol.AgentCommandCutoverRelease,
+		Deadline: time.Now().Add(time.Minute),
+		Cutover: &agentprotocol.CutoverCommand{
+			DeploymentID:    deploymentID,
+			CutoverSequence: sequence,
+			RuntimeTargetID: "target-1",
+			ContainerName:   "owndock-project-1-app-1",
+		},
 	}
 }
 

@@ -32,6 +32,10 @@ development:
 product:
   enabled: false
   source_probe_timeout: 10s
+  # Optional installation-scoped Git trust. The CA file must be mounted into
+  # both Server and Build Worker. Proxy URLs must not contain credentials.
+  source_git_ca_cert_file: ""
+  source_git_https_proxy: ""
   build_trigger_rate_limit: 60
   build_trigger_rate_window: 1m
   build_webhook_rate_limit: 120
@@ -46,8 +50,11 @@ runtime:
     operation_timeout: 2h15m
     checkout_timeout: 10m
     workspace_root: /var/lib/owndock/builds
+    require_workspace_hard_quota: true
+    workspace_hard_quota_bytes: 8589934592
     max_workspace_bytes: 5368709120
     max_workspace_files: 250000
+    max_workspace_depth: 64
     git_executable: git
     git_version: 2.55.0
     buildkit_endpoint: unix:///run/owndock-buildkit/buildkitd.sock
@@ -55,10 +62,39 @@ runtime:
     buildkit_ca_cert_file: ""
     buildkit_client_cert_file: ""
     buildkit_client_key_file: ""
+    # Required when the Build Worker is enabled. This must resolve only inside
+    # the isolated Build network; the BuildKit daemon uses the same URL.
+    build_egress_proxy_url: ""
     log_retention: 168h
     log_max_bytes: 10485760
     log_chunk_bytes: 16384
     metrics_address: 127.0.0.1:9091
+  build_egress_gateway:
+    enabled: false
+    address: 0.0.0.0:3128
+    dial_timeout: 10s
+    idle_timeout: 2m
+    maximum_connections: 128
+    # Exact host:port entries only. Private destinations require the explicit
+    # allow_private flag; loopback, link-local and multicast are never valid.
+    allowed_destinations: []
+  evidence_worker:
+    enabled: false
+    poll_interval: 2s
+    lease_duration: 30s
+    operation_timeout: 30m
+    syft_executable: /usr/local/bin/syft
+    syft_version: 1.50.0
+    cosign_executable: /usr/local/bin/cosign
+    cosign_version: 3.0.6
+    trivy_executable: /usr/local/bin/trivy
+    trivy_version: 0.74.0
+    trivy_cache_directory: /var/lib/owndock/trivy-cache
+    vulnerability_freshness: 24h
+    trusted_roots_directory: /etc/owndock/trusted-roots
+    max_document_bytes: 16777216
+    max_layer_bytes: 268435456
+    metrics_address: 127.0.0.1:9092
   deployment_worker:
     enabled: false
     poll_interval: 2s

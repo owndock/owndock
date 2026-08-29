@@ -1,0 +1,81 @@
+name: supply-chain-keyless
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/supply-chain-keyless.yml"
+      - "Dockerfile.evidence-worker"
+      - "internal/modules/supplychain/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/supply-chain-keyless.yml"
+      - "Dockerfile.evidence-worker"
+      - "internal/modules/supplychain/**"
+  workflow_dispatch:
+  schedule:
+    - cron: "41 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  private-sigstore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.5
+          cache: true
+      - name: Start fixed private Sigstore stack
+        uses: sigstore/scaffolding/actions/setup@5444af42e303f5ceb37e077637f953133a4eba7c # v0.7.37
+        with:
+          version: v0.7.37
+          k8s-version: v1.35.x
+          registry-name: registry.local
+          registry-port: "5000"
+      - name: Export immutable trusted root and signing config
+        shell: bash
+        run: |
+          set -euo pipefail
+          repository_archive="$RUNNER_TEMP/sigstore-tuf-repository.tar.gz"
+          repository_directory="$RUNNER_TEMP/sigstore-tuf-repository"
+          mkdir -p "$repository_directory"
+          kubectl -n tuf-system get secret tuf-root -ojsonpath='{.data.repository}' \
+            | base64 --decode > "$repository_archive"
+          tar -xzf "$repository_archive" -C "$repository_directory"
+          trusted_root="$(find "$repository_directory" -type f -name '*.trusted_root.json' -print -quit)"
+          test -n "$trusted_root"
+
+          cosign_container="owndock-cosign-keyless-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm --force "$cosign_container" >/dev/null 2>&1 || true' EXIT
+          docker create --name "$cosign_container" --entrypoint /ko-app/cosign \
+            ghcr.io/sigstore/cosign/cosign:v3.0.6@sha256:de9c65609e6bde17e6b48de485ee788407c9502fa08b8f4459f595b21f56cd00 version >/dev/null
+          docker cp "$cosign_container:/ko-app/cosign" "$RUNNER_TEMP/cosign"
+          chmod 0700 "$RUNNER_TEMP/cosign"
+          signing_config="$RUNNER_TEMP/signing-config.json"
+          "$RUNNER_TEMP/cosign" signing-config create \
+            --fulcio="url=${FULCIO_URL},api-version=1,start-time=2024-01-01T00:00:00Z,operator=sigstore.dev" \
+            --rekor="url=${REKOR_URL},api-version=1,start-time=2024-01-01T00:00:00Z,operator=sigstore.dev" \
+            --rekor-config=ANY \
+            --tsa="url=${TSA_URL}/api/v1/timestamp,api-version=1,start-time=2024-01-01T00:00:00Z,operator=sigstore.dev" \
+            --tsa-config=EXACT:1 \
+            --out "$signing_config"
+
+          kind_cluster="$(kind get clusters | head -n 1)"
+          offline_container="$(docker ps \
+            --filter "label=io.x-k8s.kind.cluster=${kind_cluster}" \
+            --format '{{.Names}}' | head -n 1)"
+          test -n "$offline_container"
+          echo "OWNDOCK_SIGSTORE_SIGNING_CONFIG=$(realpath "$signing_config")" >> "$GITHUB_ENV"
+          echo "OWNDOCK_SIGSTORE_TRUSTED_ROOT=$(realpath "$trusted_root")" >> "$GITHUB_ENV"
+          echo "OWNDOCK_SIGSTORE_OFFLINE_CONTAINER=$offline_container" >> "$GITHUB_ENV"
+      - name: Verify private keyless bundle offline with OwnDock adapter
+        env:
+          OWNDOCK_RUN_PRIVATE_SIGSTORE_INTEGRATION: "1"
+          OWNDOCK_SIGSTORE_IDENTITY_TOKEN: ${{ env.OIDC_TOKEN }}
+          OWNDOCK_SIGSTORE_IDENTITY: https://kubernetes.io/namespaces/default/serviceaccounts/default
+          OWNDOCK_SIGSTORE_ISSUER: https://kubernetes.default.svc.cluster.local
+        run: make test-private-sigstore-integration

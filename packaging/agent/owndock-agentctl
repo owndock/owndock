@@ -1,0 +1,426 @@
+#!/bin/sh
+
+set -eu
+
+PROGRAM=owndock-agentctl
+SERVICE=owndock-agent.service
+AGENT_USER=owndock-agent
+AGENT_GROUP=owndock-agent
+SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+INSTALL_ROOT=${OWNDOCK_AGENT_INSTALL_ROOT:-/}
+OFFLINE=${OWNDOCK_AGENT_OFFLINE:-0}
+SERVICE_STARTUP_GRACE_SECONDS=3
+
+case "$INSTALL_ROOT" in
+    /*) ;;
+    *) printf '%s: install root must be absolute\n' "$PROGRAM" >&2; exit 1 ;;
+esac
+if [ "$INSTALL_ROOT" != / ] && [ "$OFFLINE" != 1 ]; then
+    printf '%s: non-system roots require explicit offline staging mode\n' "$PROGRAM" >&2
+    exit 1
+fi
+
+fail() {
+    printf '%s: %s\n' "$PROGRAM" "$1" >&2
+    exit 1
+}
+
+usage() {
+    cat <<'EOF'
+Usage:
+  owndock-agentctl install [--start]
+  owndock-agentctl enroll --enrollment-endpoint <https-url> \
+    --control-endpoint <https-url> --token-file <absolute-private-file>
+  owndock-agentctl enroll --recover
+  owndock-agentctl rollback --version <version>
+  owndock-agentctl status
+
+install verifies the packaged SHA-256 checksum and binary version, installs an
+immutable versioned release, and atomically switches the current symlink. An
+already active service is restarted. --start also starts an inactive service.
+
+rollback switches only to an already installed, verified release. Agent
+configuration, machine identity and runtime state are never rolled back.
+
+enroll reads the one-time token only from a private regular file, creates the
+private key locally, validates the returned certificate identity, installs the
+configuration and starts the service. --recover completes a response already
+persisted locally after an interrupted installation and does not reuse a token.
+EOF
+}
+
+valid_version() {
+    value=$1
+    case "$value" in
+        [A-Za-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case "$value" in
+        ''|.*|*/*|*' '*|*'?'*|*'#'*|*'%'*|*':'*|*'\\'*) return 1 ;;
+        *[!A-Za-z0-9._+-]*) return 1 ;;
+    esac
+    [ "${#value}" -le 64 ] || return 1
+    printf '%s\n' "$value" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+}
+
+root_path() {
+    if [ "$INSTALL_ROOT" = / ]; then
+        printf '%s\n' "$1"
+    else
+        printf '%s%s\n' "${INSTALL_ROOT%/}" "$1"
+    fi
+}
+
+OPT_DIR=$(root_path /opt/owndock-agent)
+RELEASES_DIR=$OPT_DIR/releases
+CURRENT_LINK=$OPT_DIR/current
+CONFIG_DIR=$(root_path /etc/owndock)
+STATE_DIR=$(root_path /var/lib/owndock-agent)
+IDENTITY_DIR=$STATE_DIR/identity
+UNIT_PATH=$(root_path /etc/systemd/system/$SERVICE)
+MANAGER_PATH=$(root_path /usr/local/sbin/$PROGRAM)
+
+require_production_host() {
+    [ "$(uname -s)" = Linux ] || fail "production installation requires Linux"
+    [ "$(id -u)" -eq 0 ] || fail "production installation requires root"
+    command -v systemctl >/dev/null 2>&1 || fail "systemctl is required"
+    command -v grep >/dev/null 2>&1 || fail "grep is required"
+    command -v getent >/dev/null 2>&1 || fail "getent is required"
+    command -v useradd >/dev/null 2>&1 || fail "useradd is required"
+    command -v usermod >/dev/null 2>&1 || fail "usermod is required"
+    command -v runuser >/dev/null 2>&1 || fail "runuser is required"
+}
+
+create_account() {
+    getent group docker >/dev/null 2>&1 || fail "the docker group does not exist"
+    if ! id "$AGENT_USER" >/dev/null 2>&1; then
+        nologin=/usr/sbin/nologin
+        [ -x "$nologin" ] || nologin=/sbin/nologin
+        [ -x "$nologin" ] || fail "nologin shell is unavailable"
+        if getent group "$AGENT_GROUP" >/dev/null 2>&1; then
+            useradd --system --gid "$AGENT_GROUP" --home-dir /var/lib/owndock-agent \
+                --shell "$nologin" "$AGENT_USER"
+        else
+            useradd --system --user-group --home-dir /var/lib/owndock-agent \
+                --shell "$nologin" "$AGENT_USER"
+        fi
+    fi
+    account=$(getent passwd "$AGENT_USER") || fail "Agent account is unavailable"
+    account_name=$(printf '%s\n' "$account" | awk -F: '{print $1}')
+    account_home=$(printf '%s\n' "$account" | awk -F: '{print $6}')
+    account_shell=$(printf '%s\n' "$account" | awk -F: '{print $7}')
+    [ "$account_name" = "$AGENT_USER" ] &&
+        [ "$account_home" = /var/lib/owndock-agent ] &&
+        [ "$(id -gn "$AGENT_USER")" = "$AGENT_GROUP" ] ||
+        fail "existing Agent account has an unsafe identity or home"
+    case "$account_shell" in
+        */nologin|*/false) ;;
+        *) fail "existing Agent account must use a non-login shell" ;;
+    esac
+    usermod -a -G docker "$AGENT_USER"
+}
+
+install_directories() {
+    if [ "$INSTALL_ROOT" = / ]; then
+        install -d -o root -g root -m 0755 "$OPT_DIR" "$RELEASES_DIR"
+        install -d -o root -g "$AGENT_GROUP" -m 0750 "$CONFIG_DIR"
+        install -d -o "$AGENT_USER" -g "$AGENT_GROUP" -m 0700 "$STATE_DIR" "$IDENTITY_DIR"
+        install -d -o root -g root -m 0755 "$(dirname "$UNIT_PATH")" "$(dirname "$MANAGER_PATH")"
+    else
+        install -d -m 0755 "$OPT_DIR" "$RELEASES_DIR" "$CONFIG_DIR"
+        install -d -m 0700 "$STATE_DIR" "$IDENTITY_DIR"
+        install -d -m 0755 "$(dirname "$UNIT_PATH")" "$(dirname "$MANAGER_PATH")"
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail "sha256sum or shasum is required"
+    fi
+}
+
+read_expected_checksum() {
+    checksum_file=$1
+    [ -f "$checksum_file" ] && [ ! -L "$checksum_file" ] || fail "checksum file is not a regular file"
+    expected=$(tr -d '\r\n' < "$checksum_file")
+    case "$expected" in
+        ''|*[!0-9a-fA-F]*) fail "checksum file must contain one SHA-256 digest" ;;
+    esac
+    [ "${#expected}" -eq 64 ] || fail "checksum file must contain one SHA-256 digest"
+    printf '%s\n' "$expected" | tr 'A-F' 'a-f'
+}
+
+verify_checksum() {
+    binary=$1
+    checksum_file=$2
+    [ -f "$binary" ] && [ ! -L "$binary" ] || fail "Agent artifact is not a regular file"
+    expected=$(read_expected_checksum "$checksum_file")
+    actual=$(sha256_file "$binary")
+    [ "$actual" = "$expected" ] || fail "Agent artifact checksum does not match"
+}
+
+verify_version() {
+    binary=$1
+    version=$2
+    if [ "$INSTALL_ROOT" = / ]; then
+        version_output=$(runuser -u "$AGENT_USER" -- "$binary" -version) || fail "Agent artifact version check failed"
+    else
+        version_output=$("$binary" -version) || fail "Agent artifact version check failed"
+    fi
+    case "$version_output" in
+        "owndock-agent $version ("*) ;;
+        *) fail "Agent artifact version does not match package VERSION" ;;
+    esac
+}
+
+verify_installed_release() {
+    version=$1
+    release=$RELEASES_DIR/$version
+    [ -f "$release/VERSION" ] && [ ! -L "$release/VERSION" ] || fail "installed Agent VERSION is unsafe"
+    installed_version=$(tr -d '\r\n' < "$release/VERSION")
+    [ "$installed_version" = "$version" ] || fail "installed Agent VERSION does not match its release directory"
+    verify_checksum "$release/owndock-agent" "$release/owndock-agent.sha256"
+    verify_version "$release/owndock-agent" "$version"
+    [ -f "$release/owndock-agent.service" ] && [ ! -L "$release/owndock-agent.service" ] || fail "installed Agent service unit is unsafe"
+}
+
+acquire_lock() {
+    install -d -m 0755 "$OPT_DIR"
+    if [ "$INSTALL_ROOT" = / ]; then
+        command -v flock >/dev/null 2>&1 || fail "flock is required"
+        lock_file=$OPT_DIR/.agentctl.lock
+        exec 9>"$lock_file"
+        flock -n 9 || fail "another Agent install operation is running"
+    else
+        lock_dir=$OPT_DIR/.agentctl.lock
+        mkdir "$lock_dir" 2>/dev/null || fail "another Agent install operation is running"
+        trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT HUP INT TERM
+    fi
+}
+
+atomic_link() {
+    target=$1
+    link=$2
+    temporary=${link}.$$
+    rm -f "$temporary"
+    ln -s "$target" "$temporary"
+    if ! mv -Tf "$temporary" "$link" 2>/dev/null; then
+        mv -fh "$temporary" "$link"
+    fi
+}
+
+atomic_switch() {
+    atomic_link "releases/$1" "$CURRENT_LINK"
+}
+
+current_target() {
+    if [ -L "$CURRENT_LINK" ]; then
+        readlink "$CURRENT_LINK"
+    elif [ -e "$CURRENT_LINK" ]; then
+        fail "current Agent path is not a symlink"
+    fi
+}
+
+restore_target() {
+    previous=$1
+    if [ -n "$previous" ]; then
+        atomic_link "$previous" "$CURRENT_LINK"
+    else
+        rm -f "$CURRENT_LINK"
+    fi
+}
+
+service_active() {
+    [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$SERVICE"
+}
+
+restart_service_stably() {
+    systemctl restart "$SERVICE" || return 1
+    sleep "$SERVICE_STARTUP_GRACE_SECONDS"
+    systemctl is-active --quiet "$SERVICE"
+}
+
+install_release() {
+    start=false
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --start) start=true ;;
+            *) fail "unknown install option: $1" ;;
+        esac
+        shift
+    done
+    [ -f "$SCRIPT_DIR/VERSION" ] && [ ! -L "$SCRIPT_DIR/VERSION" ] || fail "package VERSION is missing"
+    version=$(tr -d '\r\n' < "$SCRIPT_DIR/VERSION")
+    valid_version "$version" || fail "package VERSION is invalid"
+    binary=$SCRIPT_DIR/owndock-agent
+    checksum=$SCRIPT_DIR/owndock-agent.sha256
+    unit=$SCRIPT_DIR/owndock-agent.service
+    example=$SCRIPT_DIR/agent.yaml.example
+    manager=$SCRIPT_DIR/owndock-agentctl
+    for required in "$unit" "$example" "$manager"; do
+        [ -f "$required" ] && [ ! -L "$required" ] || fail "package file is missing or unsafe: $(basename "$required")"
+    done
+    verify_checksum "$binary" "$checksum"
+    if [ "$INSTALL_ROOT" = / ]; then
+        require_production_host
+        create_account
+    fi
+    install_directories
+    acquire_lock
+    release=$RELEASES_DIR/$version
+    if [ -e "$release" ]; then
+        [ -d "$release" ] && [ ! -L "$release" ] || fail "installed release path is unsafe"
+        verify_installed_release "$version"
+        package_digest=$(read_expected_checksum "$checksum")
+        installed_digest=$(read_expected_checksum "$release/owndock-agent.sha256")
+        [ "$package_digest" = "$installed_digest" ] || fail "this version is already installed with different content"
+        [ "$(sha256_file "$unit")" = "$(sha256_file "$release/owndock-agent.service")" ] || fail "this version is already installed with a different service unit"
+    else
+        temporary=$RELEASES_DIR/.${version}.$$
+        install -d -m 0755 "$temporary"
+        install -m 0755 "$binary" "$temporary/owndock-agent"
+        install -m 0644 "$checksum" "$temporary/owndock-agent.sha256"
+        install -m 0644 "$unit" "$temporary/owndock-agent.service"
+        install -m 0644 "$SCRIPT_DIR/VERSION" "$temporary/VERSION"
+        verify_version "$temporary/owndock-agent" "$version"
+        mv "$temporary" "$release"
+    fi
+    previous=$(current_target)
+    if [ -e "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ]; then
+        fail "existing systemd unit is not an OwnDock-managed symlink"
+    fi
+    install -m 0640 "$example" "$CONFIG_DIR/agent.yaml.example"
+    install -m 0755 "$manager" "$MANAGER_PATH"
+    atomic_link /opt/owndock-agent/current/owndock-agent.service "$UNIT_PATH"
+    atomic_switch "$version"
+    if [ "$INSTALL_ROOT" = / ]; then
+        chown root:"$AGENT_GROUP" "$CONFIG_DIR/agent.yaml.example"
+        systemctl daemon-reload
+        was_active=false
+        service_active && was_active=true
+        if [ "$was_active" = true ] || [ "$start" = true ]; then
+            [ -f "$CONFIG_DIR/agent.yaml" ] && [ ! -L "$CONFIG_DIR/agent.yaml" ] || {
+                restore_target "$previous"
+                systemctl daemon-reload
+                fail "create /etc/owndock/agent.yaml before starting the service"
+            }
+            if ! restart_service_stably; then
+                restore_target "$previous"
+                systemctl daemon-reload
+                if [ "$was_active" = true ] && ! restart_service_stably; then
+                    fail "Agent restart failed and the previous release could not be restored"
+                fi
+                fail "Agent restart failed; previous release was restored"
+            fi
+            systemctl enable "$SERVICE" >/dev/null
+        fi
+    fi
+    printf 'installed OwnDock Agent %s\n' "$version"
+}
+
+enroll_agent() {
+    [ "$INSTALL_ROOT" = / ] || fail "Agent enrollment is unavailable in offline staging mode"
+    require_production_host
+    create_account
+    install_directories
+    acquire_lock
+    target=$(current_target)
+    case "$target" in
+        releases/*) version=${target#releases/} ;;
+        *) fail "install an Agent release before enrollment" ;;
+    esac
+    valid_version "$version" || fail "current Agent release is invalid"
+    verify_installed_release "$version"
+    [ -L "$UNIT_PATH" ] || fail "install the Agent systemd unit before enrollment"
+    "$CURRENT_LINK/owndock-agent" enroll "$@"
+    for installed in "$CONFIG_DIR/agent.yaml" "$CONFIG_DIR/agent-ca.pem"; do
+        [ -f "$installed" ] && [ ! -L "$installed" ] || fail "Agent enrollment did not install required files"
+        chown root:"$AGENT_GROUP" "$installed"
+        chmod 0640 "$installed"
+    done
+    identity=$IDENTITY_DIR/agent-identity.pem
+    [ -f "$identity" ] && [ ! -L "$identity" ] || fail "Agent enrollment did not install a machine identity"
+    instance=$STATE_DIR/instance-id
+    [ -f "$instance" ] && [ ! -L "$instance" ] || fail "Agent enrollment did not persist an instance identity"
+    chown "$AGENT_USER":"$AGENT_GROUP" "$identity" "$instance"
+    chmod 0600 "$identity" "$instance"
+    systemctl daemon-reload
+    if ! restart_service_stably; then
+        fail "Agent enrollment completed but the service failed to start; credentials were retained"
+    fi
+    systemctl enable "$SERVICE" >/dev/null
+    printf 'OwnDock Agent enrollment is active\n'
+}
+
+rollback_release() {
+    version=
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --version)
+                shift
+                [ "$#" -gt 0 ] || fail "--version requires a value"
+                version=$1
+                ;;
+            *) fail "unknown rollback option: $1" ;;
+        esac
+        shift
+    done
+    valid_version "$version" || fail "rollback version is invalid"
+    [ "$INSTALL_ROOT" != / ] || require_production_host
+    install_directories
+    acquire_lock
+    verify_installed_release "$version"
+    previous=$(current_target)
+    [ "$previous" != "releases/$version" ] || {
+        printf 'OwnDock Agent %s is already current\n' "$version"
+        return
+    }
+    was_active=false
+    service_active && was_active=true
+    atomic_switch "$version"
+    if [ "$INSTALL_ROOT" = / ]; then
+        systemctl daemon-reload
+        if [ "$was_active" = true ]; then
+            if ! restart_service_stably; then
+                restore_target "$previous"
+                systemctl daemon-reload
+                restart_service_stably || fail "rollback failed and the previous release could not be restored"
+                fail "rollback restart failed; previous release was restored"
+            fi
+        fi
+    fi
+    printf 'rolled back OwnDock Agent to %s\n' "$version"
+}
+
+show_status() {
+    target=$(current_target)
+    if [ -z "$target" ]; then
+        printf 'OwnDock Agent is not installed\n'
+        return
+    fi
+    case "$target" in
+        releases/*) version=${target#releases/} ;;
+        *) fail "current Agent symlink target is invalid" ;;
+    esac
+    valid_version "$version" || fail "current Agent symlink target is invalid"
+    verify_installed_release "$version"
+    printf 'current OwnDock Agent: %s\n' "$version"
+    if [ "$INSTALL_ROOT" = / ]; then
+        systemctl --no-pager --full status "$SERVICE"
+    fi
+}
+
+command=${1:-}
+[ "$#" -eq 0 ] || shift
+case "$command" in
+    install) install_release "$@" ;;
+    enroll) enroll_agent "$@" ;;
+    rollback) rollback_release "$@" ;;
+    status) [ "$#" -eq 0 ] || fail "status does not accept options"; show_status ;;
+    -h|--help|help) usage ;;
+    *) usage >&2; exit 2 ;;
+esac

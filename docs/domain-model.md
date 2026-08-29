@@ -16,6 +16,7 @@ Application 1 --* Build Configuration
 Build Configuration 1 --* Build Trigger
 Build Configuration 1 --* Build Hook
 Build Configuration 1 --* Build 1 --0..1 Artifact
+Artifact 1 --* Artifact Evidence
 Artifact 1 --0..1 Release
 Release 1 --* Deployment *--1 Environment
 Deployment *--1 Runtime Target
@@ -34,6 +35,7 @@ Managed Host 1 --* Host Terminal Session
 - Source Repository 表示平台无关的标准 Git HTTPS/SSH 代码来源，Repository Credential 只保存外部秘密引用和安全展示元数据；
 - Build Configuration 描述 Dockerfile、上下文、Registry、平台、资源限制和可选 development 自动部署目标；
 - Build 是一次不可变构建执行，Artifact 是按 digest 固定的 OCI 构建结果；
+- Artifact Evidence 是绑定 Artifact digest 的 SBOM、Provenance、签名或漏洞报告有界索引，完整证据正文不嵌入 MongoDB 主文档；授权下载按 OCI descriptor 读取并复核 subject、layer digest 与文档结构；
 - Application 是长期软件服务身份；
 - Release 是不可变可部署版本，并固定 OCI image digest；
 - Environment 是 dev/staging/prod 等逻辑阶段；
@@ -44,9 +46,9 @@ Managed Host 1 --* Host Terminal Session
 - Template 是可选的 Application 创建预设，不参与运行期隐式继承。
 - Terminal Access Policy 固定角色、环境/目标范围、超时与并发；Terminal Session 固定操作者和受管目标，只保存安全元数据。
 
-Template 已进入产品模型但尚未进入当前代码/API。Build Configuration、三类 Build 触发入口、状态机、Mongo queue/lease/generation fence、Artifact/Release 交接和 development 自动 Deployment 已进入正式契约。
+Template 已以社区版只读内置目录进入正式 API；创建 Application 时复制带版本的构建路径和运行规格快照，后续目录升级不会隐式修改已有 Application。团队私有模板、继承、自动同步和市场不在社区版当前边界。Build Configuration、三类 Build 触发入口、状态机、Mongo queue/lease/generation fence、Artifact/Release 交接和 development 自动 Deployment 已进入正式契约。
 独立 Build Worker 已完成固定 Git 2.55.0、HTTPS/SSH 临时凭据、Host Key 固定、Commit 二次验证、受限工作区、rootless BuildKit 构建、认证 Registry push，以及 Artifact/Release 幂等交接；真实 OCI digest 在 lease generation fence 下形成唯一 Artifact。Source Repository 与 Repository Credential 已实现安全登记、执行期秘密解析和受限只读 Git probe；自建 CA/代理兼容矩阵仍待完成。
-Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。Agent 证书支持到期前本地生成密钥和 CSR、pending 请求恢复、Server 幂等响应、最多 10 分钟旧证书过渡、单文件 identity bundle 原子安装和新 hello 确认。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的全量与 Event 调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window、有界持续读取、Docker 时间游标和失败不推进语义已实现。成功 Deployment 归属核验、Project/Host 权限分离、固定过滤与不透明游标的公开审计查询也已实现；真实双主机断线/事件洪峰系统验收尚未完成。自动安装，以及证书轮换和部署/终端的真实多主机故障系统验收仍未完成。
+Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、类型化 probe/部署/Inventory 命令传输、`owndock-agent` 本机 Docker executor、secret-safe 小结果缓存与部署槽位持久水位已经实现。首次安装支持本地 Ed25519 私钥/CSR、稳定 instance、一次性 token 私有文件、完全相同请求的 10 分钟响应恢复、pending 恢复和原子配置落盘。Agent 证书支持到期前本地生成密钥和 CSR、pending 请求恢复、Server 幂等响应、最多 10 分钟旧证书过渡、单文件 identity bundle 原子安装和新 hello 确认。Agent 正式发行路径已提供确定性双架构包、GitHub OIDC Sigstore keyless 签名、精确 Tag 身份约束和离线验签，首个受保护 Tag 尚待执行。Runtime Inventory 已实现安全领域投影、分块 generation、MongoDB Repository、显式 present/absent current state、direct/Agent 编排、真实 Runtime Target/短时凭据接线、带 Mongo 分布式租约的全量与 Event 调度和传输故障门禁；Event 安全提示、调度合并、direct/Agent snapshot window、有界持续读取、Docker 时间游标和失败不推进语义已实现。成功 Deployment 归属核验、Project/Host 权限分离、固定过滤与不透明游标的公开审计查询也已实现；真实双主机断线/事件洪峰系统验收尚未完成。Enrollment、证书轮换和部署/终端的真实多主机故障系统验收仍未完成。
 
 ## 已实现的状态规则
 
@@ -62,11 +64,11 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 
 - 一个安装实例首次 bootstrap 一个 Organization 和 Owner；
 - Managed Host 位于 Organization 下，连接模式固定为 `agent` 或 `direct`；Owner 可注册、创建 enrollment 和禁用，Maintainer 可读取，Project 权限不会自动授予主机权限；
-- Agent Enrollment 只保存 token hash 和过期/消费状态；Agent Identity 保存固定 Host/instance、证书序列号/指纹/到期时间、Agent/协议版本和声明能力；
+- Agent Enrollment 永不保存原始 token，只保存 token hash 和过期/消费状态；首次响应恢复窗口内还保存精确请求 hash、Identity ID 和公开证书/CA。Agent Identity 保存固定 Host/instance、证书序列号/指纹/到期时间、Agent/协议版本和声明能力；
 - Project 以 Organization 为查询、名称和所有权边界；Owner 隐式访问全部 Project，其他用户必须通过 Project Member 获得 Maintainer、Developer 或 Viewer 角色；
-- Application 位于 Project 下；
+- Application 位于 Project 下；可选引用只读内置 Template，并持久化与目录后续版本脱钩的 `template_snapshot`；
 - Release 位于 Application 下，只接受固定 SHA-256 digest 的 OCI image reference，创建后不可变，并固定端口、配置键、CPU/内存与可选健康检查；
-- Registry Credential 位于 Project 下，只保存 registry server、username 和外部 `password_ref`，不保存密码正文；
+- Registry Credential 位于 Project 下，只保存 registry server、username 和外部 `password_ref`，不保存密码正文；公开 API 只返回 `password_configured`，不回传引用；
 - Repository Credential 位于 Project 下，只保存 SSH Deploy Key/HTTPS Access Token 类型、展示元数据和外部 `secret_ref`；API 只返回 `secret_configured`；
 - Source Repository 位于 Project 下，只接受无凭据 HTTPS/SSH 地址；SSH 必须固定 Host Key fingerprint，凭据类型必须与协议一致，初始状态为 `pending`，显式探测后只保存安全状态和时间；
 - Build Configuration 位于 Project/Application 下，版本化保存 Source Repository、Dockerfile/context、精确允许 ref、Registry Credential、无 tag/digest 的镜像仓库、单一平台、资源/超时/并发、自动 Release 意图和最多 8 个 development 自动部署目标；关联资源必须同属 Project，只有 Maintainer/Owner 可修改自动部署列表，更新使用乐观版本并与审计原子提交；
@@ -74,7 +76,8 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Build Trigger 绑定一个 Build Configuration，允许 ref 只能收窄配置范围；外部请求只能提交 ref 和 Commit SHA，Trigger ID 进入 Build 幂等意图与审计，撤销后不可恢复；
 - Build Hook 绑定一个平台和 Build Configuration，Webhook Secret 与 Repository Credential 分离；原始 body 验签后才解析，provider + Hook + delivery ID 唯一，合法但不适用的事件记录为 ignored；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
-- Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
+- Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
+- Environment 内部保存运行变量绑定，但公开 API 只返回排序后的 `variable_keys`，不回传明文值或 `secret://` 引用；
 - Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；`trigger_source` 区分 manual/automatic，自动记录来源 Artifact、Build 和 Build Configuration；受管 Worker 使用原子领取、租约 heartbeat、同 Deployment generation fence、跨 Deployment cutover sequence 和安全失败分类；
 - Session 只保存 access token 的单向哈希；每个用户的活跃 Session 数有配置上限，用户可治理自己的 Session，Owner 可治理同一 Organization 成员的 Session；删除与 Audit Event 在同一 MongoDB 事务中提交，所有列表都排除 Token/hash；
 - 登录尝试按 normalized email 的 SHA-256 键在 MongoDB 共享计数，达到配置阈值后返回统一 `429` 和 `Retry-After`；正确登录清理计数，TTL 回收过期窗口。
@@ -88,7 +91,6 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 ## 已接受但尚未实现
 
-- Template 创建和快照实例化；
 - Source Repository 自建 CA/代理兼容矩阵；
 - Docker Runtime Inventory 的持续 Event 双主机/容量/秘密泄漏安全验收；
 - Agent 自动安装、部署/取消执行、证书安全轮换和 Agent Runtime Gateway；
@@ -106,12 +108,12 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 ## 下一步实现顺序
 
-1. 在已实现 enrollment、固定身份、双端心跳连接、可恢复证书轮换、`runtime.probe`、两阶段部署和持久结果缓存上完成安装自动化与轮换故障系统验收；
+1. 在已实现自动 enrollment、固定身份、双端心跳连接、可恢复证书轮换、`runtime.probe`、两阶段部署和持久结果缓存上完成真实安装/轮换故障系统验收；
 2. 使用两台真实 Agent 主机完成选址、断线、网络分区、延迟旧命令和过期 fence 系统验收；
 3. 完成 Runtime Inventory 的双主机、容量、事件洪峰和秘密泄漏系统验收；
 4. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
 5. 在已完成 Terminal 控制面、direct/Agent 容器与主机 Gateway、活动撤权和 WSS 安全链路上继续完成真实远程与浏览器系统验收；
-6. 建立 Template、密码恢复/OIDC 和生产安全告警能力；
+6. 建立密码恢复/OIDC、Template 商业治理扩展和生产安全告警能力；
 7. 完成远程 mTLS Engine、真实代理入口压力、网络故障注入后移除或重塑工程样例。
 
 当前和目标链路的时序见 [flows.md](flows.md)。

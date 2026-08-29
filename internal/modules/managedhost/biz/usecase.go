@@ -3,6 +3,7 @@ package biz
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"strings"
 	"time"
@@ -79,6 +80,7 @@ func (u *UseCase) WithEnrollment(
 }
 
 const agentCertificateRotationGrace = 10 * time.Minute
+const agentEnrollmentRecoveryWindow = 10 * time.Minute
 
 func (u *UseCase) RotateAgentCertificate(
 	ctx context.Context,
@@ -331,7 +333,7 @@ func (u *UseCase) ExchangeEnrollment(
 		return AgentCredentials{}, ErrEnrollmentUnavailable
 	}
 	rawToken = strings.TrimSpace(rawToken)
-	if rawToken == "" || len(csrPEM) == 0 {
+	if rawToken == "" || len(csrPEM) == 0 || len(csrPEM) > 16*1024 {
 		return AgentCredentials{}, ErrInvalidEnrollment
 	}
 	instanceID, agentVersion, protocolVersion, capabilities, err :=
@@ -341,6 +343,21 @@ func (u *UseCase) ExchangeEnrollment(
 	}
 	now := u.now().UTC()
 	tokenHash := u.tokens.Hash(rawToken)
+	requestHash := enrollmentRequestHash(
+		instanceID, agentVersion, protocolVersion, capabilities, csrPEM,
+	)
+	recoveryRepository, recoverable := u.enrollments.(RecoverableEnrollmentRepository)
+	if recoverable {
+		recovered, found, recoverErr := recoveryRepository.RecoverAgentEnrollment(
+			ctx, tokenHash, requestHash, now,
+		)
+		if recoverErr != nil {
+			return AgentCredentials{}, recoverErr
+		}
+		if found {
+			return recovered, nil
+		}
+	}
 	enrollment, err := u.enrollments.FindAvailableEnrollment(ctx, tokenHash, now)
 	if err != nil {
 		return AgentCredentials{}, err
@@ -375,13 +392,23 @@ func (u *UseCase) ExchangeEnrollment(
 		return AgentCredentials{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
-		if activateErr := u.enrollments.ActivateAgent(
-			transactionContext,
-			enrollment.ID,
-			tokenHash,
-			now,
-			identity,
-		); activateErr != nil {
+		var activateErr error
+		if recoverable {
+			activateErr = recoveryRepository.ActivateAgentRecoverable(
+				transactionContext, enrollment.ID, tokenHash, now, identity,
+				EnrollmentRecovery{
+					RequestSHA256:    requestHash,
+					RecoverUntil:     now.Add(agentEnrollmentRecoveryWindow),
+					CertificatePEM:   append([]byte(nil), certificate.CertificatePEM...),
+					CACertificatePEM: append([]byte(nil), certificate.CACertificatePEM...),
+				},
+			)
+		} else {
+			activateErr = u.enrollments.ActivateAgent(
+				transactionContext, enrollment.ID, tokenHash, now, identity,
+			)
+		}
+		if activateErr != nil {
 			return activateErr
 		}
 		return u.audit.Record(transactionContext, sharedaudit.Event{
@@ -393,6 +420,14 @@ func (u *UseCase) ExchangeEnrollment(
 		})
 	})
 	if err != nil {
+		if recoverable {
+			recovered, found, recoverErr := recoveryRepository.RecoverAgentEnrollment(
+				ctx, tokenHash, requestHash, now,
+			)
+			if recoverErr == nil && found {
+				return recovered, nil
+			}
+		}
 		return AgentCredentials{}, err
 	}
 	return AgentCredentials{
@@ -400,6 +435,31 @@ func (u *UseCase) ExchangeEnrollment(
 		CertificatePEM:   certificate.CertificatePEM,
 		CACertificatePEM: certificate.CACertificatePEM,
 	}, nil
+}
+
+func enrollmentRequestHash(
+	instanceID, agentVersion, protocolVersion string,
+	capabilities []string,
+	csrPEM []byte,
+) string {
+	digest := sha256.New()
+	writePart := func(value []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(value)))
+		_, _ = digest.Write(size[:])
+		_, _ = digest.Write(value)
+	}
+	writePart([]byte(instanceID))
+	writePart([]byte(agentVersion))
+	writePart([]byte(protocolVersion))
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(len(capabilities)))
+	_, _ = digest.Write(count[:])
+	for _, capability := range capabilities {
+		writePart([]byte(capability))
+	}
+	writePart(csrPEM)
+	return hex.EncodeToString(digest.Sum(nil))
 }
 
 func (u *UseCase) enrollmentReady() bool {

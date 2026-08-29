@@ -1,0 +1,43 @@
+services:
+  evidence-worker:
+    # Build and publish Dockerfile.evidence-worker first, then use only the
+    # immutable image digest here. A mutable tag is intentionally rejected by
+    # the deployment procedure even though Compose itself accepts one.
+    image: ${OWNDOCK_EVIDENCE_WORKER_IMAGE:?set an immutable image digest}
+    command: ["-conf", "/etc/owndock/config.yaml"]
+    environment:
+      OWNDOCK_MONGODB_URI: ${OWNDOCK_MONGODB_URI:?required}
+    # Execution-only Registry passwords and provider-specific KMS credentials
+    # are injected here. Keep this root-readable file outside the repository;
+    # neither kind of credential is accepted through the OwnDock API.
+    env_file:
+      - ${OWNDOCK_EVIDENCE_SECRET_ENV_FILE:?required}
+    volumes:
+      - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
+      - ${OWNDOCK_TRUSTED_ROOTS_DIRECTORY:?required}:/etc/owndock/trusted-roots:ro
+      # Populate this directory with a reviewed Trivy DB snapshot before the
+      # worker starts. The worker never updates the database during a scan.
+      - ${OWNDOCK_TRIVY_CACHE_DIRECTORY:?required}:/var/lib/owndock/trivy-cache:ro
+    read_only: true
+    tmpfs:
+      # Syft cache and bounded transient image data have no persistent volume.
+      - /tmp:rw,noexec,nosuid,nodev,size=536870912,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: 1g
+    cpus: 1.0
+    ports:
+      - 127.0.0.1:${OWNDOCK_EVIDENCE_METRICS_PORT:-9092}:9092
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - evidence-egress
+
+networks:
+  evidence-egress:
+    # Compose cannot express destination/FQDN egress policy. Production must
+    # additionally allow only MongoDB, the selected OCI Registry, and required
+    # DNS through the host firewall or orchestrator NetworkPolicy.
+    driver: bridge

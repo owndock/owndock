@@ -54,6 +54,8 @@ sequenceDiagram
 
 `202` 表示通知已被可靠接收，不表示镜像已经构建完成。重复 delivery 会得到首次处理结果。原始请求体、签名和 Webhook Secret 都不会写入 MongoDB。
 
+Git 平台可能因为网络重试而打乱 Push 通知的到达顺序。OwnDock 不相信通知的先后顺序：创建 Build 前会读取该 ref 当前指向的 Commit，并要求它与通知中的 Commit 一致。较新的 Push 已经更新分支后，迟到的旧通知会记录为 `ignored` 并返回 `202`，不会创建旧 Build，也不会把应用自动部署回旧代码。
+
 ## 创建 Build Hook
 
 Owner 或 Maintainer 先为一个 Build Configuration 创建 Hook：
@@ -87,7 +89,7 @@ OWNDOCK_WEBHOOK_GITHUB_MAIN_HOOK_SECRET
 https://<你的 OwnDock API 域名>/api/v1/build-hooks/{provider}/{build_hook_id}
 ```
 
-Content type 选择 `application/json`，事件只选择 Push。默认请求体上限为 1 MiB，可通过 `product.build_webhook_max_body_bytes` 在 1 KiB 到 5 MiB 之间调整。
+Content type 选择 `application/json`，事件只选择 Push。Pull Request / Merge Request（包括来自 Fork 的请求）即使签名正确也固定返回 `202 ignored`，不会获得 Repository/Registry Secret，也不会进入 checkout 或 BuildKit；首版不提供“允许不可信 PR 构建”的开关。默认请求体上限为 1 MiB，可通过 `product.build_webhook_max_body_bytes` 在 1 KiB 到 5 MiB 之间调整。
 
 每个 Hook 默认每分钟最多接收 120 个新的、签名有效的 delivery，可通过 `product.build_webhook_rate_limit` 和 `product.build_webhook_rate_window` 调整。计数保存在 MongoDB 中，多个 Server 实例共用同一个上限。已记录 delivery 会先重新验签，再直接返回原结果，不重复占用名额。
 
@@ -133,4 +135,5 @@ Authorization: Bearer <session>
 - delivery 的唯一键是 `provider + hook_id + delivery_id`，并与 Build、审计在同一 MongoDB 事务内保存。
 - delivery 去重记录不设置 TTL，避免旧 delivery 在自动过期后再次触发；记录只含必要元数据，不含请求体和签名。
 - Push 中的 Commit SHA 仍要由只读 Git 查询确认确实属于该 ref；Webhook 不能直接决定要构建的仓库或配方。
+- Delivery ID 只用于识别同一次通知；不同 Delivery ID 也可能乱序。OwnDock 以远端 ref 当前 Commit 为准，迟到的旧 Push 固定忽略。
 - Handler 不执行 checkout、Dockerfile 或 BuildKit，因此可以快速返回 `202`。

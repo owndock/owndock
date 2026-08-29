@@ -1,6 +1,6 @@
 # Worker 可观测性与告警
 
-OwnDock 的后台执行不是“发出请求后立即完成”：Deployment、Build、Runtime Inventory 全量采集和 Docker Event 收敛都由 Worker 从 MongoDB 领取带租约的任务。运维人员需要区分三种情况：当前没有工作、Worker 正常处理工作，以及 Worker 因数据库、运行目标或执行超时而无法继续。
+OwnDock 的后台执行不是“发出请求后立即完成”：Deployment、Build、Artifact Evidence、Runtime Inventory 全量采集和 Docker Event 收敛都由 Worker 从 MongoDB 领取带租约的任务。运维人员需要区分三种情况：当前没有工作、Worker 正常处理工作，以及 Worker 因数据库、运行目标或执行超时而无法继续。
 
 为避免高基数和秘密泄漏，Prometheus 只使用固定 Worker 名称和固定结果；Project、Host、Runtime Target、Build、Deployment ID 不进入指标标签。资源 ID 只作为操作级 Trace 属性帮助受控排障，Span 名称固定，Trace 不记录 endpoint、凭据、请求正文、Docker/Git 原始错误或构建日志。
 
@@ -20,11 +20,12 @@ flowchart LR
     R --> G[Structured error log]
 ```
 
-统一轮询指标覆盖四个固定 Worker：
+统一轮询指标覆盖五个固定 Worker：
 
 | `worker` | 运行位置 | 用途 |
 | --- | --- | --- |
 | `build` | 独立 `owndock-build-worker` | Build、Artifact 与 Release 交接 |
+| `evidence` | 独立 `owndock-evidence-worker` | SBOM 生成与 OCI Evidence 发布 |
 | `deployment` | `owndock` Server，可配置启用 | Deployment 执行与取消 |
 | `runtime_inventory` | `owndock` Server，可配置启用 | 周期全量资源对账 |
 | `runtime_inventory_events` | `owndock` Server，可配置启用 | 有界 Docker Event 收敛 |
@@ -79,7 +80,7 @@ owndock_worker_last_error_unixtime
 
 Server 在自身监听地址提供 `/livez`、`/readyz` 和 `/metrics`；嵌入 Server 的 Deployment/Inventory Worker 指标也从该 `/metrics` 暴露。
 
-独立 Build Worker 在 `runtime.build_worker.metrics_address` 提供：
+独立 Build Worker 和 Evidence Worker 分别在 `runtime.build_worker.metrics_address` 与 `runtime.evidence_worker.metrics_address` 提供：
 
 - `/livez`：进程正在运行；
 - `/readyz`：MongoDB 当前可 Ping，失败只返回通用 `not ready`；

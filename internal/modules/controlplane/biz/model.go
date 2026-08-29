@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/mail"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -32,6 +33,7 @@ var (
 	ErrRuntimeTargetHostMismatch     = errors.New("runtime target connection mode does not match managed host")
 	ErrRuntimeTargetProbeUnavailable = errors.New("runtime target probe is unavailable")
 	ErrNotFound                      = errors.New("resource was not found")
+	ErrInvalidTemplate               = errors.New("template is invalid")
 )
 
 type Project struct {
@@ -65,11 +67,52 @@ type OrganizationUser struct {
 }
 
 type Application struct {
-	ID        string
-	ProjectID string
-	Name      string
-	CreatedBy string
-	CreatedAt time.Time
+	ID               string
+	ProjectID        string
+	Name             string
+	TemplateSnapshot *ApplicationTemplateSnapshot
+	CreatedBy        string
+	CreatedAt        time.Time
+}
+
+// LocalizedText keeps the built-in catalog useful to both supported product
+// locales without making the selected request language part of a persisted
+// Application snapshot.
+type LocalizedText struct {
+	English           string
+	SimplifiedChinese string
+}
+
+// TemplatePreset contains safe defaults only. It deliberately does not carry
+// credentials, repository IDs, registry IDs, Environment values, commands or
+// deployment targets.
+type TemplatePreset struct {
+	DockerfilePath string
+	ContextPath    string
+	RuntimeSpec    runtimespec.Spec
+}
+
+type Template struct {
+	ID          string
+	Version     uint64
+	Name        LocalizedText
+	Description LocalizedText
+	Preset      TemplatePreset
+}
+
+// ApplicationTemplateSnapshot is copied at Application creation. Later
+// catalog revisions cannot mutate an existing Application implicitly.
+type ApplicationTemplateSnapshot struct {
+	TemplateID      string
+	TemplateVersion uint64
+	DockerfilePath  string
+	ContextPath     string
+	RuntimeSpec     runtimespec.Spec
+}
+
+type TemplateCatalog interface {
+	ListTemplates(context.Context) ([]Template, error)
+	GetTemplate(context.Context, string) (Template, error)
 }
 
 type Release struct {
@@ -254,14 +297,149 @@ func NewProject(id, organizationID, name, createdBy string, now time.Time) (Proj
 }
 
 func NewApplication(id, projectID, name, createdBy string, now time.Time) (Application, error) {
+	return NewApplicationFromTemplate(
+		id, projectID, name, createdBy, now, nil,
+	)
+}
+
+func NewApplicationFromTemplate(
+	id, projectID, name, createdBy string,
+	now time.Time,
+	template *Template,
+) (Application, error) {
 	name, err := validName(name)
 	if err != nil {
 		return Application{}, err
 	}
-	return Application{
+	item := Application{
 		ID: id, ProjectID: projectID, Name: name,
 		CreatedBy: createdBy, CreatedAt: now.UTC(),
+	}
+	if template == nil {
+		return item, nil
+	}
+	normalized, err := NormalizeTemplate(*template)
+	if err != nil {
+		return Application{}, err
+	}
+	item.TemplateSnapshot, err = NormalizeApplicationTemplateSnapshot(
+		&ApplicationTemplateSnapshot{
+			TemplateID: normalized.ID, TemplateVersion: normalized.Version,
+			DockerfilePath: normalized.Preset.DockerfilePath,
+			ContextPath:    normalized.Preset.ContextPath,
+			RuntimeSpec:    cloneRuntimeSpec(normalized.Preset.RuntimeSpec),
+		},
+	)
+	if err != nil {
+		return Application{}, err
+	}
+	return item, nil
+}
+
+func NormalizeApplicationTemplateSnapshot(
+	item *ApplicationTemplateSnapshot,
+) (*ApplicationTemplateSnapshot, error) {
+	if item == nil {
+		return nil, nil
+	}
+	template, err := NormalizeTemplate(Template{
+		ID: item.TemplateID, Version: item.TemplateVersion,
+		Name: LocalizedText{English: "snapshot", SimplifiedChinese: "快照"},
+		Description: LocalizedText{
+			English: "snapshot", SimplifiedChinese: "快照",
+		},
+		Preset: TemplatePreset{
+			DockerfilePath: item.DockerfilePath,
+			ContextPath:    item.ContextPath,
+			RuntimeSpec:    cloneRuntimeSpec(item.RuntimeSpec),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &ApplicationTemplateSnapshot{
+		TemplateID: template.ID, TemplateVersion: template.Version,
+		DockerfilePath: template.Preset.DockerfilePath,
+		ContextPath:    template.Preset.ContextPath,
+		RuntimeSpec:    cloneRuntimeSpec(template.Preset.RuntimeSpec),
 	}, nil
+}
+
+func NormalizeTemplate(item Template) (Template, error) {
+	item.ID = strings.TrimSpace(item.ID)
+	item.Name.English = strings.TrimSpace(item.Name.English)
+	item.Name.SimplifiedChinese = strings.TrimSpace(item.Name.SimplifiedChinese)
+	item.Description.English = strings.TrimSpace(item.Description.English)
+	item.Description.SimplifiedChinese = strings.TrimSpace(
+		item.Description.SimplifiedChinese,
+	)
+	item.Preset.DockerfilePath = strings.TrimSpace(item.Preset.DockerfilePath)
+	item.Preset.ContextPath = strings.TrimSpace(item.Preset.ContextPath)
+	contextPath, contextOK := safeTemplatePath(item.Preset.ContextPath, true)
+	dockerfilePath, dockerfileOK := safeTemplatePath(
+		item.Preset.DockerfilePath,
+		false,
+	)
+	if !validTemplateID(item.ID) || item.Version == 0 ||
+		len(item.Name.English) > 80 || len(item.Name.SimplifiedChinese) > 80 ||
+		item.Name.English == "" || item.Name.SimplifiedChinese == "" ||
+		len(item.Description.English) > 240 ||
+		len(item.Description.SimplifiedChinese) > 240 ||
+		item.Description.English == "" ||
+		item.Description.SimplifiedChinese == "" ||
+		!contextOK || !dockerfileOK ||
+		(contextPath != "." && dockerfilePath != contextPath &&
+			!strings.HasPrefix(dockerfilePath, contextPath+"/")) {
+		return Template{}, ErrInvalidTemplate
+	}
+	item.Preset.ContextPath = contextPath
+	item.Preset.DockerfilePath = dockerfilePath
+	runtimeSpec, err := runtimespec.Normalize(
+		cloneRuntimeSpec(item.Preset.RuntimeSpec),
+	)
+	if err != nil {
+		return Template{}, ErrInvalidTemplate
+	}
+	item.Preset.RuntimeSpec = runtimeSpec
+	return item, nil
+}
+
+func validTemplateID(value string) bool {
+	if len(value) < 2 || len(value) > 80 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safeTemplatePath(value string, allowRoot bool) (string, bool) {
+	if value == "" || len(value) > 255 || strings.Contains(value, "\\") ||
+		strings.ContainsRune(value, 0) || path.IsAbs(value) {
+		return "", false
+	}
+	cleaned := path.Clean(value)
+	if cleaned != value || cleaned == ".." || strings.HasPrefix(cleaned, "../") ||
+		(!allowRoot && cleaned == ".") {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func cloneRuntimeSpec(value runtimespec.Spec) runtimespec.Spec {
+	value.Ports = append([]runtimespec.Port(nil), value.Ports...)
+	value.EnvironmentKeys = append([]string(nil), value.EnvironmentKeys...)
+	if value.HealthCheck != nil {
+		health := *value.HealthCheck
+		health.Command = append([]string(nil), value.HealthCheck.Command...)
+		value.HealthCheck = &health
+	}
+	return value
 }
 
 func NewRelease(id, projectID, applicationID, image, createdBy string, now time.Time) (Release, error) {

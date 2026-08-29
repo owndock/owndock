@@ -118,12 +118,29 @@ func TestWebhookVerifierIgnoresUnsupportedAndDeletedEvents(t *testing.T) {
 	verifier := NewWebhookVerifier(webhookSecretsStub{value: secret})
 	for _, envelope := range []biz.WebhookEnvelope{
 		{DeliveryID: "delivery-unsupported", Event: "issues", Body: []byte(`{"action":"opened"}`)},
+		{DeliveryID: "delivery-fork-pr", Event: "pull_request", Body: []byte(`{"action":"opened","pull_request":{"head":{"repo":{"fork":true},"sha":"a975c10d68a2d7461634f13b15c52a2efba72d16"},"base":{"ref":"main"}}}`)},
 		{DeliveryID: "delivery-deleted", Event: "push", Body: []byte(`{"ref":"refs/heads/old","after":"0000000000000000000000000000000000000000","deleted":true}`)},
 	} {
 		envelope.Signature = "sha256=" + hexHMAC(secret, envelope.Body)
 		event, err := verifier.VerifyAndParse(context.Background(), biz.BuildHook{Provider: biz.WebhookProviderGitHub}, envelope)
 		if err != nil || event.Supported {
 			t.Fatalf("VerifyAndParse() = %+v, %v", event, err)
+		}
+	}
+}
+
+func TestWebhookPushEventAllowlistRejectsPullAndMergeRequests(t *testing.T) {
+	for _, candidate := range []struct {
+		provider biz.WebhookProvider
+		event    string
+	}{
+		{provider: biz.WebhookProviderGitHub, event: "pull_request"},
+		{provider: biz.WebhookProviderGitLab, event: "Merge Request Hook"},
+		{provider: biz.WebhookProviderGitea, event: "pull_request"},
+		{provider: biz.WebhookProviderForgejo, event: "pull_request"},
+	} {
+		if pushEvent(candidate.provider, candidate.event) {
+			t.Fatalf("%s event %q was accepted", candidate.provider, candidate.event)
 		}
 	}
 }

@@ -1,15 +1,18 @@
 package data
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -24,7 +27,9 @@ const (
 	defaultCheckoutTimeout  = 10 * time.Minute
 	defaultCheckoutMaxBytes = int64(5 * 1024 * 1024 * 1024)
 	defaultCheckoutMaxFiles = int64(250000)
+	defaultCheckoutMaxDepth = 64
 	maximumGitCommandOutput = 64 * 1024
+	maximumGitTreeRecord    = 64 * 1024
 )
 
 var (
@@ -38,17 +43,23 @@ type GitCheckoutOptions struct {
 	Timeout           time.Duration
 	MaxWorkspaceBytes int64
 	MaxWorkspaceFiles int64
+	MaxWorkspaceDepth int
+	Network           GitNetworkOptions
 }
 
 type gitCommandRunner func(context.Context, string, []string, ...string) ([]byte, error)
+type gitTreeInspector func(context.Context, string, []string, []string, int64, int64, int) error
 
 type GitCheckoutGateway struct {
 	executable string
 	timeout    time.Duration
 	maxBytes   int64
 	maxFiles   int64
+	maxDepth   int
 	resolver   RepositorySecretResolver
+	network    gitNetworkPolicy
 	run        gitCommandRunner
+	inspect    gitTreeInspector
 	lookupEnv  func(string) (string, bool)
 }
 
@@ -78,16 +89,30 @@ func NewGitCheckoutGateway(resolver RepositorySecretResolver, options GitCheckou
 	if options.MaxWorkspaceFiles == 0 {
 		options.MaxWorkspaceFiles = defaultCheckoutMaxFiles
 	}
-	if options.Timeout <= 0 || options.MaxWorkspaceBytes <= 0 || options.MaxWorkspaceFiles <= 0 {
+	if options.MaxWorkspaceDepth == 0 {
+		options.MaxWorkspaceDepth = defaultCheckoutMaxDepth
+	}
+	if options.Timeout <= 0 || options.MaxWorkspaceBytes <= 0 || options.MaxWorkspaceFiles <= 0 ||
+		options.MaxWorkspaceDepth <= 0 {
 		return nil, ErrInvalidGitCheckout
+	}
+	network, err := newGitNetworkPolicy(options.Network)
+	if err != nil {
+		return nil, err
 	}
 	gateway := &GitCheckoutGateway{
 		executable: resolved, timeout: options.Timeout,
 		maxBytes: options.MaxWorkspaceBytes, maxFiles: options.MaxWorkspaceFiles,
-		resolver: resolver, lookupEnv: os.LookupEnv,
+		maxDepth: options.MaxWorkspaceDepth,
+		resolver: resolver, network: network, lookupEnv: os.LookupEnv,
 	}
 	gateway.run = func(ctx context.Context, directory string, environment []string, arguments ...string) ([]byte, error) {
 		return runGitCommand(ctx, resolved, directory, environment, arguments...)
+	}
+	gateway.inspect = func(ctx context.Context, directory string, environment, arguments []string,
+		maximumBytes, maximumFiles int64, maximumDepth int) error {
+		return inspectGitTree(ctx, resolved, directory, environment, arguments,
+			maximumBytes, maximumFiles, maximumDepth)
 	}
 	versionContext, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -113,6 +138,13 @@ func (g *GitCheckoutGateway) Checkout(ctx context.Context, request biz.CheckoutR
 		return biz.ErrCheckoutResourceLimit
 	}
 	environment := g.baseEnvironment(authDirectory)
+	if len(g.network.caBundle) > 0 {
+		operationCAFile := filepath.Join(authDirectory, "git-ca.pem")
+		if err := os.WriteFile(operationCAFile, g.network.caBundle, 0o600); err != nil {
+			return biz.ErrCheckoutResourceLimit
+		}
+		environment = append(environment, "GIT_SSL_CAINFO="+operationCAFile)
+	}
 	environment, secret, err := g.authentication(checkoutContext, request, authDirectory, environment)
 	if secret != nil {
 		defer clearBytes(secret)
@@ -138,6 +170,21 @@ func (g *GitCheckoutGateway) Checkout(ctx context.Context, request biz.CheckoutR
 	if err != nil || !strings.EqualFold(strings.TrimSpace(string(resolved)), request.Revision.CommitSHA) {
 		return biz.ErrCheckoutRevision
 	}
+	if g.inspect != nil {
+		arguments := g.gitArguments(
+			"-C", request.Destination, "ls-tree", "-r", "-z", "-l", "--full-tree", "FETCH_HEAD",
+		)
+		if err := g.inspect(checkoutContext, request.Destination, environment, arguments,
+			g.maxBytes, g.maxFiles, g.maxDepth); err != nil {
+			if parentErr := ctx.Err(); parentErr != nil {
+				return parentErr
+			}
+			if errors.Is(err, biz.ErrCheckoutResourceLimit) {
+				return err
+			}
+			return classifyCheckoutResult(ctx, checkoutContext, err)
+		}
+	}
 	if _, err := g.run(checkoutContext, request.Destination, environment,
 		g.gitArguments("-C", request.Destination, "checkout", "--quiet", "--detach", "--force", request.Revision.CommitSHA, "--")...); err != nil {
 		return classifyCheckoutResult(ctx, checkoutContext, err)
@@ -146,6 +193,92 @@ func (g *GitCheckoutGateway) Checkout(ctx context.Context, request biz.CheckoutR
 		return err
 	}
 	return nil
+}
+
+// inspectGitTree checks the fetched commit before Git materializes untrusted
+// paths. The post-checkout walk remains mandatory because object metadata does
+// not account for Git's own files or filesystem allocation behavior.
+func inspectGitTree(ctx context.Context, executable, directory string, environment, arguments []string,
+	maximumBytes, maximumFiles int64, maximumDepth int) error {
+	commandContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(commandContext, executable, arguments...)
+	command.Dir = directory
+	command.Env = environment
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return &gitCommandError{}
+	}
+	var stderr limitedBuffer
+	stderr.limit = maximumGitCommandOutput
+	command.Stderr = &stderr
+	if err := command.Start(); err != nil {
+		return &gitCommandError{output: append([]byte(nil), stderr.Bytes()...)}
+	}
+	inspectionErr := inspectGitTreeRecords(stdout, maximumBytes, maximumFiles, maximumDepth)
+	if inspectionErr != nil {
+		cancel()
+	}
+	waitErr := command.Wait()
+	if inspectionErr != nil {
+		return inspectionErr
+	}
+	if waitErr != nil {
+		return &gitCommandError{output: append([]byte(nil), stderr.Bytes()...)}
+	}
+	return nil
+}
+
+func inspectGitTreeRecords(input io.Reader, maximumBytes, maximumFiles int64, maximumDepth int) error {
+	reader := bufio.NewReaderSize(input, maximumGitTreeRecord)
+	var bytesUsed, files int64
+	for {
+		record, err := reader.ReadSlice(0)
+		if errors.Is(err, io.EOF) && len(record) == 0 {
+			return nil
+		}
+		if err != nil {
+			return biz.ErrCheckoutResourceLimit
+		}
+		record = record[:len(record)-1]
+		separator := bytes.IndexByte(record, '\t')
+		if separator <= 0 || separator == len(record)-1 {
+			return biz.ErrCheckoutResourceLimit
+		}
+		metadata := strings.Fields(string(record[:separator]))
+		path := string(record[separator+1:])
+		if len(metadata) != 4 || !safeGitTreePath(path, maximumDepth) {
+			return biz.ErrCheckoutResourceLimit
+		}
+		files++
+		if files > maximumFiles {
+			return biz.ErrCheckoutResourceLimit
+		}
+		if metadata[1] != "blob" {
+			continue
+		}
+		size, parseErr := strconv.ParseInt(metadata[3], 10, 64)
+		if parseErr != nil || size < 0 || size > maximumBytes-bytesUsed {
+			return biz.ErrCheckoutResourceLimit
+		}
+		bytesUsed += size
+	}
+}
+
+func safeGitTreePath(value string, maximumDepth int) bool {
+	if value == "" || strings.HasPrefix(value, "/") || len(value) >= maximumGitTreeRecord {
+		return false
+	}
+	parts := strings.Split(value, "/")
+	if len(parts) > maximumDepth {
+		return false
+	}
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func (g *GitCheckoutGateway) runBounded(parentContext, operationContext context.Context, destination string,
@@ -202,10 +335,13 @@ func (g *GitCheckoutGateway) baseEnvironment(home string) []string {
 	if home != "" {
 		environment = append(environment, "HOME="+home, "XDG_CONFIG_HOME="+home)
 	}
-	for _, name := range []string{"PATH", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "GIT_SSL_CAINFO", "HTTPS_PROXY", "NO_PROXY"} {
+	for _, name := range []string{"PATH", "TMPDIR"} {
 		if value, found := g.lookupEnv(name); found && value != "" {
 			environment = append(environment, name+"="+value)
 		}
+	}
+	if g.network.proxy.URL != "" {
+		environment = append(environment, "HTTPS_PROXY="+g.network.proxy.URL)
 	}
 	return environment
 }
@@ -388,6 +524,10 @@ func classifyCheckoutCommand(ctx context.Context, err error) error {
 	var commandError *gitCommandError
 	if errors.As(err, &commandError) {
 		message := strings.ToLower(string(commandError.output))
+		if strings.Contains(message, "no space left on device") ||
+			strings.Contains(message, "disk quota exceeded") {
+			return biz.ErrCheckoutResourceLimit
+		}
 		if strings.Contains(message, "authentication") || strings.Contains(message, "permission denied") ||
 			strings.Contains(message, "could not read username") || strings.Contains(message, "repository not found") {
 			return biz.ErrCheckoutAuthentication

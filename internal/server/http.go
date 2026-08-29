@@ -38,10 +38,22 @@ type ProductAPI struct {
 	protectedManagedHost http.Handler
 	protectedInventory   http.Handler
 	protectedBuild       http.Handler
+	protectedSupplyChain http.Handler
 	protectedTerminal    http.Handler
 	terminal             http.Handler
 	build                http.Handler
 	ingress              http.Handler
+}
+
+func (p *ProductAPI) WithSupplyChain(
+	supplyChainAPI http.Handler,
+	authenticate func(http.Handler) http.Handler,
+) error {
+	if supplyChainAPI == nil || authenticate == nil {
+		return fmt.Errorf("product supply-chain API is required")
+	}
+	p.protectedSupplyChain = authenticate(supplyChainAPI)
+	return nil
 }
 
 func (p *ProductAPI) WithTerminal(
@@ -160,6 +172,8 @@ func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 		p.terminal.ServeHTTP(w, r)
 	case p.protectedTerminal != nil && isTerminalPath(r.URL.Path):
 		p.protectedTerminal.ServeHTTP(w, r)
+	case p.protectedSupplyChain != nil && isSupplyChainPath(r.URL.Path):
+		p.protectedSupplyChain.ServeHTTP(w, r)
 	case p.protectedBuild != nil && isProjectBuildPath(r.URL.Path):
 		p.protectedBuild.ServeHTTP(w, r)
 	case p.protectedDeployment != nil && isProjectDeploymentPath(r.URL.Path):
@@ -170,6 +184,8 @@ func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 		p.protectedManagedHost.ServeHTTP(w, r)
 	case r.URL.Path == apiV1+"/projects",
 		r.URL.Path == apiV1+"/audit-events",
+		r.URL.Path == apiV1+"/templates",
+		strings.HasPrefix(r.URL.Path, apiV1+"/templates/"),
 		strings.HasPrefix(r.URL.Path, apiV1+"/projects/"):
 		p.protected.ServeHTTP(w, r)
 	default:
@@ -247,6 +263,26 @@ func isProjectBuildPath(path string) bool {
 		segments[6] == "build-configurations"
 }
 
+func isSupplyChainPath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	if (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "signature-trust-policies" {
+		return len(segments) == 5 || segments[5] != ""
+	}
+	if (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "signature-signing-profiles" {
+		return len(segments) == 5 || segments[5] != ""
+	}
+	return (len(segments) == 7 || len(segments) == 8) &&
+		segments[0] == "api" && segments[1] == "v1" && segments[2] == "projects" &&
+		segments[3] != "" && segments[4] == "artifacts" && segments[5] != "" &&
+		(segments[6] == "evidence" || segments[6] == "verifications" || segments[6] == "signature-verifications" ||
+			segments[6] == "vulnerability-observation" || segments[6] == "vulnerability-scans") &&
+		(len(segments) == 7 || segments[6] == "evidence" && segments[7] != "")
+}
+
 func NewHTTPServer(
 	cfg platformconfig.HTTP,
 	healthChecker *health.Checker,
@@ -289,6 +325,8 @@ func NewHTTPServer(
 		srv.Handle(apiV1+"/projects", productAPI)
 		srv.HandlePrefix(apiV1+"/projects/", productAPI)
 		srv.Handle(apiV1+"/audit-events", productAPI)
+		srv.Handle(apiV1+"/templates", productAPI)
+		srv.HandlePrefix(apiV1+"/templates/", productAPI)
 		srv.HandlePrefix(apiV1+"/build-triggers/", productAPI)
 		srv.HandlePrefix(apiV1+"/build-hooks/", productAPI)
 		srv.Handle(apiV1+"/managed-hosts", productAPI)

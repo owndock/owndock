@@ -1352,6 +1352,12 @@ func (u *UseCase) HandleWebhook(ctx context.Context, provider WebhookProvider, h
 		return WebhookReceipt{}, ErrRevisionResolveUnavailable
 	}
 	revision, err := u.resolver.ResolveSourceRevision(ctx, source, credential, event.Ref, event.CommitSHA)
+	// Webhook providers do not guarantee that deliveries arrive in push order.
+	// If the advertised commit is no longer the remote ref head, this is a valid
+	// but stale delivery: acknowledge and record it without enqueueing a build.
+	if errors.Is(err, ErrRevisionMismatch) {
+		return u.saveIgnoredWebhook(ctx, hook, envelope, event, requestID)
+	}
 	if err != nil {
 		return WebhookReceipt{}, err
 	}

@@ -89,6 +89,103 @@ func TestFileCutoverStoreFailsClosedAtCapacity(t *testing.T) {
 	}
 }
 
+func TestFileCutoverStoreReleasesOnlyExactWatermark(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	store, err := NewFileCutoverStore(directory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Observe(
+		"owndock-first", "deployment-2", 2,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []struct {
+		deploymentID string
+		sequence     uint64
+	}{
+		{deploymentID: "deployment-1", sequence: 2},
+		{deploymentID: "deployment-2", sequence: 1},
+		{deploymentID: "deployment-2", sequence: 3},
+	} {
+		if released, releaseErr := store.Release(
+			"owndock-first", input.deploymentID, input.sequence,
+		); released || !errors.Is(releaseErr, ErrCutoverConflict) {
+			t.Fatalf("release %+v = %t, %v", input, released, releaseErr)
+		}
+	}
+	if _, err := store.Observe(
+		"owndock-second", "deployment-1", 1,
+	); !errors.Is(err, ErrCutoverStoreFull) {
+		t.Fatalf("mismatch released capacity: %v", err)
+	}
+	if released, err := store.Release(
+		"owndock-first", "deployment-2", 2,
+	); err != nil || !released {
+		t.Fatalf("exact release = %t, %v", released, err)
+	}
+	if released, err := store.Release(
+		"owndock-first", "deployment-2", 2,
+	); err != nil || released {
+		t.Fatalf("replayed release = %t, %v", released, err)
+	}
+	if _, err := store.Observe(
+		"owndock-second", "deployment-1", 1,
+	); err != nil {
+		t.Fatalf("released capacity not reusable: %v", err)
+	}
+	reloaded, err := NewFileCutoverStore(directory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := reloaded.Observe(
+		"owndock-second", "older-deployment", 1,
+	); err != nil || !stale {
+		t.Fatalf("reloaded watermark = %t, %v", stale, err)
+	}
+}
+
+func TestFileCutoverStoreRejectsInvalidRelease(t *testing.T) {
+	store, err := NewFileCutoverStore(
+		filepath.Join(t.TempDir(), "state"),
+		1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released, err := store.Release("", "deployment-1", 1); released || !errors.Is(err, ErrInvalidCutoverStore) {
+		t.Fatalf("invalid release = %t, %v", released, err)
+	}
+}
+
+func TestFileCutoverStoreRestoresWatermarkAfterReleasePersistenceFailure(
+	t *testing.T,
+) {
+	directory := filepath.Join(t.TempDir(), "state")
+	store, err := NewFileCutoverStore(directory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Observe("owndock-slot", "deployment-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(store.path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if released, err := store.Release("owndock-slot", "deployment-1", 1); released || err == nil {
+		t.Fatalf("release with blocked persistence = %t, %v", released, err)
+	}
+	if err := os.Remove(store.path); err != nil {
+		t.Fatal(err)
+	}
+	if released, err := store.Release("owndock-slot", "deployment-1", 1); !released || err != nil {
+		t.Fatalf("restored watermark release = %t, %v", released, err)
+	}
+}
+
 func TestFileCutoverStoreSerializesConcurrentUpdates(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "state")
 	store, err := NewFileCutoverStore(directory, 4)

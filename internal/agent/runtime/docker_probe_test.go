@@ -22,6 +22,10 @@ func (noopCutoverStore) Observe(string, string, uint64) (bool, error) {
 	return false, nil
 }
 
+func (noopCutoverStore) Release(string, string, uint64) (bool, error) {
+	return false, nil
+}
+
 func (e dockerProbeEngineStub) Ping(
 	ctx context.Context,
 	_ client.PingOptions,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -34,17 +35,35 @@ type listRemoteFunc func(
 type GitSourceProber struct {
 	resolver RepositorySecretResolver
 	timeout  time.Duration
+	network  gitNetworkPolicy
 	list     listRemoteFunc
 	resolve  listRemoteFunc
 }
 
 func NewGitSourceProber(resolver RepositorySecretResolver) *GitSourceProber {
-	return &GitSourceProber{
-		resolver: resolver,
-		timeout:  defaultSourceProbeTimeout,
-		list:     listRemote,
-		resolve:  listRemotePeeled,
+	prober, _ := NewGitSourceProberWithNetwork(resolver, GitNetworkOptions{})
+	return prober
+
+}
+
+func NewGitSourceProberWithNetwork(
+	resolver RepositorySecretResolver,
+	options GitNetworkOptions,
+) (*GitSourceProber, error) {
+	network, err := newGitNetworkPolicy(options)
+	if err != nil {
+		return nil, err
 	}
+	prober := &GitSourceProber{resolver: resolver, timeout: defaultSourceProbeTimeout, network: network}
+	prober.list = func(ctx context.Context, repositoryURL string, auth transport.AuthMethod,
+		timeout time.Duration) ([]*plumbing.Reference, error) {
+		return listRemote(ctx, repositoryURL, auth, timeout, network)
+	}
+	prober.resolve = func(ctx context.Context, repositoryURL string, auth transport.AuthMethod,
+		timeout time.Duration) ([]*plumbing.Reference, error) {
+		return listRemotePeeled(ctx, repositoryURL, auth, timeout, network)
+	}
+	return prober, nil
 }
 
 func (p *GitSourceProber) ResolveSourceRevision(
@@ -202,7 +221,11 @@ func listRemote(
 	repositoryURL string,
 	auth transport.AuthMethod,
 	timeout time.Duration,
+	network gitNetworkPolicy,
 ) ([]*plumbing.Reference, error) {
+	if strings.HasPrefix(repositoryURL, "https://") {
+		return listHTTPSRemote(ctx, repositoryURL, auth, network, git.IgnorePeeled)
+	}
 	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
 		Name: "origin", URLs: []string{repositoryURL},
 	})
@@ -212,6 +235,7 @@ func listRemote(
 	}
 	return remote.ListContext(ctx, &git.ListOptions{
 		Auth: auth, InsecureSkipTLS: false,
+		CABundle: network.caBundle, ProxyOptions: network.proxyFor(repositoryURL),
 		PeelingOption: git.IgnorePeeled, Timeout: seconds,
 	})
 }
@@ -221,7 +245,11 @@ func listRemotePeeled(
 	repositoryURL string,
 	auth transport.AuthMethod,
 	timeout time.Duration,
+	network gitNetworkPolicy,
 ) ([]*plumbing.Reference, error) {
+	if strings.HasPrefix(repositoryURL, "https://") {
+		return listHTTPSRemote(ctx, repositoryURL, auth, network, git.AppendPeeled)
+	}
 	remote := git.NewRemote(memory.NewStorage(), &config.RemoteConfig{
 		Name: "origin", URLs: []string{repositoryURL},
 	})
@@ -231,8 +259,59 @@ func listRemotePeeled(
 	}
 	return remote.ListContext(ctx, &git.ListOptions{
 		Auth: auth, InsecureSkipTLS: false,
+		CABundle: network.caBundle, ProxyOptions: network.proxyFor(repositoryURL),
 		PeelingOption: git.AppendPeeled, Timeout: seconds,
 	})
+}
+
+func listHTTPSRemote(ctx context.Context, repositoryURL string, auth transport.AuthMethod,
+	network gitNetworkPolicy, peeling git.PeelingOption) ([]*plumbing.Reference, error) {
+	endpoint, err := transport.NewEndpoint(repositoryURL)
+	if err != nil {
+		return nil, err
+	}
+	endpoint.CaBundle = network.caBundle
+	endpoint.Proxy = network.proxy
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return nil, biz.ErrRevisionResolveUnavailable
+	}
+	directTransport := base.Clone()
+	directTransport.Proxy = nil
+	client := httptransport.NewClient(&http.Client{Transport: directTransport})
+	session, err := client.NewUploadPackSession(endpoint, auth)
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	advertised, err := session.AdvertisedReferencesContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	all, err := advertised.AllReferences()
+	if err != nil {
+		return nil, err
+	}
+	iterator, err := all.IterReferences()
+	if err != nil {
+		return nil, err
+	}
+	defer iterator.Close()
+	result := make([]*plumbing.Reference, 0, 32)
+	if peeling == git.AppendPeeled || peeling == git.IgnorePeeled {
+		if err := iterator.ForEach(func(reference *plumbing.Reference) error {
+			result = append(result, reference)
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if peeling == git.AppendPeeled || peeling == git.OnlyPeeled {
+		for name, hash := range advertised.Peeled {
+			result = append(result, plumbing.NewReferenceFromStrings(name+"^{}", hash.String()))
+		}
+	}
+	return result, nil
 }
 
 func classifyProbeError(err error) biz.SourceRepositoryStatus {

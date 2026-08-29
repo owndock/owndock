@@ -16,6 +16,7 @@ const maximumCutoverStoreBytes = 4 * 1024 * 1024
 var (
 	ErrInvalidCutoverStore = errors.New("agent cutover store is invalid")
 	ErrCutoverStoreFull    = errors.New("agent cutover store is full")
+	ErrCutoverConflict     = errors.New("agent cutover watermark does not match")
 )
 
 var (
@@ -33,6 +34,11 @@ type CutoverStore interface {
 		deploymentID string,
 		sequence uint64,
 	) (stale bool, err error)
+	Release(
+		containerName string,
+		deploymentID string,
+		sequence uint64,
+	) (released bool, err error)
 }
 
 type cutoverWatermark struct {
@@ -41,9 +47,9 @@ type cutoverWatermark struct {
 }
 
 // FileCutoverStore is independent from the command result cache: result
-// eviction must never make an older Deployment current again. Entries are not
-// evicted; reaching the configured bound fails closed until lifecycle-aware
-// garbage collection is implemented.
+// eviction must never make an older Deployment current again. Capacity never
+// evicts entries. An entry can only be removed by an exact lifecycle release
+// sent after the Server has fenced and drained every operation for that slot.
 type FileCutoverStore struct {
 	mu sync.Mutex
 
@@ -118,6 +124,34 @@ func (s *FileCutoverStore) Observe(
 		return false, err
 	}
 	return false, nil
+}
+
+// Release removes only the exact current slot watermark. A missing entry is an
+// idempotent success, which lets a durable release command be replayed after an
+// ambiguous response. A different Deployment or sequence fails closed.
+func (s *FileCutoverStore) Release(
+	containerName string,
+	deploymentID string,
+	sequence uint64,
+) (bool, error) {
+	if !validCutoverEntry(containerName, deploymentID, sequence) {
+		return false, ErrInvalidCutoverStore
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.entries[containerName]
+	if !exists {
+		return false, nil
+	}
+	if current.deploymentID != deploymentID || current.sequence != sequence {
+		return false, ErrCutoverConflict
+	}
+	delete(s.entries, containerName)
+	if err := s.persistLocked(); err != nil {
+		s.entries[containerName] = current
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *FileCutoverStore) load() error {

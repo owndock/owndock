@@ -25,7 +25,31 @@ jobs:
           cache: true
       - run: go mod download
       - run: make check
+      - run: make test-agent-package
+      - run: make test-agent-release
+      - run: make test-agent-control-process
+      - run: make test-agent-rotation-process
+      - run: make test-agent-dual-process
+      - name: Build Agent release packages
+        run: |
+          make package-agent VERSION=0.0.0-ci AGENT_GOARCH=amd64
+          make package-agent VERSION=0.0.0-ci AGENT_GOARCH=arm64
       - run: make test-integration
+      - name: Check changed Go coverage
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        shell: bash
+        run: |
+          coverage_base="$EVENT_BASE_SHA"
+          if ! git cat-file -e "${coverage_base}^{commit}" 2>/dev/null; then
+            if coverage_base="$(git rev-parse --verify HEAD^ 2>/dev/null)"; then
+              echo "Event base is unavailable; comparing changed coverage with HEAD^."
+            else
+              echo "Initial repository commit has no coverage base; comparison is not applicable."
+              exit 0
+            fi
+          fi
+          make test-changed-coverage COVERAGE_BASE="$coverage_base"
       - name: Check API compatibility
         if: github.event_name != 'schedule'
         env:
@@ -50,10 +74,34 @@ jobs:
       - run: go mod download
       - run: make vuln
 
+  agent-systemd:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.5
+          cache: true
+      - run: make test-agent-systemd
+      - run: make test-agent-enrollment-process
+
   build-security:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    name: build-security (${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goarch: amd64
+            machine: x86_64
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -61,4 +109,19 @@ jobs:
           go-version: 1.26.5
           cache: true
       - run: go mod download
+      - name: Verify native Linux build environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = "Linux"
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test "$(go env GOARCH)" = "${{ matrix.goarch }}"
+          test -s /sys/fs/cgroup/cgroup.controllers
+          echo "kernel=$(uname -r)"
+          echo "machine=$(uname -m)"
+          echo "goarch=$(go env GOARCH)"
+          echo "cgroup=v2 ($(tr '\n' ' ' </sys/fs/cgroup/cgroup.controllers))"
+          echo "workspace_fs=$(findmnt --noheadings --output FSTYPE --target . | xargs)"
+          echo "tmp_fs=$(findmnt --noheadings --output FSTYPE --target /tmp | xargs)"
+          docker info --format 'docker={{.ServerVersion}} os={{.OSType}} arch={{.Architecture}} cgroup={{.CgroupVersion}} storage={{.Driver}}'
       - run: make test-build-security

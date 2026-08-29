@@ -94,10 +94,12 @@ type Client struct {
 	reconnectRequested bool
 }
 
-// Reconnect closes only the current authenticated control stream. Runner will
-// immediately establish a new stream, allowing a freshly installed client
-// identity to take effect without restarting the Agent process.
+// Reconnect discards idle authenticated connections immediately and closes the
+// current control stream. Immediate cleanup matters during startup recovery:
+// certificate rotation can finish before a control stream exists, and the next
+// hello must not reuse the rotation request's old-certificate TLS connection.
 func (c *Client) Reconnect() {
+	c.httpClient.CloseIdleConnections()
 	c.sessionMu.Lock()
 	c.reconnectRequested = true
 	cancel := c.sessionCancel

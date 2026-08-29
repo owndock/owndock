@@ -129,6 +129,8 @@ func (e *DockerExecutor) execute(
 			commandContext,
 			command,
 		)
+	case agentprotocol.AgentCommandCutoverRelease:
+		result, executeError = e.releaseCutover(command)
 	case agentprotocol.AgentCommandInventoryPrepare,
 		agentprotocol.AgentCommandInventoryChunk,
 		agentprotocol.AgentCommandInventoryRelease,
@@ -156,6 +158,31 @@ func (e *DockerExecutor) execute(
 		return agentprotocol.AgentCommandResult{}, err
 	}
 	return result, e.store(command, result)
+}
+
+func (e *DockerExecutor) releaseCutover(
+	command agentprotocol.AgentCommand,
+) (agentprotocol.AgentCommandResult, error) {
+	_, err := e.cutovers.Release(
+		command.Cutover.ContainerName,
+		command.Cutover.DeploymentID,
+		command.Cutover.CutoverSequence,
+	)
+	if err == nil {
+		return agentprotocol.AgentCommandResult{
+			CommandID: command.ID,
+			Status:    agentprotocol.AgentCommandSucceeded,
+		}, nil
+	}
+	code := "runtime_configuration"
+	if errors.Is(err, ErrCutoverConflict) {
+		code = "cutover_conflict"
+	}
+	return agentprotocol.AgentCommandResult{
+		CommandID: command.ID,
+		Status:    agentprotocol.AgentCommandFailed,
+		ErrorCode: code,
+	}, nil
 }
 
 func (e *DockerExecutor) begin(

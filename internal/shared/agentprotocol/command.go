@@ -37,6 +37,7 @@ const (
 	AgentCommandDeploymentStage    AgentCommandKind = "deployment.stage"
 	AgentCommandDeploymentActivate AgentCommandKind = "deployment.activate"
 	AgentCommandDeploymentCancel   AgentCommandKind = "deployment.cancel"
+	AgentCommandCutoverRelease     AgentCommandKind = "deployment.cutover.release"
 	AgentCommandInventoryPrepare   AgentCommandKind = "runtime.inventory.prepare"
 	AgentCommandInventoryChunk     AgentCommandKind = "runtime.inventory.chunk"
 	AgentCommandInventoryRelease   AgentCommandKind = "runtime.inventory.release"
@@ -50,6 +51,7 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
 		AgentCommandDeploymentCancel,
+		AgentCommandCutoverRelease,
 		AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
@@ -66,6 +68,7 @@ type AgentCommand struct {
 	Deadline     time.Time
 	RuntimeProbe *RuntimeProbeCommand
 	Deployment   *DeploymentCommand
+	Cutover      *CutoverCommand
 	Inventory    *RuntimeInventoryCommand
 }
 
@@ -80,6 +83,16 @@ type RuntimeInventoryCommand struct {
 	ChunkIndex       int
 	EventSince       time.Time
 	EventWaitSeconds int
+}
+
+// CutoverCommand releases one exact deployment-slot watermark after the
+// Server has stopped all work for that slot and removed its product resource.
+// It deliberately carries no runtime credential or arbitrary Docker input.
+type CutoverCommand struct {
+	DeploymentID    string
+	CutoverSequence uint64
+	RuntimeTargetID string
+	ContainerName   string
 }
 
 // DeploymentCommand is an internal, versioned transport contract. Secret
@@ -109,7 +122,7 @@ func (c AgentCommand) Validate() error {
 	}
 	switch c.Kind {
 	case AgentCommandRuntimeProbe:
-		if c.Deployment != nil || c.Inventory != nil ||
+		if c.Deployment != nil || c.Cutover != nil || c.Inventory != nil ||
 			c.RuntimeProbe == nil ||
 			!validIdentifier(c.RuntimeProbe.RuntimeTargetID) {
 			return ErrCommandInvalid
@@ -118,16 +131,21 @@ func (c AgentCommand) Validate() error {
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
 		AgentCommandDeploymentCancel:
-		if c.RuntimeProbe != nil || c.Inventory != nil ||
+		if c.RuntimeProbe != nil || c.Cutover != nil || c.Inventory != nil ||
 			c.Deployment == nil ||
 			!validDeploymentCommand(c.Kind, *c.Deployment) {
+			return ErrCommandInvalid
+		}
+	case AgentCommandCutoverRelease:
+		if c.RuntimeProbe != nil || c.Deployment != nil || c.Inventory != nil ||
+			c.Cutover == nil || !validCutoverCommand(*c.Cutover) {
 			return ErrCommandInvalid
 		}
 	case AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
 		AgentCommandInventoryEvents:
-		if c.RuntimeProbe != nil || c.Deployment != nil ||
+		if c.RuntimeProbe != nil || c.Deployment != nil || c.Cutover != nil ||
 			c.Inventory == nil ||
 			!validInventoryCommand(c.Kind, *c.Inventory) {
 			return ErrCommandInvalid
@@ -185,6 +203,12 @@ func (c AgentCommand) Fingerprint() ([sha256.Size]byte, error) {
 		for _, value := range deployment.Environment {
 			writeFingerprintString(hasher, value)
 		}
+	}
+	if c.Cutover != nil {
+		writeFingerprintString(hasher, c.Cutover.DeploymentID)
+		writeFingerprintUint64(hasher, c.Cutover.CutoverSequence)
+		writeFingerprintString(hasher, c.Cutover.RuntimeTargetID)
+		writeFingerprintString(hasher, c.Cutover.ContainerName)
 	}
 	if c.Inventory != nil {
 		writeFingerprintString(hasher, c.Inventory.RuntimeTargetID)
@@ -299,7 +323,8 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 		case AgentCommandDeploymentPrepare,
 			AgentCommandDeploymentStage,
 			AgentCommandDeploymentActivate,
-			AgentCommandDeploymentCancel:
+			AgentCommandDeploymentCancel,
+			AgentCommandCutoverRelease:
 			if r.RuntimeProbe != nil || r.Inventory != nil {
 				return ErrResultInvalid
 			}
@@ -473,6 +498,13 @@ func validDeploymentCommand(
 	default:
 		return false
 	}
+}
+
+func validCutoverCommand(command CutoverCommand) bool {
+	return validIdentifier(command.DeploymentID) &&
+		command.CutoverSequence > 0 &&
+		validIdentifier(command.RuntimeTargetID) &&
+		containerNameRule.MatchString(command.ContainerName)
 }
 
 func validImageDigest(value string) bool {

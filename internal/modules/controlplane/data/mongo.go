@@ -455,15 +455,29 @@ func (s *MongoStore) ListApplications(ctx context.Context, projectID string) ([]
 	}
 	items := make([]biz.Application, len(documents))
 	for i, document := range documents {
-		items[i] = document.domain()
+		item, domainErr := document.domain()
+		if domainErr != nil {
+			return nil, fmt.Errorf("decode application: %w", domainErr)
+		}
+		items[i] = item
 	}
 	return items, nil
 }
 
 func (s *MongoStore) CreateApplication(ctx context.Context, item biz.Application) (biz.Application, error) {
-	_, err := s.applications.InsertOne(ctx, applicationDocument{
+	snapshot, err := biz.NormalizeApplicationTemplateSnapshot(
+		item.TemplateSnapshot,
+	)
+	if err != nil {
+		return biz.Application{}, err
+	}
+	item.TemplateSnapshot = snapshot
+	_, err = s.applications.InsertOne(ctx, applicationDocument{
 		ID: item.ID, ProjectID: item.ProjectID,
 		Name: item.Name, NameNormalized: normalizeName(item.Name),
+		TemplateSnapshot: applicationTemplateSnapshotDocumentFromDomain(
+			item.TemplateSnapshot,
+		),
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
 	})
 	if mongo.IsDuplicateKeyError(err) {
@@ -780,18 +794,58 @@ func (d projectDocument) domain() biz.Project {
 }
 
 type applicationDocument struct {
-	ID             string    `bson:"_id"`
-	ProjectID      string    `bson:"project_id"`
-	Name           string    `bson:"name"`
-	NameNormalized string    `bson:"name_normalized"`
-	CreatedBy      string    `bson:"created_by"`
-	CreatedAt      time.Time `bson:"created_at"`
+	ID               string                               `bson:"_id"`
+	ProjectID        string                               `bson:"project_id"`
+	Name             string                               `bson:"name"`
+	NameNormalized   string                               `bson:"name_normalized"`
+	TemplateSnapshot *applicationTemplateSnapshotDocument `bson:"template_snapshot,omitempty"`
+	CreatedBy        string                               `bson:"created_by"`
+	CreatedAt        time.Time                            `bson:"created_at"`
 }
 
-func (d applicationDocument) domain() biz.Application {
+func (d applicationDocument) domain() (biz.Application, error) {
+	snapshot, err := biz.NormalizeApplicationTemplateSnapshot(
+		d.TemplateSnapshot.domain(),
+	)
+	if err != nil {
+		return biz.Application{}, err
+	}
 	return biz.Application{
 		ID: d.ID, ProjectID: d.ProjectID, Name: d.Name,
-		CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt,
+		TemplateSnapshot: snapshot,
+		CreatedBy:        d.CreatedBy, CreatedAt: d.CreatedAt,
+	}, nil
+}
+
+type applicationTemplateSnapshotDocument struct {
+	TemplateID      string              `bson:"template_id"`
+	TemplateVersion uint64              `bson:"template_version"`
+	DockerfilePath  string              `bson:"dockerfile_path"`
+	ContextPath     string              `bson:"context_path"`
+	RuntimeSpec     runtimeSpecDocument `bson:"runtime_spec"`
+}
+
+func applicationTemplateSnapshotDocumentFromDomain(
+	item *biz.ApplicationTemplateSnapshot,
+) *applicationTemplateSnapshotDocument {
+	if item == nil {
+		return nil
+	}
+	return &applicationTemplateSnapshotDocument{
+		TemplateID: item.TemplateID, TemplateVersion: item.TemplateVersion,
+		DockerfilePath: item.DockerfilePath, ContextPath: item.ContextPath,
+		RuntimeSpec: runtimeSpecDocumentFromDomain(item.RuntimeSpec),
+	}
+}
+
+func (d *applicationTemplateSnapshotDocument) domain() *biz.ApplicationTemplateSnapshot {
+	if d == nil {
+		return nil
+	}
+	return &biz.ApplicationTemplateSnapshot{
+		TemplateID: d.TemplateID, TemplateVersion: d.TemplateVersion,
+		DockerfilePath: d.DockerfilePath, ContextPath: d.ContextPath,
+		RuntimeSpec: normalizedRuntimeSpec(d.RuntimeSpec.domain()),
 	}
 }
 
