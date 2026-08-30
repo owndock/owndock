@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -113,6 +115,7 @@ type SourceRevisionResolver interface {
 }
 
 var ErrSourceProbeUnavailable = errors.New("source repository probe is unavailable")
+var ErrArtifactRegistrationUnavailable = errors.New("external artifact registration is unavailable")
 
 type UseCase struct {
 	projects         ProjectLookup
@@ -136,11 +139,19 @@ type UseCase struct {
 	webhookWindow    time.Duration
 	artifacts        ArtifactRepository
 	artifactReleases ArtifactReleaseCreator
+	artifactEvidence ArtifactEvidenceScheduler
+	artifactProbe    ArtifactAvailabilityProbe
 	buildLogs        BuildLogRepository
 }
 
 func (u *UseCase) WithArtifactReleases(repository ArtifactRepository, creator ArtifactReleaseCreator) *UseCase {
 	u.artifacts, u.artifactReleases = repository, creator
+	return u
+}
+
+func (u *UseCase) WithExternalArtifactRegistration(scheduler ArtifactEvidenceScheduler,
+	probe ArtifactAvailabilityProbe) *UseCase {
+	u.artifactEvidence, u.artifactProbe = scheduler, probe
 	return u
 }
 
@@ -688,6 +699,92 @@ func (u *UseCase) GetArtifact(
 	return u.artifacts.GetArtifact(ctx, projectID, artifactID)
 }
 
+func (u *UseCase) RegisterExternalArtifact(ctx context.Context, principal security.Principal,
+	projectID string, input ExternalArtifactInput, requestID string) (Artifact, error) {
+	if err := principal.Require(security.PermissionArtifactCreate); err != nil {
+		return Artifact{}, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return Artifact{}, err
+	}
+	input.OrganizationID, input.ProjectID = principal.OrganizationID, strings.TrimSpace(projectID)
+	input.ApplicationID, input.RegistryCredentialID = strings.TrimSpace(input.ApplicationID),
+		strings.TrimSpace(input.RegistryCredentialID)
+	input.ImageDigest, input.Producer, input.RegistrationKey = strings.TrimSpace(input.ImageDigest),
+		strings.TrimSpace(input.Producer), strings.TrimSpace(input.RegistrationKey)
+	if !validIdentifier(input.ApplicationID) || !validIdentifier(input.RegistryCredentialID) ||
+		!validIdentifier(input.RegistrationKey) || !validArtifactProducer(input.Producer) ||
+		!input.TargetPlatform.Valid() {
+		return Artifact{}, ErrInvalidArtifact
+	}
+	if u.artifacts == nil || u.applications == nil || u.registries == nil ||
+		u.artifactEvidence == nil || u.artifactProbe == nil {
+		return Artifact{}, ErrArtifactRegistrationUnavailable
+	}
+	if existing, err := u.artifacts.GetArtifactByRegistrationKey(ctx, input.ProjectID,
+		input.RegistrationKey); err == nil {
+		if existing.MatchesExternal(input) {
+			return existing, nil
+		}
+		return Artifact{}, ErrIdempotencyMismatch
+	} else if !errors.Is(err, ErrNotFound) {
+		return Artifact{}, err
+	}
+	exists, err := u.applications.ApplicationExists(ctx, input.ProjectID, input.ApplicationID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	if !exists {
+		return Artifact{}, ErrNotFound
+	}
+	registryServer, err := u.registries.RegistryServer(ctx, input.ProjectID, input.RegistryCredentialID)
+	if err != nil {
+		return Artifact{}, err
+	}
+	named, err := reference.ParseNormalizedNamed(input.ImageDigest)
+	canonical, ok := named.(reference.Canonical)
+	if err != nil || !ok || reference.Domain(canonical) != registryServer {
+		return Artifact{}, ErrRegistryMismatch
+	}
+	if err := u.artifactProbe.ProbeArtifact(ctx, input.ProjectID, input.RegistryCredentialID,
+		canonical.Name(), canonical.Digest().String()); err != nil {
+		return Artifact{}, err
+	}
+	input.ID, err = u.newID()
+	if err != nil {
+		return Artifact{}, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return Artifact{}, err
+	}
+	input.CreatedAt = u.now().UTC()
+	item, err := NewExternalArtifact(input)
+	if err != nil {
+		return Artifact{}, err
+	}
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		created, createErr := u.artifacts.CreateArtifact(transactionContext, item)
+		if createErr != nil {
+			return createErr
+		}
+		item = created
+		if evidenceErr := u.artifactEvidence.EnsureArtifactEvidence(transactionContext, item); evidenceErr != nil {
+			return fmt.Errorf("%w: %v", ErrArtifactRegistrationUnavailable, evidenceErr)
+		}
+		return u.record(transactionContext, principal, auditID, "artifact.register_external", "artifact",
+			item.ID, input.ProjectID, requestID, input.CreatedAt)
+	})
+	if errors.Is(err, ErrDuplicateArtifact) {
+		existing, getErr := u.artifacts.GetArtifactByRegistrationKey(ctx, input.ProjectID,
+			input.RegistrationKey)
+		if getErr == nil && existing.MatchesExternal(input) {
+			return existing, nil
+		}
+	}
+	return item, err
+}
+
 func (u *UseCase) CreateReleaseFromArtifact(
 	ctx context.Context,
 	principal security.Principal,
@@ -713,6 +810,11 @@ func (u *UseCase) CreateReleaseFromArtifact(
 	}
 	if item.ReleaseStatus == ArtifactReleaseCreated {
 		return item, nil
+	}
+	if len(runtimeSpec.Ports) == 0 && len(runtimeSpec.EnvironmentKeys) == 0 &&
+		runtimeSpec.Resources.CPUMilli == 0 && runtimeSpec.Resources.MemoryBytes == 0 &&
+		runtimeSpec.HealthCheck == nil {
+		runtimeSpec = cloneRuntimeSpec(item.ReleaseRuntimeSpec)
 	}
 	releaseID, err := u.artifactReleases.CreateArtifactRelease(ctx, ArtifactReleaseRequest{
 		ArtifactID: item.ID, OrganizationID: item.OrganizationID,

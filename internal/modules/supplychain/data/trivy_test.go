@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 func writeFakeTrivy(t *testing.T, script string) string {
@@ -64,6 +65,32 @@ func TestTrivyScannerVerifiesPinnedDatabaseAndScansExactDigest(t *testing.T) {
 	if err != nil || report.ScannerVersion != PinnedTrivyVersion || report.Database.SchemaVersion != 2 ||
 		report.HighestSeverity != biz.VulnerabilitySeverityNone || scanner.String() != "trivy/0.74.0" {
 		t.Fatalf("ScanVulnerabilities() = %+v, %v", report, err)
+	}
+}
+
+func TestTrivyScannerOmitsAuthenticationForAnonymousRegistry(t *testing.T) {
+	cache := t.TempDir()
+	executable := writeFakeTrivy(t, `
+if [ "$1" = "version" ]; then
+  printf '%s' '`+trivyVersionJSON+`'
+  exit 0
+fi
+[ -z "${TRIVY_USERNAME:-}" ]
+[ -z "${TRIVY_PASSWORD:-}" ]
+printf '%s' '{"SchemaVersion":2,"CreatedAt":"2026-08-29T12:00:00Z","ArtifactName":"`+trivyRequest().CanonicalSubject()+`","Results":[]}'
+`)
+	scanner, err := NewTrivyScanner(TrivyOptions{
+		Executable: executable, ExpectedVersion: PinnedTrivyVersion,
+		CacheDirectory: cache, MaxOutputBytes: 4096,
+		Credentials: syftCredentialProviderStub{credential: biz.RegistryCredential{
+			AuthenticationMode: registryauth.ModeAnonymous,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.ScanVulnerabilities(t.Context(), trivyRequest()); err != nil {
+		t.Fatalf("anonymous ScanVulnerabilities() error = %v", err)
 	}
 }
 

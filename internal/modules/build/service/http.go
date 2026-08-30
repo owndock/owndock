@@ -141,19 +141,36 @@ func (s *HTTP) buildLogs(w http.ResponseWriter, r *http.Request, principal secur
 }
 
 func (s *HTTP) artifacts(w http.ResponseWriter, r *http.Request, principal security.Principal, projectID string) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		items, err := s.useCase.ListArtifacts(r.Context(), principal, projectID)
+		if writeError(w, r, err) {
+			return
+		}
+		responses := make([]artifactResponse, len(items))
+		for index, item := range items {
+			responses[index] = artifactResponseFromDomain(item)
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
+	case http.MethodPost:
+		var request registerExternalArtifactRequest
+		if !decodeRequest(w, r, &request) {
+			return
+		}
+		item, err := s.useCase.RegisterExternalArtifact(r.Context(), principal, projectID,
+			biz.ExternalArtifactInput{
+				ApplicationID: request.ApplicationID, RegistryCredentialID: request.RegistryCredentialID,
+				ImageDigest: request.ImageDigest, TargetPlatform: request.TargetPlatform,
+				Producer: request.Producer, RegistrationKey: r.Header.Get("Idempotency-Key"),
+				ReleaseRuntimeSpec: request.ReleaseRuntimeSpec.domain(),
+			}, httpx.RequestIDFromContext(r.Context()))
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusCreated, artifactResponseFromDomain(item))
+	default:
 		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
-		return
 	}
-	items, err := s.useCase.ListArtifacts(r.Context(), principal, projectID)
-	if writeError(w, r, err) {
-		return
-	}
-	responses := make([]artifactResponse, len(items))
-	for index, item := range items {
-		responses[index] = artifactResponseFromDomain(item)
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 }
 
 func (s *HTTP) artifact(w http.ResponseWriter, r *http.Request, principal security.Principal, projectID, artifactID string) {
@@ -676,6 +693,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusConflict, "artifact_conflict")
 	case errors.Is(err, biz.ErrArtifactReleaseUnavailable):
 		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "artifact_release_unavailable")
+	case errors.Is(err, biz.ErrArtifactRegistrationUnavailable):
+		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "external_artifact_registration_unavailable")
+	case errors.Is(err, biz.ErrArtifactRegistryAuthentication):
+		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "artifact_registry_authentication_failed")
+	case errors.Is(err, biz.ErrArtifactRegistryUnavailable):
+		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "artifact_registry_unavailable")
+	case errors.Is(err, biz.ErrArtifactRegistryIntegrity):
+		httpx.ErrorRequest(w, r, http.StatusBadGateway, "artifact_registry_integrity_failed")
 	case errors.Is(err, biz.ErrInvalidBuildTransition), errors.Is(err, biz.ErrBuildRetryRequiresFailed):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "invalid_build_state")
 	case errors.Is(err, biz.ErrRevisionNotFound):
@@ -1046,27 +1071,31 @@ func buildResponseFromDomain(item biz.Build) buildResponse {
 }
 
 type artifactResponse struct {
-	ID                   string                       `json:"id"`
-	ProjectID            string                       `json:"project_id"`
-	ApplicationID        string                       `json:"application_id"`
-	BuildID              string                       `json:"build_id"`
-	BuildConfigurationID string                       `json:"build_configuration_id"`
-	RegistryCredentialID string                       `json:"registry_credential_id"`
-	ImageRepository      string                       `json:"image_repository"`
-	ImageDigest          string                       `json:"image_digest"`
-	TargetPlatform       biz.BuildPlatform            `json:"target_platform"`
-	ReleaseRuntimeSpec   artifactRuntimeSpecPayload   `json:"release_runtime_spec"`
-	AutomaticDeployments []automaticDeploymentPayload `json:"automatic_deployments"`
-	ReleaseStatus        biz.ArtifactReleaseStatus    `json:"release_status"`
-	ReleaseID            string                       `json:"release_id,omitempty"`
-	Version              uint64                       `json:"version"`
-	CreatedAt            time.Time                    `json:"created_at"`
-	ReleasedAt           *time.Time                   `json:"released_at,omitempty"`
+	ID                   string                           `json:"id"`
+	ProjectID            string                           `json:"project_id"`
+	ApplicationID        string                           `json:"application_id"`
+	Origin               biz.ArtifactOrigin               `json:"origin"`
+	Producer             string                           `json:"producer"`
+	ProducerVerification biz.ArtifactProducerVerification `json:"producer_verification"`
+	BuildID              string                           `json:"build_id,omitempty"`
+	BuildConfigurationID string                           `json:"build_configuration_id,omitempty"`
+	RegistryCredentialID string                           `json:"registry_credential_id"`
+	ImageRepository      string                           `json:"image_repository"`
+	ImageDigest          string                           `json:"image_digest"`
+	TargetPlatform       biz.BuildPlatform                `json:"target_platform"`
+	ReleaseRuntimeSpec   artifactRuntimeSpecPayload       `json:"release_runtime_spec"`
+	AutomaticDeployments []automaticDeploymentPayload     `json:"automatic_deployments"`
+	ReleaseStatus        biz.ArtifactReleaseStatus        `json:"release_status"`
+	ReleaseID            string                           `json:"release_id,omitempty"`
+	Version              uint64                           `json:"version"`
+	CreatedAt            time.Time                        `json:"created_at"`
+	ReleasedAt           *time.Time                       `json:"released_at,omitempty"`
 }
 
 func artifactResponseFromDomain(item biz.Artifact) artifactResponse {
 	response := artifactResponse{
 		ID: item.ID, ProjectID: item.ProjectID, ApplicationID: item.ApplicationID,
+		Origin: item.Origin, Producer: item.Producer, ProducerVerification: item.ProducerVerification,
 		BuildID: item.BuildID, BuildConfigurationID: item.BuildConfigurationID,
 		RegistryCredentialID: item.RegistryCredentialID,
 		ImageRepository:      item.ImageRepository, ImageDigest: item.ImageDigest,
@@ -1080,6 +1109,15 @@ func artifactResponseFromDomain(item biz.Artifact) artifactResponse {
 		response.ReleasedAt = &value
 	}
 	return response
+}
+
+type registerExternalArtifactRequest struct {
+	ApplicationID        string                     `json:"application_id"`
+	RegistryCredentialID string                     `json:"registry_credential_id"`
+	ImageDigest          string                     `json:"image_digest"`
+	TargetPlatform       biz.BuildPlatform          `json:"target_platform"`
+	Producer             string                     `json:"producer"`
+	ReleaseRuntimeSpec   artifactRuntimeSpecPayload `json:"release_runtime_spec"`
 }
 
 type buildResourcesRequest struct {

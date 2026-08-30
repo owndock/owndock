@@ -31,7 +31,9 @@ func TestArtifactPinsBuildOutputAndReleaseLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.BuildID != build.ID || item.ReleaseStatus != ArtifactReleasePending || item.Version != 1 ||
+	if item.BuildID != build.ID || item.Origin != ArtifactOriginOwnDockBuild ||
+		item.Producer != "owndock-build-worker" || item.ProducerVerification != ArtifactProducerVerified ||
+		item.ReleaseStatus != ArtifactReleasePending || item.Version != 1 ||
 		len(item.ReleaseRuntimeSpec.Ports) != 1 || item.ReleaseRuntimeSpec.Ports[0].Protocol != "tcp" ||
 		item.ReleaseRuntimeSpec.Resources.CPUMilli != runtimespec.DefaultCPUMilli ||
 		len(item.AutomaticDeployments) != 1 {
@@ -76,5 +78,60 @@ func TestArtifactRejectsMismatchedOrMutableOutput(t *testing.T) {
 		if _, err := NewArtifact("artifact-1", build, now); !errors.Is(err, ErrInvalidArtifact) {
 			t.Fatalf("NewArtifact(%q) error = %v", image, err)
 		}
+	}
+}
+
+func TestExternalArtifactPinsDeclaredProducerAndDigest(t *testing.T) {
+	now := time.Unix(200, 0).UTC()
+	input := ExternalArtifactInput{
+		ID: "artifact-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		ApplicationID: "application-1", RegistryCredentialID: "registry-1",
+		ImageDigest:    "registry.example.com/team/api@sha256:" + strings.Repeat("b", 64),
+		TargetPlatform: BuildPlatformLinuxARM64, Producer: "github-actions/team/api",
+		RegistrationKey: "delivery-123", ReleaseRuntimeSpec: runtimespec.Spec{
+			Ports: []runtimespec.Port{{Name: "http", ContainerPort: 8080}},
+		}, CreatedAt: now,
+	}
+	item, err := NewExternalArtifact(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Origin != ArtifactOriginExternal || item.Producer != input.Producer ||
+		item.ProducerVerification != ArtifactProducerDeclared || item.BuildID != "" ||
+		item.BuildConfigurationID != "" || item.ImageRepository != "registry.example.com/team/api" ||
+		item.ReleaseStatus != ArtifactReleaseAvailable || item.ReleaseRuntimeSpec.Ports[0].Protocol != "tcp" ||
+		!item.MatchesExternal(input) {
+		t.Fatalf("external Artifact = %+v", item)
+	}
+	changed := input
+	changed.Producer = "gitlab-ci/team/api"
+	if item.MatchesExternal(changed) {
+		t.Fatal("Artifact unexpectedly matched a different producer")
+	}
+}
+
+func TestExternalArtifactRejectsMutableOrUnsafeIdentity(t *testing.T) {
+	base := ExternalArtifactInput{
+		ID: "artifact-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		ApplicationID: "application-1", RegistryCredentialID: "registry-1",
+		ImageDigest:    "registry.example.com/team/api@sha256:" + strings.Repeat("b", 64),
+		TargetPlatform: BuildPlatformLinuxAMD64, Producer: "github-actions/team/api",
+		RegistrationKey: "delivery-123", CreatedAt: time.Unix(200, 0),
+	}
+	for name, mutate := range map[string]func(*ExternalArtifactInput){
+		"tag": func(input *ExternalArtifactInput) { input.ImageDigest = "registry.example.com/team/api:latest" },
+		"non sha256": func(input *ExternalArtifactInput) {
+			input.ImageDigest = "registry.example.com/team/api@sha512:" + strings.Repeat("b", 128)
+		},
+		"control in producer": func(input *ExternalArtifactInput) { input.Producer = "github-actions\nteam/api" },
+		"empty registration":  func(input *ExternalArtifactInput) { input.RegistrationKey = "" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := base
+			mutate(&input)
+			if _, err := NewExternalArtifact(input); !errors.Is(err, ErrInvalidArtifact) {
+				t.Fatalf("NewExternalArtifact() error = %v", err)
+			}
+		})
 	}
 }

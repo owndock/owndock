@@ -94,10 +94,21 @@ func run(ctx context.Context, arguments []string) error {
 	credentialProvider := supplychaindata.NewEnvironmentRegistryCredentialProvider(
 		controlplanedata.NewMongoStore(client.Database()),
 	)
+	registryCABundle, err := supplychaindata.LoadRegistryCABundle(cfg.Product.RegistryCACertFile)
+	if err != nil {
+		return fmt.Errorf("load Registry CA bundle: %w", err)
+	}
+	registryCACertFile, removeRegistryCASnapshot, err :=
+		supplychaindata.SnapshotRegistryCABundle(os.TempDir(), registryCABundle)
+	if err != nil {
+		return fmt.Errorf("snapshot Registry CA bundle: %w", err)
+	}
+	defer removeRegistryCASnapshot()
 	generator, err := supplychaindata.NewSyftGenerator(supplychaindata.SyftOptions{
 		Executable: workerConfig.SyftExecutable, ExpectedVersion: workerConfig.SyftVersion,
 		MaxOutputBytes: workerConfig.MaxDocumentBytesValue(),
 		MaxLayerBytes:  workerConfig.MaxLayerBytesValue(), Credentials: credentialProvider,
+		RegistryCACertFile: registryCACertFile,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Syft generator: %w", err)
@@ -110,6 +121,7 @@ func run(ctx context.Context, arguments []string) error {
 	}
 	publisher, err := supplychaindata.NewORASPublisher(supplychaindata.ORASPublisherOptions{
 		Credentials: credentialProvider, MaxDocumentBytes: workerConfig.MaxDocumentBytesValue(),
+		RegistryCABundle: registryCABundle,
 	})
 	if err != nil {
 		return fmt.Errorf("create OCI Evidence publisher: %w", err)
@@ -133,6 +145,7 @@ func run(ctx context.Context, arguments []string) error {
 	cosignVerifier, err := supplychaindata.NewCosignVerifier(supplychaindata.CosignVerifierOptions{
 		Executable: workerConfig.CosignExecutable, ExpectedVersion: workerConfig.CosignVersion,
 		Credentials: credentialProvider, TemporaryRoot: os.TempDir(),
+		RegistryCACertFile: registryCACertFile,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Cosign verifier: %w", err)
@@ -155,7 +168,7 @@ func run(ctx context.Context, arguments []string) error {
 		Executable: workerConfig.CosignExecutable, ExpectedVersion: workerConfig.CosignVersion,
 		Credentials:        credentialProvider,
 		SigningEnvironment: supplychaindata.EnvironmentSigningEnvironmentResolver{},
-		TemporaryRoot:      os.TempDir(),
+		TemporaryRoot:      os.TempDir(), RegistryCACertFile: registryCACertFile,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Cosign signer: %w", err)
@@ -168,7 +181,7 @@ func run(ctx context.Context, arguments []string) error {
 		Executable: workerConfig.TrivyExecutable, ExpectedVersion: workerConfig.TrivyVersion,
 		CacheDirectory: workerConfig.TrivyCacheDirectory,
 		MaxOutputBytes: minInt64(workerConfig.MaxDocumentBytesValue(), supplychainbiz.MaximumVulnerabilityReportSize),
-		Credentials:    credentialProvider,
+		Credentials:    credentialProvider, RegistryCACertFile: registryCACertFile,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Trivy scanner: %w", err)

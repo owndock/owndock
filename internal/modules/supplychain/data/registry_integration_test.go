@@ -21,7 +21,9 @@ import (
 	"testing"
 	"time"
 
+	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -41,7 +43,7 @@ func (p *credentialCaptureProvider) ResolveRegistryCredential(
 	context.Context, string, string, string,
 ) (biz.RegistryCredential, error) {
 	p.issued = []byte(p.password)
-	return biz.RegistryCredential{Username: p.username, Password: p.issued}, nil
+	return biz.RegistryCredential{AuthenticationMode: registryauth.ModeBasic, Username: p.username, Password: p.issued}, nil
 }
 
 func (p *credentialCaptureProvider) cleared() bool {
@@ -976,6 +978,31 @@ func TestAuthenticatedSBOMPipelineWithRealRegistry(t *testing.T) {
 		t.Fatal("ORAS publisher did not clear its mutable Registry password")
 	}
 	privateRepository := strings.TrimPrefix(base, "http://") + "/private/api"
+	probeCredentials := &credentialCaptureProvider{username: username, password: password}
+	artifactProber := mustNewOCIArtifactProber(t, OCIArtifactProberOptions{
+		Credentials: probeCredentials, AllowPlainHTTP: true,
+	})
+	if err := artifactProber.ProbeArtifact(
+		ctx, "project-1", "registry-1", privateRepository, subjectDigest,
+	); err != nil {
+		t.Fatalf("authenticated external Artifact probe failed: %v", err)
+	}
+	if !probeCredentials.cleared() {
+		t.Fatal("external Artifact prober did not clear its mutable Registry password")
+	}
+	badProbeCredentials := &credentialCaptureProvider{username: username, password: "incorrect-secret-sentinel"}
+	badArtifactProber := mustNewOCIArtifactProber(t, OCIArtifactProberOptions{
+		Credentials: badProbeCredentials, AllowPlainHTTP: true,
+	})
+	if err := badArtifactProber.ProbeArtifact(
+		ctx, "project-1", "registry-1", privateRepository, subjectDigest,
+	); !errors.Is(err, buildbiz.ErrArtifactRegistryAuthentication) ||
+		strings.Contains(err.Error(), badProbeCredentials.password) {
+		t.Fatalf("wrong external Artifact Registry credential error = %v", err)
+	}
+	if !badProbeCredentials.cleared() {
+		t.Fatal("external Artifact prober did not clear rejected Registry password")
+	}
 	provenancePublication := provenancePublicationFixture(t, privateRepository, subjectDigest)
 	publishedProvenance, err := publisher.PublishProvenance(ctx, provenancePublication)
 	if err != nil {
@@ -1059,7 +1086,8 @@ func TestAuthenticatedSBOMPipelineWithRealRegistry(t *testing.T) {
 	badPublisher, _ := NewORASPublisher(ORASPublisherOptions{
 		AllowPlainHTTP: true, MaxDocumentBytes: 16 * 1024 * 1024,
 		Credentials: registryCredentialProviderProbe{credential: biz.RegistryCredential{
-			Username: username, Password: []byte("incorrect-secret-sentinel"),
+			AuthenticationMode: registryauth.ModeBasic,
+			Username:           username, Password: []byte("incorrect-secret-sentinel"),
 		}},
 	})
 	if _, err := badPublisher.PublishSBOM(ctx, biz.SBOMPublication{

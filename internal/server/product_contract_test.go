@@ -58,6 +58,16 @@ const contractMemberToken = "member-token-0123456789012345678901234567890123456"
 
 type contractLoginGuard struct{}
 
+type contractAdmissionEvaluator struct{ now func() time.Time }
+
+func (e contractAdmissionEvaluator) EvaluateAdmission(context.Context,
+	deploymentbiz.AdmissionRequest) (deploymentbiz.AdmissionSnapshot, error) {
+	return (deploymentbiz.AdmissionSnapshot{EvaluatedAt: e.now(), EnvironmentStage: "development",
+		Policies: []deploymentbiz.AdmissionPolicySnapshot{}, Evidence: []deploymentbiz.AdmissionEvidenceSnapshot{},
+		Verifications: []deploymentbiz.AdmissionVerificationSnapshot{}, Waivers: []deploymentbiz.AdmissionWaiverSnapshot{},
+		Violations: []deploymentbiz.AdmissionViolation{}, Decision: deploymentbiz.AdmissionNotConfigured}).Seal()
+}
+
 type contractBuildTriggerTokens struct{}
 
 type contractWebhookVerifier struct{}
@@ -144,7 +154,8 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 	formalDeploymentHTTP := deploymentservice.NewHTTP(
 		deploymentbiz.NewUseCase(deploymentdata.NewMemoryRepository(), nil, nil, newID, now).
 			WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlStore)).
-			WithFormalSecurity(transaction.Passthrough{}, audits),
+			WithFormalSecurity(transaction.Passthrough{}, audits).
+			WithAdmissionEvaluator(contractAdmissionEvaluator{now: now}),
 	)
 	productAPI, err := NewProductAPIWithDeploymentAndManagedHost(
 		identityHTTP, controlHTTP, http.HandlerFunc(formalDeploymentHTTP.HandleFormal),
@@ -166,7 +177,7 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		t.Fatalf("WithRuntimeInventory() error = %v", err)
 	}
 	buildStore := newContractBuildStore()
-	buildHTTP := buildservice.NewHTTP(buildbiz.NewUseCase(
+	buildUseCase := buildbiz.NewUseCase(
 		controlStore,
 		buildStore,
 		transaction.Passthrough{},
@@ -180,7 +191,9 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		WithWebhookAdmission(contractWebhookRateGuard{}, 120, time.Minute).
 		WithBuildTriggerAutomation(contractBuildTriggerTokens{}, buildStore, 60, time.Minute).
 		WithArtifactReleases(buildStore, contractArtifactReleaseCreator{}).
-		WithBuildLogs(buildStore))
+		WithBuildLogs(buildStore).
+		WithExternalArtifactRegistration(contractArtifactEvidenceScheduler{}, contractArtifactProbe{})
+	buildHTTP := buildservice.NewHTTP(buildUseCase)
 	if err := productAPI.WithBuild(buildHTTP, identityHTTP.Authenticate); err != nil {
 		t.Fatalf("WithBuild() error = %v", err)
 	}
@@ -232,10 +245,32 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		t.Fatalf("New signature verification use case: %v", err)
 	}
 	signatureVerificationUseCase.WithAudit(transaction.Passthrough{}, audits)
+	vulnerabilityWaiverRepository := &contractVulnerabilityWaiverRepository{
+		items: make(map[string]supplychainbiz.VulnerabilityWaiver),
+	}
+	vulnerabilityWaiverUseCase, err := supplychainbiz.NewVulnerabilityWaiverUseCase(
+		controlStore, contractArtifactEvidenceLookup{}, vulnerabilityWaiverRepository, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New vulnerability waiver use case: %v", err)
+	}
+	vulnerabilityWaiverUseCase.WithAudit(transaction.Passthrough{}, audits)
+	deploymentPolicyRepository := &contractDeploymentPolicyRepository{
+		items: make(map[string]supplychainbiz.DeploymentPolicy),
+	}
+	deploymentPolicyUseCase, err := supplychainbiz.NewDeploymentPolicyUseCase(
+		controlStore, controlStore, deploymentPolicyRepository, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New deployment policy use case: %v", err)
+	}
+	deploymentPolicyUseCase.WithAudit(transaction.Passthrough{}, audits)
 	if err := productAPI.WithSupplyChain(
 		supplychainservice.NewHTTP(supplyChainUseCase).WithSignatureTrustPolicies(trustPolicyUseCase).
 			WithSignatureSigningProfiles(signingProfileUseCase).
-			WithSignatureVerifications(signatureVerificationUseCase),
+			WithSignatureVerifications(signatureVerificationUseCase).
+			WithVulnerabilityWaivers(vulnerabilityWaiverUseCase).
+			WithDeploymentPolicies(deploymentPolicyUseCase),
 		identityHTTP.Authenticate,
 	); err != nil {
 		t.Fatalf("WithSupplyChain() error = %v", err)
@@ -1030,6 +1065,15 @@ func (s *contractControlStore) EnvironmentExists(_ context.Context, projectID, e
 	return false, nil
 }
 
+func (s *contractControlStore) EnvironmentStage(_ context.Context, projectID, environmentID string) (string, error) {
+	for _, item := range s.environments {
+		if item.ID == environmentID && item.ProjectID == projectID {
+			return item.Stage, nil
+		}
+	}
+	return "", controlplanebiz.ErrNotFound
+}
+
 type contractBuildStore struct {
 	credentials    map[string]buildbiz.RepositoryCredential
 	sources        map[string]buildbiz.SourceRepository
@@ -1057,6 +1101,95 @@ func (contractArtifactEvidenceLookup) ResolveArtifact(
 
 type contractArtifactEvidenceRepository struct{}
 type contractEvidenceJobCreator struct{}
+
+type contractVulnerabilityWaiverRepository struct {
+	items map[string]supplychainbiz.VulnerabilityWaiver
+}
+
+type contractDeploymentPolicyRepository struct {
+	items map[string]supplychainbiz.DeploymentPolicy
+}
+
+func (r *contractDeploymentPolicyRepository) CreateDeploymentPolicy(_ context.Context,
+	item supplychainbiz.DeploymentPolicy) (supplychainbiz.DeploymentPolicy, error) {
+	for _, current := range r.items {
+		if current.OrganizationID == item.OrganizationID && current.ProjectID == item.ProjectID &&
+			current.Scope == item.Scope && current.EnvironmentID == item.EnvironmentID {
+			return supplychainbiz.DeploymentPolicy{}, supplychainbiz.ErrDeploymentPolicyConflict
+		}
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractDeploymentPolicyRepository) ListDeploymentPolicies(_ context.Context,
+	organizationID, projectID string) ([]supplychainbiz.DeploymentPolicy, error) {
+	items := []supplychainbiz.DeploymentPolicy{}
+	for _, item := range r.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func (r *contractDeploymentPolicyRepository) GetDeploymentPolicy(_ context.Context,
+	organizationID, projectID, policyID string) (supplychainbiz.DeploymentPolicy, error) {
+	item, ok := r.items[policyID]
+	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return supplychainbiz.DeploymentPolicy{}, supplychainbiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *contractDeploymentPolicyRepository) SaveDeploymentPolicy(_ context.Context,
+	item supplychainbiz.DeploymentPolicy, expectedVersion uint64) (supplychainbiz.DeploymentPolicy, error) {
+	current, ok := r.items[item.ID]
+	if !ok || current.Version != expectedVersion {
+		return supplychainbiz.DeploymentPolicy{}, supplychainbiz.ErrDeploymentPolicyConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractVulnerabilityWaiverRepository) CreateVulnerabilityWaiver(_ context.Context,
+	item supplychainbiz.VulnerabilityWaiver) (supplychainbiz.VulnerabilityWaiver, error) {
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractVulnerabilityWaiverRepository) ListVulnerabilityWaivers(_ context.Context,
+	organizationID, projectID string, query supplychainbiz.VulnerabilityWaiverQuery,
+) (supplychainbiz.VulnerabilityWaiverPage, error) {
+	page := supplychainbiz.VulnerabilityWaiverPage{Items: []supplychainbiz.VulnerabilityWaiver{}}
+	for _, item := range r.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID &&
+			(!query.ActiveOnly || item.Status(query.ActiveAt) == supplychainbiz.VulnerabilityWaiverActive) {
+			page.Items = append(page.Items, item)
+		}
+	}
+	return page, nil
+}
+
+func (r *contractVulnerabilityWaiverRepository) GetVulnerabilityWaiver(_ context.Context,
+	organizationID, projectID, waiverID string) (supplychainbiz.VulnerabilityWaiver, error) {
+	item, ok := r.items[waiverID]
+	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return supplychainbiz.VulnerabilityWaiver{}, supplychainbiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *contractVulnerabilityWaiverRepository) SaveVulnerabilityWaiver(_ context.Context,
+	item supplychainbiz.VulnerabilityWaiver, expectedVersion uint64,
+) (supplychainbiz.VulnerabilityWaiver, error) {
+	current, ok := r.items[item.ID]
+	if !ok || current.Version != expectedVersion {
+		return supplychainbiz.VulnerabilityWaiver{}, supplychainbiz.ErrVulnerabilityWaiverConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
 
 func (contractEvidenceJobCreator) CreateEvidenceJob(_ context.Context,
 	item supplychainbiz.EvidenceJob) (supplychainbiz.EvidenceJob, error) {
@@ -1198,6 +1331,18 @@ func (contractArtifactReleaseCreator) CreateArtifactRelease(context.Context, bui
 	return "release-from-artifact", nil
 }
 
+type contractArtifactEvidenceScheduler struct{}
+
+func (contractArtifactEvidenceScheduler) EnsureArtifactEvidence(context.Context, buildbiz.Artifact) error {
+	return nil
+}
+
+type contractArtifactProbe struct{}
+
+func (contractArtifactProbe) ProbeArtifact(context.Context, string, string, string, string) error {
+	return nil
+}
+
 func (s *contractBuildStore) ReserveBuildTrigger(context.Context, string, time.Time, int, time.Duration) (bool, time.Time, error) {
 	return true, time.Time{}, nil
 }
@@ -1286,6 +1431,8 @@ func newContractBuildStore() *contractBuildStore {
 	store.artifacts["test-id"] = buildbiz.Artifact{
 		ID: "test-id", OrganizationID: "test-id", ProjectID: "test-id",
 		ApplicationID: "test-id", BuildID: "test-id", BuildConfigurationID: "test-id",
+		Origin: buildbiz.ArtifactOriginOwnDockBuild, Producer: "owndock-build-worker",
+		ProducerVerification: buildbiz.ArtifactProducerVerified,
 		RegistryCredentialID: "test-id", ImageRepository: "registry.example.com/team/api",
 		ImageDigest:    "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
 		TargetPlatform: buildbiz.BuildPlatformLinuxAMD64,
@@ -1451,6 +1598,15 @@ func (s *contractBuildStore) GetArtifact(_ context.Context, projectID, artifactI
 func (s *contractBuildStore) GetArtifactByBuild(_ context.Context, buildID string) (buildbiz.Artifact, error) {
 	for _, item := range s.artifacts {
 		if item.BuildID == buildID {
+			return item, nil
+		}
+	}
+	return buildbiz.Artifact{}, buildbiz.ErrNotFound
+}
+func (s *contractBuildStore) GetArtifactByRegistrationKey(_ context.Context,
+	projectID, registrationKey string) (buildbiz.Artifact, error) {
+	for _, item := range s.artifacts {
+		if item.ProjectID == projectID && item.RegistrationKey == registrationKey {
 			return item, nil
 		}
 	}

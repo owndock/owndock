@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -635,7 +636,8 @@ func (u *UseCase) ListRegistryCredentials(
 func (u *UseCase) CreateRegistryCredential(
 	ctx context.Context,
 	principal security.Principal,
-	projectID, name, server, username, passwordRef, requestID string,
+	projectID, name, server string, authenticationMode registryauth.Mode,
+	username, passwordRef, requestID string,
 ) (RegistryCredential, error) {
 	if u.registries == nil {
 		return RegistryCredential{}, ErrNotFound
@@ -651,7 +653,8 @@ func (u *UseCase) CreateRegistryCredential(
 		return RegistryCredential{}, err
 	}
 	item, err := NewRegistryCredential(
-		id, projectID, name, server, username, passwordRef, principal.UserID, now,
+		id, projectID, name, server, authenticationMode,
+		username, passwordRef, principal.UserID, now,
 	)
 	if err != nil {
 		return RegistryCredential{}, err

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 type syftCredentialProviderStub struct {
@@ -20,14 +21,16 @@ func (s syftCredentialProviderStub) ResolveRegistryCredential(
 	context.Context, string, string, string,
 ) (biz.RegistryCredential, error) {
 	return biz.RegistryCredential{
-		Username: s.credential.Username,
-		Password: append([]byte(nil), s.credential.Password...),
+		AuthenticationMode: s.credential.AuthenticationMode,
+		Username:           s.credential.Username,
+		Password:           append([]byte(nil), s.credential.Password...),
 	}, s.err
 }
 
 func validSyftCredentialProvider() biz.RegistryCredentialProvider {
 	return syftCredentialProviderStub{credential: biz.RegistryCredential{
-		Username: "publisher", Password: []byte("registry-password"),
+		AuthenticationMode: registryauth.ModeBasic,
+		Username:           "publisher", Password: []byte("registry-password"),
 	}}
 }
 
@@ -80,6 +83,32 @@ printf '%s' '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"component
 	document, err := generator.GenerateSBOM(t.Context(), syftRequest())
 	if err != nil || document.FormatVersion != "1.6" || generator.String() != "syft/1.50.0" {
 		t.Fatalf("GenerateSBOM() = %+v/%v (%s)", document, err, generator)
+	}
+}
+
+func TestSyftGeneratorOmitsAuthenticationForAnonymousRegistry(t *testing.T) {
+	executable := writeFakeSyft(t, `
+if [ "$1" = "version" ]; then
+  printf '%s' '{"version":"1.50.0"}'
+  exit 0
+fi
+[ -z "${SYFT_REGISTRY_AUTH_AUTHORITY:-}" ]
+[ -z "${SYFT_REGISTRY_AUTH_USERNAME:-}" ]
+[ -z "${SYFT_REGISTRY_AUTH_PASSWORD:-}" ]
+printf '%s' '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[]}'
+`)
+	generator, err := NewSyftGenerator(SyftOptions{
+		Executable: executable, ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 4096,
+		MaxLayerBytes: 256 * 1024 * 1024,
+		Credentials: syftCredentialProviderStub{credential: biz.RegistryCredential{
+			AuthenticationMode: registryauth.ModeAnonymous,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generator.GenerateSBOM(t.Context(), syftRequest()); err != nil {
+		t.Fatalf("anonymous GenerateSBOM() error = %v", err)
 	}
 }
 
@@ -147,7 +176,7 @@ func TestSyftGeneratorFailsClosedWhenRegistryCredentialIsUnavailable(t *testing.
 		Executable: writeFakeSyft(t, "exit 0"), ExpectedVersion: PinnedSyftVersion,
 		MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024,
 		Credentials: syftCredentialProviderStub{
-			credential: biz.RegistryCredential{Username: "publisher", Password: []byte(secretSentinel)},
+			credential: biz.RegistryCredential{AuthenticationMode: registryauth.ModeBasic, Username: "publisher", Password: []byte(secretSentinel)},
 			err:        errors.New("upstream secret lookup failed"),
 		},
 	})

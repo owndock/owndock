@@ -14,24 +14,27 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 const PinnedSyftVersion = "1.50.0"
 
 type SyftOptions struct {
-	Executable      string
-	ExpectedVersion string
-	MaxOutputBytes  int64
-	MaxLayerBytes   int64
-	Credentials     biz.RegistryCredentialProvider
+	Executable         string
+	ExpectedVersion    string
+	MaxOutputBytes     int64
+	MaxLayerBytes      int64
+	Credentials        biz.RegistryCredentialProvider
+	RegistryCACertFile string
 }
 
 type SyftGenerator struct {
-	executable      string
-	expectedVersion string
-	maxOutputBytes  int64
-	maxLayerBytes   int64
-	credentials     biz.RegistryCredentialProvider
+	executable         string
+	expectedVersion    string
+	maxOutputBytes     int64
+	maxLayerBytes      int64
+	credentials        biz.RegistryCredentialProvider
+	registryCACertFile string
 }
 
 func NewSyftGenerator(options SyftOptions) (*SyftGenerator, error) {
@@ -40,18 +43,20 @@ func NewSyftGenerator(options SyftOptions) (*SyftGenerator, error) {
 	if executable == "" || !filepath.IsAbs(executable) || version == "" ||
 		version != PinnedSyftVersion || options.MaxOutputBytes < 1024 ||
 		options.MaxOutputBytes > 64*1024*1024 || options.MaxLayerBytes < 1024*1024 ||
-		options.MaxLayerBytes > 4*1024*1024*1024 || options.Credentials == nil {
+		options.MaxLayerBytes > 4*1024*1024*1024 || options.Credentials == nil ||
+		!validRegistryCACertFile(options.RegistryCACertFile) {
 		return nil, biz.ErrGeneratorVersion
 	}
 	return &SyftGenerator{
 		executable: executable, expectedVersion: version, maxOutputBytes: options.MaxOutputBytes,
 		maxLayerBytes: options.MaxLayerBytes, credentials: options.Credentials,
+		registryCACertFile: options.RegistryCACertFile,
 	}, nil
 }
 
 func (g *SyftGenerator) Verify(ctx context.Context) error {
 	command := exec.CommandContext(ctx, g.executable, "version", "-o", "json")
-	command.Env = syftEnvironment()
+	command.Env = registryCAEnvironment(syftEnvironment(), g.registryCACertFile)
 	output := &boundedBuffer{maximum: 64 * 1024}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 4096}
 	if err := command.Run(); err != nil {
@@ -76,8 +81,7 @@ func (g *SyftGenerator) GenerateSBOM(ctx context.Context, request biz.SBOMReques
 	credential, err := g.credentials.ResolveRegistryCredential(
 		ctx, request.ProjectID, request.RegistryCredentialID, registry,
 	)
-	if err != nil || credential.Username == "" || len(credential.Username) > 255 ||
-		len(credential.Password) == 0 || len(credential.Password) > 64*1024 {
+	if err != nil || !validCosignCredential(credential) {
 		clear(credential.Password)
 		return biz.SBOMDocument{}, biz.ErrRegistryAuthentication
 	}
@@ -85,12 +89,14 @@ func (g *SyftGenerator) GenerateSBOM(ctx context.Context, request biz.SBOMReques
 	output := &boundedBuffer{maximum: g.maxOutputBytes}
 	command := exec.CommandContext(ctx, g.executable,
 		"scan", "registry:"+request.CanonicalSubject(), "-o", "cyclonedx-json@1.6")
-	command.Env = append(syftEnvironment(),
-		"SYFT_REGISTRY_AUTH_AUTHORITY="+registry,
-		"SYFT_REGISTRY_AUTH_USERNAME="+credential.Username,
-		"SYFT_REGISTRY_AUTH_PASSWORD="+string(credential.Password),
-		"SYFT_SOURCE_IMAGE_MAX_LAYER_SIZE="+strconv.FormatInt(g.maxLayerBytes, 10),
-	)
+	command.Env = append(registryCAEnvironment(syftEnvironment(), g.registryCACertFile),
+		"SYFT_SOURCE_IMAGE_MAX_LAYER_SIZE="+strconv.FormatInt(g.maxLayerBytes, 10))
+	if credential.AuthenticationMode == registryauth.ModeBasic {
+		command.Env = append(command.Env,
+			"SYFT_REGISTRY_AUTH_AUTHORITY="+registry,
+			"SYFT_REGISTRY_AUTH_USERNAME="+credential.Username,
+			"SYFT_REGISTRY_AUTH_PASSWORD="+string(credential.Password))
+	}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 4096}
 	if err := command.Run(); err != nil {
 		command.Env = nil

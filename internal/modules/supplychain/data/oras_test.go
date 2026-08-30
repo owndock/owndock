@@ -19,8 +19,9 @@ func (p registryCredentialProviderProbe) ResolveRegistryCredential(
 	context.Context, string, string, string,
 ) (biz.RegistryCredential, error) {
 	return biz.RegistryCredential{
-		Username: p.credential.Username,
-		Password: append([]byte(nil), p.credential.Password...),
+		AuthenticationMode: p.credential.AuthenticationMode,
+		Username:           p.credential.Username,
+		Password:           append([]byte(nil), p.credential.Password...),
 	}, p.err
 }
 

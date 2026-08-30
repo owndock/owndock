@@ -55,7 +55,85 @@ func Default() []Migration {
 		{Version: 39, Name: "index_signature_signing_profiles", Up: indexSignatureSigningProfiles},
 		{Version: 40, Name: "backfill_signature_job_operation", Up: backfillSignatureJobOperation},
 		{Version: 41, Name: "index_vulnerability_observations", Up: indexVulnerabilityObservations},
+		{Version: 42, Name: "index_vulnerability_waivers", Up: indexVulnerabilityWaivers},
+		{Version: 43, Name: "index_deployment_policies", Up: indexDeploymentPolicies},
+		{Version: 44, Name: "support_external_artifacts", Up: supportExternalArtifacts},
+		{Version: 45, Name: "support_registry_authentication_modes", Up: supportRegistryAuthenticationModes},
 	}
+}
+
+func supportRegistryAuthenticationModes(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("registry_credentials").UpdateMany(ctx,
+		bson.D{{Key: "authentication_mode", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "authentication_mode", Value: "basic"}}}})
+	if err != nil {
+		return fmt.Errorf("backfill Registry authentication modes: %w", err)
+	}
+	return nil
+}
+
+func supportExternalArtifacts(ctx context.Context, database *mongo.Database) error {
+	artifacts := database.Collection("artifacts")
+	_, err := artifacts.UpdateMany(ctx,
+		bson.D{{Key: "origin", Value: bson.D{{Key: "$exists", Value: false}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "origin", Value: "owndock_build"},
+			{Key: "producer", Value: "owndock-build-worker"},
+			{Key: "producer_verification", Value: "verified"}}}})
+	if err != nil {
+		return fmt.Errorf("backfill Artifact producer identity: %w", err)
+	}
+	if err := artifacts.Indexes().DropOne(ctx, "uniq_artifact_build"); err != nil {
+		var commandError mongo.CommandError
+		if !errors.As(err, &commandError) || commandError.Code != 27 {
+			return fmt.Errorf("replace Artifact Build uniqueness index: %w", err)
+		}
+	}
+	_, err = artifacts.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "build_id", Value: 1}}, Options: options.Index().
+			SetName("uniq_artifact_build").SetUnique(true).
+			SetPartialFilterExpression(bson.D{{Key: "build_id", Value: bson.D{{Key: "$type", Value: "string"}}}})},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "registration_key", Value: 1}},
+			Options: options.Index().SetName("uniq_external_artifact_registration").SetUnique(true).
+				SetPartialFilterExpression(bson.D{{Key: "registration_key", Value: bson.D{{Key: "$type", Value: "string"}}}})},
+		{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "origin", Value: 1},
+			{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}},
+			Options: options.Index().SetName("idx_artifact_project_origin")},
+	})
+	if err != nil {
+		return fmt.Errorf("create external Artifact indexes: %w", err)
+	}
+	return nil
+}
+
+func indexDeploymentPolicies(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("deployment_policies").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "scope", Value: 1}, {Key: "environment_id", Value: 1}},
+			Options: options.Index().SetName("uniq_deployment_policy_scope").SetUnique(true)},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "enabled", Value: 1}, {Key: "scope", Value: 1}, {Key: "environment_id", Value: 1}},
+			Options: options.Index().SetName("idx_deployment_policy_evaluation")},
+	})
+	if err != nil {
+		return fmt.Errorf("create deployment policy indexes: %w", err)
+	}
+	return nil
+}
+
+func indexVulnerabilityWaivers(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("vulnerability_waivers").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "created_at", Value: -1}, {Key: "_id", Value: -1}},
+			Options: options.Index().SetName("idx_vulnerability_waiver_list")},
+		{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+			{Key: "vulnerability_id", Value: 1}, {Key: "scope", Value: 1},
+			{Key: "artifact_id", Value: 1}, {Key: "expires_at", Value: 1}, {Key: "revoked_at", Value: 1}},
+			Options: options.Index().SetName("idx_vulnerability_waiver_applicability")},
+	})
+	if err != nil {
+		return fmt.Errorf("create vulnerability waiver indexes: %w", err)
+	}
+	return nil
 }
 
 func indexVulnerabilityObservations(ctx context.Context, database *mongo.Database) error {

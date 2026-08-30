@@ -12,26 +12,29 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 const PinnedTrivyVersion = "0.74.0"
 
 type TrivyOptions struct {
-	Executable      string
-	ExpectedVersion string
-	CacheDirectory  string
-	MaxOutputBytes  int64
-	Credentials     biz.RegistryCredentialProvider
-	AllowPlainHTTP  bool
+	Executable         string
+	ExpectedVersion    string
+	CacheDirectory     string
+	MaxOutputBytes     int64
+	Credentials        biz.RegistryCredentialProvider
+	AllowPlainHTTP     bool
+	RegistryCACertFile string
 }
 
 type TrivyScanner struct {
-	executable      string
-	expectedVersion string
-	cacheDirectory  string
-	maxOutputBytes  int64
-	credentials     biz.RegistryCredentialProvider
-	allowPlainHTTP  bool
+	executable         string
+	expectedVersion    string
+	cacheDirectory     string
+	maxOutputBytes     int64
+	credentials        biz.RegistryCredentialProvider
+	allowPlainHTTP     bool
+	registryCACertFile string
 }
 
 func NewTrivyScanner(options TrivyOptions) (*TrivyScanner, error) {
@@ -40,12 +43,13 @@ func NewTrivyScanner(options TrivyOptions) (*TrivyScanner, error) {
 	cacheDirectory := strings.TrimSpace(options.CacheDirectory)
 	if !filepath.IsAbs(executable) || version != PinnedTrivyVersion || !filepath.IsAbs(cacheDirectory) ||
 		options.MaxOutputBytes < 1024 || options.MaxOutputBytes > biz.MaximumVulnerabilityReportSize ||
-		options.Credentials == nil {
+		options.Credentials == nil || !validRegistryCACertFile(options.RegistryCACertFile) {
 		return nil, biz.ErrVulnerabilityScannerVersion
 	}
 	return &TrivyScanner{executable: executable, expectedVersion: version,
 		cacheDirectory: cacheDirectory, maxOutputBytes: options.MaxOutputBytes,
-		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP}, nil
+		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
+		registryCACertFile: options.RegistryCACertFile}, nil
 }
 
 type trivyVersionOutput struct {
@@ -133,10 +137,12 @@ func (s *TrivyScanner) ScanVulnerabilities(ctx context.Context,
 	}
 	arguments = append(arguments, request.CanonicalSubject())
 	command := exec.CommandContext(ctx, s.executable, arguments...)
-	command.Env = append(trivyEnvironment(s.cacheDirectory),
-		"TRIVY_USERNAME="+credential.Username,
-		"TRIVY_PASSWORD="+string(credential.Password),
-	)
+	command.Env = registryCAEnvironment(trivyEnvironment(s.cacheDirectory), s.registryCACertFile)
+	if credential.AuthenticationMode == registryauth.ModeBasic {
+		command.Env = append(command.Env,
+			"TRIVY_USERNAME="+credential.Username,
+			"TRIVY_PASSWORD="+string(credential.Password))
+	}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 4096}
 	if err := command.Run(); err != nil {
 		command.Env = nil

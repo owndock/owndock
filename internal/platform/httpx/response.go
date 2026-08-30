@@ -21,6 +21,17 @@ type ErrorDetail struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
 	RequestID string `json:"request_id,omitempty"`
+	Details   any    `json:"details,omitempty"`
+}
+
+func ErrorRequestWithDetails(w http.ResponseWriter, r *http.Request, status int, code string, details any) {
+	requestID := RequestIDFromContext(r.Context())
+	locale, message := localization.APIError(r.Context(), code)
+	w.Header().Set("Content-Language", string(locale))
+	w.Header().Add("Vary", "Accept-Language")
+	JSON(w, status, ErrorResponse{Error: ErrorDetail{
+		Code: code, Message: message, RequestID: requestID, Details: details,
+	}})
 }
 
 func JSON(w http.ResponseWriter, status int, value any) {

@@ -535,6 +535,27 @@ func run() error {
 			return fmt.Errorf("mount build API: %w", err)
 		}
 		supplyChainRepository := supplychaindata.NewMongoRepository(mongoClient.Database())
+		registryCredentialProvider :=
+			supplychaindata.NewEnvironmentRegistryCredentialProvider(controlPlaneStore)
+		registryCABundle, err := supplychaindata.LoadRegistryCABundle(cfg.Product.RegistryCACertFile)
+		if err != nil {
+			return fmt.Errorf("load Registry CA bundle: %w", err)
+		}
+		artifactProber, err := supplychaindata.NewOCIArtifactProber(
+			supplychaindata.OCIArtifactProberOptions{
+				Credentials: registryCredentialProvider, RegistryCABundle: registryCABundle,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create OCI Artifact prober: %w", err)
+		}
+		buildUseCase.WithExternalArtifactRegistration(
+			supplychaindata.NewArtifactEvidenceScheduler(
+				supplyChainRepository, id.New, time.Now,
+			).WithSignatureTrustPolicies(supplyChainRepository).
+				WithVulnerabilityScanning(),
+			artifactProber,
+		)
 		supplyChainUseCase, err := supplychainbiz.NewUseCase(
 			controlPlaneStore,
 			supplychaindata.NewArtifactLookupAdapter(buildRepository),
@@ -545,8 +566,9 @@ func run() error {
 		}
 		evidenceContentReader, err := supplychaindata.NewOCIContentReader(
 			supplychaindata.OCIContentReaderOptions{
-				Credentials:      supplychaindata.NewEnvironmentRegistryCredentialProvider(controlPlaneStore),
+				Credentials:      registryCredentialProvider,
 				MaxDocumentBytes: cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
+				RegistryCABundle: registryCABundle,
 			},
 		)
 		if err != nil {
@@ -555,6 +577,18 @@ func run() error {
 		supplyChainUseCase.WithContentReader(evidenceContentReader)
 		supplyChainUseCase.WithVerificationRepository(supplyChainRepository)
 		supplyChainUseCase.WithVulnerabilityObservations(supplyChainRepository, time.Now)
+		deploymentAdmission, err := supplychaindata.NewDeploymentAdmissionEvaluator(
+			supplychaindata.DeploymentAdmissionOptions{
+				Releases: controlPlaneStore, Artifacts: supplychaindata.NewArtifactLookupAdapter(buildRepository),
+				Policies: supplyChainRepository, Evidence: supplyChainRepository, Content: evidenceContentReader,
+				Verifications: supplyChainRepository, TrustPolicies: supplyChainRepository,
+				Vulnerabilities: supplyChainRepository, Waivers: supplyChainRepository, Now: time.Now,
+			},
+		)
+		if err != nil {
+			return fmt.Errorf("create deployment admission evaluator: %w", err)
+		}
+		deploymentUseCase.WithAdmissionEvaluator(deploymentAdmission)
 		signatureTrustPolicies, err := supplychainbiz.NewSignatureTrustPolicyUseCase(
 			controlPlaneStore, supplyChainRepository, id.New, time.Now,
 		)
@@ -584,12 +618,29 @@ func run() error {
 			return fmt.Errorf("create vulnerability scan use case: %w", err)
 		}
 		vulnerabilityScans.WithAudit(mongoClient, auditStore)
+		vulnerabilityWaivers, err := supplychainbiz.NewVulnerabilityWaiverUseCase(
+			controlPlaneStore, supplychaindata.NewArtifactLookupAdapter(buildRepository),
+			supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create vulnerability waiver use case: %w", err)
+		}
+		vulnerabilityWaivers.WithAudit(mongoClient, auditStore)
+		deploymentPolicies, err := supplychainbiz.NewDeploymentPolicyUseCase(
+			controlPlaneStore, controlPlaneStore, supplyChainRepository, id.New, time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create deployment policy use case: %w", err)
+		}
+		deploymentPolicies.WithAudit(mongoClient, auditStore)
 		if err := productAPI.WithSupplyChain(
 			supplychainservice.NewHTTP(supplyChainUseCase).
 				WithSignatureTrustPolicies(signatureTrustPolicies).
 				WithSignatureSigningProfiles(signatureSigningProfiles).
 				WithSignatureVerifications(signatureVerifications).
-				WithVulnerabilityScans(vulnerabilityScans), authenticateProject,
+				WithVulnerabilityScans(vulnerabilityScans).
+				WithVulnerabilityWaivers(vulnerabilityWaivers).
+				WithDeploymentPolicies(deploymentPolicies), authenticateProject,
 		); err != nil {
 			return fmt.Errorf("mount supply-chain API: %w", err)
 		}

@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、认证 Registry push、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 自建 CA/代理兼容矩阵尚未实现；默认关闭的顶层工程样例不属于正式产品实现。
+产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、Registry `anonymous/basic` 显式认证、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 与 OwnDock Registry 客户端已经支持显式自建 CA；Registry 代理、品牌和客户网络兼容矩阵尚未完成，BuildKit/Docker daemon 的 Registry CA 仍由各守护进程独立配置。默认关闭的顶层工程样例不属于正式产品实现。
 
 平台触发链也已落地：通用 Trigger Token 适合任意能发出 HTTPS 请求的自动化系统；GitHub、GitLab、Gitea 和 Forgejo 使用独立 Build Hook。Build Hook 固定平台、Build Configuration 和允许 ref，使用与 Git 读取凭据分离的 Secret 引用，先对原始 body 验签再解析，并按 delivery 长期去重。
 
@@ -45,7 +45,7 @@ Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `
 
 ## 进程边界
 
-当前建立四个常驻、且有实际职责的进程：`cmd/server` 负责对外 API，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker 执行；`cmd/build-worker` 负责领取 Build、续租、隔离 Git checkout，并在 Artifact 事务中冻结 SBOM/Provenance Job 输入；`cmd/evidence-worker` 负责领取镜像证据任务、使用固定 Syft 生成 SBOM、根据不可变 Recipe 生成 SLSA Provenance v1，并通过 ORAS 把正文发布到 OCI Registry。`cmd/vulnerability-db-updater` 是由外部调度器启动的一次性维护 Job，只能写 Trivy DB 快照卷，不接触 MongoDB、客户 Registry 或 KMS；它不算第五个常驻控制面。Server 只在授权下载时读取并校验 OCI 证据，不执行生成器、扫描器或签名器。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。CLI 仍只在职责与完整生命周期明确后创建。Web 前端由独立项目维护。
+当前建立四个常驻、且有实际职责的进程：`cmd/server` 负责对外 API、外部 Artifact 登记时的有界 Registry manifest 完整性探测，并在启用时托管 Deployment Worker 生命周期；`cmd/agent` 负责主机侧 mTLS 出站连接、心跳重连、类型化命令分派和本机 Docker 执行；`cmd/build-worker` 负责领取 Build、续租、隔离 Git checkout，并在 Artifact 事务中冻结 SBOM/Provenance Job 输入；`cmd/evidence-worker` 负责领取镜像证据任务、使用固定 Syft 生成 SBOM、根据不可变 Recipe 生成 SLSA Provenance v1，并通过 ORAS 把正文发布到 OCI Registry。`cmd/vulnerability-db-updater` 是由外部调度器启动的一次性维护 Job，只能写 Trivy DB 快照卷，不接触 MongoDB、客户 Registry 或 KMS；它不算第五个常驻控制面。Server 不执行生成器、扫描器或签名器；登记探测只读取单个有界 manifest，授权下载才读取并校验证据。Agent 共享协议位于 `internal/shared/agentprotocol`，控制客户端、配置和本机运行时位于 `internal/agent`；架构测试禁止 Agent 反向导入 Server 业务模块。CLI 仍只在职责与完整生命周期明确后创建。Web 前端由独立项目维护。
 
 常驻任务实现 `Run(context.Context) error`，通过 `internal/platform/lifecycle.Server` 接入 Kratos App。构造函数不得启动 goroutine；停止过程必须响应 context，并受统一 shutdown timeout 约束。
 
@@ -61,6 +61,8 @@ Git-to-Deploy 已进入产品架构。当前已实现 Source Repository/Reposito
 - 外部 CI 镜像继续直接创建 Release，不依赖 Build 模块。
 
 领域与安全图见 [Git-to-Deploy 产品与安全边界](git-to-deploy.md)，连接、配方、手动触发、日志、结果交接、Worker 运维和平台通知规则分别见 [Source Repository 使用说明](source-repositories.md)、[Build Configuration 使用说明](build-configurations.md)、[手动触发 Build](builds.md)、[Build 日志](build-logs.md)、[Artifact 与 Release 交接](artifacts.md)、[Build Worker](build-worker.md)和[平台 Webhook](webhooks.md)。Git 自建 CA/代理矩阵仍是后续兼容门禁。
+
+外部 CI 不需要伪装成 Build。它先把镜像推到任意已配置的 OCI Registry，再用完整 digest、目标平台和声明的 producer 登记 Artifact。Server 只接受与所选 Credential server 一致的 repository，回读并哈希精确 manifest；Artifact、Evidence Jobs 和审计在同一事务提交。外部来源没有 Build/Build Configuration 关系，不生成 OwnDock Build Provenance，也不使用平台 Signing Profile 自动补签；已有 Trust Policy 只产生 verify-only Job。两种来源从 Artifact 开始共享 Release、Evidence 和 Deployment Policy 链路。
 
 ## Runtime Gateway 边界
 

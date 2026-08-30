@@ -51,6 +51,104 @@ type evidenceVerificationRepositoryStub struct{ items []biz.EvidenceVerification
 type vulnerabilityObservationRepositoryStub struct{ item biz.VulnerabilityObservation }
 type vulnerabilityJobCreatorStub struct{ item biz.EvidenceJob }
 
+type vulnerabilityWaiverRepositoryStub struct {
+	items map[string]biz.VulnerabilityWaiver
+}
+
+type deploymentPolicyEnvironmentLookupStub struct{ stages map[string]string }
+
+func (s deploymentPolicyEnvironmentLookupStub) EnvironmentStage(_ context.Context,
+	projectID, environmentID string) (string, error) {
+	stage, ok := s.stages[projectID+"/"+environmentID]
+	if !ok {
+		return "", biz.ErrNotFound
+	}
+	return stage, nil
+}
+
+type deploymentPolicyRepositoryStub struct {
+	items map[string]biz.DeploymentPolicy
+}
+
+func (s *deploymentPolicyRepositoryStub) CreateDeploymentPolicy(_ context.Context,
+	item biz.DeploymentPolicy) (biz.DeploymentPolicy, error) {
+	if s.items == nil {
+		s.items = make(map[string]biz.DeploymentPolicy)
+	}
+	s.items[item.ID] = item
+	return item, nil
+}
+
+func (s *deploymentPolicyRepositoryStub) ListDeploymentPolicies(_ context.Context,
+	organizationID, projectID string) ([]biz.DeploymentPolicy, error) {
+	items := []biz.DeploymentPolicy{}
+	for _, item := range s.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func (s *deploymentPolicyRepositoryStub) GetDeploymentPolicy(_ context.Context,
+	organizationID, projectID, policyID string) (biz.DeploymentPolicy, error) {
+	item, ok := s.items[policyID]
+	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return biz.DeploymentPolicy{}, biz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *deploymentPolicyRepositoryStub) SaveDeploymentPolicy(_ context.Context,
+	item biz.DeploymentPolicy, expectedVersion uint64) (biz.DeploymentPolicy, error) {
+	current, ok := s.items[item.ID]
+	if !ok || current.Version != expectedVersion {
+		return biz.DeploymentPolicy{}, biz.ErrDeploymentPolicyConflict
+	}
+	s.items[item.ID] = item
+	return item, nil
+}
+
+func (s *vulnerabilityWaiverRepositoryStub) CreateVulnerabilityWaiver(_ context.Context,
+	item biz.VulnerabilityWaiver) (biz.VulnerabilityWaiver, error) {
+	if s.items == nil {
+		s.items = make(map[string]biz.VulnerabilityWaiver)
+	}
+	s.items[item.ID] = item
+	return item, nil
+}
+
+func (s *vulnerabilityWaiverRepositoryStub) ListVulnerabilityWaivers(_ context.Context,
+	organizationID, projectID string, query biz.VulnerabilityWaiverQuery) (biz.VulnerabilityWaiverPage, error) {
+	page := biz.VulnerabilityWaiverPage{Items: []biz.VulnerabilityWaiver{}}
+	for _, item := range s.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID &&
+			(!query.ActiveOnly || item.Status(query.ActiveAt) == biz.VulnerabilityWaiverActive) {
+			page.Items = append(page.Items, item)
+		}
+	}
+	return page, nil
+}
+
+func (s *vulnerabilityWaiverRepositoryStub) GetVulnerabilityWaiver(_ context.Context,
+	organizationID, projectID, waiverID string) (biz.VulnerabilityWaiver, error) {
+	item, ok := s.items[waiverID]
+	if !ok || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return biz.VulnerabilityWaiver{}, biz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *vulnerabilityWaiverRepositoryStub) SaveVulnerabilityWaiver(_ context.Context,
+	item biz.VulnerabilityWaiver, expectedVersion uint64) (biz.VulnerabilityWaiver, error) {
+	current, ok := s.items[item.ID]
+	if !ok || current.Version != expectedVersion {
+		return biz.VulnerabilityWaiver{}, biz.ErrVulnerabilityWaiverConflict
+	}
+	s.items[item.ID] = item
+	return item, nil
+}
+
 func (s *vulnerabilityJobCreatorStub) CreateEvidenceJob(_ context.Context,
 	item biz.EvidenceJob) (biz.EvidenceJob, error) {
 	s.item = item
@@ -109,6 +207,82 @@ func (s *trustPolicyRepositoryStub) SaveSignatureTrustPolicy(_ context.Context,
 func (s evidenceContentReaderStub) ReadEvidence(context.Context,
 	biz.ArtifactSubject, biz.Evidence) (biz.EvidenceContent, error) {
 	return s.content, nil
+}
+
+func TestHTTPManagesRestrictedDeploymentPolicies(t *testing.T) {
+	now := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	repository := &deploymentPolicyRepositoryStub{}
+	useCase, err := biz.NewDeploymentPolicyUseCase(projectLookupStub{},
+		deploymentPolicyEnvironmentLookupStub{stages: map[string]string{
+			"project-1/production-1": "production",
+		}}, repository, func() (string, error) { return "policy-1", nil }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewHTTP(nil).WithDeploymentPolicies(useCase)
+	maintainer := security.Principal{UserID: "maintainer-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleMaintainer}
+	requestBody := `{"name":"Release baseline","scope":"project","environment_id":"",` +
+		`"mode":"enforced","requirements":{"require_sbom":true,"require_provenance":true,` +
+		`"allowed_signature_policy_ids":["trust-1"],"maximum_vulnerability_severity":"high",` +
+		`"maximum_scan_age_seconds":3600},"enabled":true}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/deployment-policies",
+		strings.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"version":1`) ||
+		!strings.Contains(response.Body.String(), `"maximum_scan_age_seconds":3600`) {
+		t.Fatalf("create deployment policy = %d %s", response.Code, response.Body.String())
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/api/v1/projects/project-1/deployment-policies/policy-1", nil)
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"scope":"project"`) {
+		t.Fatalf("get deployment policy = %d %s", response.Code, response.Body.String())
+	}
+
+	updateBody := strings.Replace(requestBody, `"Release baseline"`, `"Updated baseline"`, 1)
+	updateBody = strings.TrimSuffix(updateBody, "}") + `,"expected_version":1}`
+	request = httptest.NewRequest(http.MethodPatch,
+		"/api/v1/projects/project-1/deployment-policies/policy-1", strings.NewReader(updateBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"version":2`) ||
+		!strings.Contains(response.Body.String(), `"name":"Updated baseline"`) {
+		t.Fatalf("update deployment policy = %d %s", response.Code, response.Body.String())
+	}
+
+	unsafeProduction := `{"name":"Unsafe","scope":"environment","environment_id":"production-1",` +
+		`"mode":"advisory","requirements":{"require_sbom":true,"require_provenance":false,` +
+		`"allowed_signature_policy_ids":[],"maximum_vulnerability_severity":"",` +
+		`"maximum_scan_age_seconds":0},"enabled":true}`
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/deployment-policies",
+		strings.NewReader(unsafeProduction))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unsafe production policy = %d %s", response.Code, response.Body.String())
+	}
+
+	viewer := maintainer
+	viewer.Role = security.RoleViewer
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/deployment-policies",
+		strings.NewReader(requestBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), viewer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("viewer create deployment policy = %d %s", response.Code, response.Body.String())
+	}
 }
 
 func TestHTTPListsAndGetsSafeEvidenceMetadata(t *testing.T) {
@@ -253,6 +427,102 @@ func TestHTTPSchedulesManualVulnerabilityRescanWithIdempotencyKey(t *testing.T) 
 	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"scheduled":true`) ||
 		jobs.item.Kind != biz.EvidenceKindVulnerabilityReport {
 		t.Fatalf("rescan = %d %s job=%+v", response.Code, response.Body.String(), jobs.item)
+	}
+}
+
+func TestHTTPVulnerabilityWaiverLifecycleIsBoundedAndRoleProtected(t *testing.T) {
+	now := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	repository := &vulnerabilityWaiverRepositoryStub{}
+	waivers, err := biz.NewVulnerabilityWaiverUseCase(projectLookupStub{}, artifactLookupStub{}, repository,
+		func() (string, error) { return "waiver-1", nil }, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	evidence, _ := biz.NewUseCase(projectLookupStub{}, artifactLookupStub{}, evidenceRepositoryStub{})
+	handler := NewHTTP(evidence).WithVulnerabilityWaivers(waivers)
+	maintainer := security.Principal{UserID: "maintainer-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleMaintainer}
+	createBody := `{"scope":"artifact","artifact_id":"artifact-1","vulnerability_id":"cve-2026-12345",` +
+		`"reason":"The vulnerable path is disabled.","expires_at":"` + now.Add(24*time.Hour).Format(time.RFC3339) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/vulnerability-waivers",
+		strings.NewReader(createBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated || !strings.Contains(response.Body.String(), `"status":"active"`) ||
+		!strings.Contains(response.Body.String(), `"vulnerability_id":"CVE-2026-12345"`) ||
+		!strings.Contains(response.Body.String(), `"subject_digest":"sha256:`) ||
+		!strings.Contains(response.Body.String(), `"approved_by":"maintainer-1"`) {
+		t.Fatalf("create waiver = %d %s", response.Code, response.Body.String())
+	}
+	viewer := maintainer
+	viewer.UserID, viewer.Role = "viewer-1", security.RoleViewer
+	request = httptest.NewRequest(http.MethodGet,
+		"/api/v1/projects/project-1/vulnerability-waivers?status=active&limit=50", nil)
+	request = request.WithContext(security.WithPrincipal(request.Context(), viewer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"next_cursor":""`) ||
+		!strings.Contains(response.Body.String(), `"waiver-1"`) {
+		t.Fatalf("list waivers = %d %s", response.Code, response.Body.String())
+	}
+	developer := maintainer
+	developer.UserID, developer.Role = "developer-1", security.RoleDeveloper
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/vulnerability-waivers",
+		strings.NewReader(createBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), developer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("developer create waiver = %d %s", response.Code, response.Body.String())
+	}
+	revokeBody := `{"reason":"Patched image deployed.","expected_version":1}`
+	request = httptest.NewRequest(http.MethodPost,
+		"/api/v1/projects/project-1/vulnerability-waivers/waiver-1:revoke", strings.NewReader(revokeBody))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), maintainer))
+	response = httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"status":"revoked"`) ||
+		!strings.Contains(response.Body.String(), `"revocation_reason":"Patched image deployed."`) {
+		t.Fatalf("revoke waiver = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestHTTPRejectsInvalidVulnerabilityWaiverQueriesAndPermanentApproval(t *testing.T) {
+	now := time.Date(2026, 8, 29, 10, 0, 0, 0, time.UTC)
+	repository := &vulnerabilityWaiverRepositoryStub{}
+	waivers, _ := biz.NewVulnerabilityWaiverUseCase(projectLookupStub{}, artifactLookupStub{}, repository,
+		func() (string, error) { return "waiver-1", nil }, func() time.Time { return now })
+	evidence, _ := biz.NewUseCase(projectLookupStub{}, artifactLookupStub{}, evidenceRepositoryStub{})
+	handler := NewHTTP(evidence).WithVulnerabilityWaivers(waivers)
+	principal := security.Principal{UserID: "maintainer-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleMaintainer}
+	for _, target := range []string{
+		"/api/v1/projects/project-1/vulnerability-waivers?unknown=true",
+		"/api/v1/projects/project-1/vulnerability-waivers?status=expired",
+		"/api/v1/projects/project-1/vulnerability-waivers?limit=101",
+	} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request = request.WithContext(security.WithPrincipal(request.Context(), principal))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusBadRequest && response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("GET %s = %d %s", target, response.Code, response.Body.String())
+		}
+	}
+	body := `{"scope":"project","vulnerability_id":"CVE-2026-12345","reason":"No expiry",` +
+		`"expires_at":"` + now.Add(181*24*time.Hour).Format(time.RFC3339) + `"}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/vulnerability-waivers",
+		strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request = request.WithContext(security.WithPrincipal(request.Context(), principal))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("permanent waiver = %d %s", response.Code, response.Body.String())
 	}
 }
 

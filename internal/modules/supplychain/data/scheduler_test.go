@@ -262,3 +262,47 @@ func TestArtifactEvidenceSchedulerFreezesKMSProfileAndSkipsPrematureVerify(t *te
 		t.Fatalf("scheduled sign-and-verify jobs = %+v", creator.jobs)
 	}
 }
+
+func TestExternalArtifactSchedulerDoesNotClaimBuildProvenanceOrSignForProducer(t *testing.T) {
+	creator := &evidenceJobCreatorStub{}
+	ids := []string{"sbom-job-1", "vulnerability-job-1", "signature-job-1"}
+	now := time.Unix(500, 0).UTC()
+	policy, err := biz.NewSignatureTrustPolicy(biz.SignatureTrustPolicyInput{
+		ID: "policy-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		Name: "external producer", Mode: biz.SignatureTrustKeyless,
+		TrustedRootID: "offline-root-1", TrustedRootHash: "sha256:" + strings.Repeat("b", 64),
+		CertificateIdentity: "https://git.example.com/team/api/.ci/release@refs/tags/v1.0.0",
+		OIDCIssuer:          "https://issuer.example.com", Enabled: true, Version: 4,
+		CreatedAt: now, UpdatedAt: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scheduler := NewArtifactEvidenceScheduler(creator, func() (string, error) {
+		id := ids[0]
+		ids = ids[1:]
+		return id, nil
+	}, func() time.Time { return now }).WithVulnerabilityScanning().
+		WithSignatureTrustPolicies(signaturePolicyListerStub{policies: []biz.SignatureTrustPolicy{policy}})
+	artifact := buildbiz.Artifact{
+		ID: "artifact-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		Origin: buildbiz.ArtifactOriginExternal, Producer: "github-actions/team/api",
+		ProducerVerification: buildbiz.ArtifactProducerDeclared,
+		RegistryCredentialID: "registry-1", ImageRepository: "registry.example.com/team/api",
+		ImageDigest: "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
+	}
+	if err := scheduler.EnsureArtifactEvidence(t.Context(), artifact); err != nil {
+		t.Fatal(err)
+	}
+	if len(creator.jobs) != 3 || creator.jobs[0].Kind != biz.EvidenceKindSBOM ||
+		creator.jobs[1].Kind != biz.EvidenceKindVulnerabilityReport ||
+		creator.jobs[2].Kind != biz.EvidenceKindSignature ||
+		creator.jobs[2].SignatureOperation != biz.SignatureOperationVerify {
+		t.Fatalf("external Artifact jobs = %+v", creator.jobs)
+	}
+	for _, job := range creator.jobs {
+		if job.Kind == biz.EvidenceKindProvenance || job.SignatureOperation == biz.SignatureOperationSignAndVerify {
+			t.Fatalf("external producer boundary was crossed by job %+v", job)
+		}
+	}
+}

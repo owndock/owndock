@@ -2,7 +2,6 @@ package data
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,12 +10,12 @@ import (
 	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"oras.land/oras-go/v2"
 	"oras.land/oras-go/v2/content/memory"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
 	"oras.land/oras-go/v2/registry/remote/errcode"
-	"oras.land/oras-go/v2/registry/remote/retry"
 
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -25,6 +24,7 @@ type ORASPublisherOptions struct {
 	Credentials      biz.RegistryCredentialProvider
 	AllowPlainHTTP   bool
 	MaxDocumentBytes int64
+	RegistryCABundle []byte
 }
 
 const ORASGoVersion = "2.6.2"
@@ -40,23 +40,15 @@ func NewORASPublisher(options ORASPublisherOptions) (*ORASPublisher, error) {
 	if options.MaxDocumentBytes < 1024 || options.MaxDocumentBytes > 64*1024*1024 {
 		return nil, biz.ErrInvalidEvidenceJob
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	publisher := &ORASPublisher{
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
 		maxDocumentBytes: options.MaxDocumentBytes,
 	}
-	publisher.client = &http.Client{
-		Transport: retry.NewTransport(transport),
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 3 || request.URL.Scheme != "https" &&
-				!(publisher.allowPlainHTTP && loopbackRegistry(request.URL.Host)) {
-				return errors.New("unsafe Registry redirect")
-			}
-			return nil
-		},
+	client, err := newRegistryHTTPClient(publisher.allowPlainHTTP, options.RegistryCABundle)
+	if err != nil {
+		return nil, biz.ErrInvalidEvidenceJob
 	}
+	publisher.client = client
 	return publisher, nil
 }
 
@@ -107,12 +99,11 @@ func (p *ORASPublisher) publish(ctx context.Context, projectID, credentialID,
 		return biz.PublishedDescriptor{}, biz.ErrInvalidEvidenceJob
 	}
 	repository.PlainHTTP = p.allowPlainHTTP
-	credential := biz.RegistryCredential{}
+	credential := biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}
 	if p.credentials != nil {
 		credential, err = p.credentials.ResolveRegistryCredential(ctx, projectID,
 			credentialID, registry)
-		if err != nil || len(credential.Username) == 0 || len(credential.Username) > 255 ||
-			len(credential.Password) == 0 || len(credential.Password) > 64*1024 {
+		if err != nil || !validCosignCredential(credential) {
 			clear(credential.Password)
 			return biz.PublishedDescriptor{}, biz.ErrRegistryAuthentication
 		}

@@ -18,7 +18,7 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - 不提供任意 YAML/Shell 流水线，也不在 API Server 或生产 Runtime Target 上构建客户源码；
 - Kubernetes 和其他运行时通过后续适配器扩展。
 
-当前代码已经实现外部 OCI 镜像到 Release/Deployment 的基础链路，以及 Source Repository/Repository Credential 的安全登记、受限连接探测、平台签名 Webhook 入队、精确 Git checkout、rootless BuildKit 构建、认证 Registry push、Artifact 和幂等 Release 交接、development 显式自动部署，以及有界脱敏 Build 日志。完整故障与攻击系统验收前仍属于 pre-release。
+当前代码已经实现外部 OCI 镜像的 digest-bound Artifact 登记、Registry manifest 完整性探测、Evidence Job 与审计原子提交，以及 Artifact → Release → Deployment 主链；同时已实现 Source Repository/Repository Credential 的安全登记、受限连接探测、平台签名 Webhook 入队、精确 Git checkout、rootless BuildKit 构建、认证 Registry push、OwnDock Build Artifact 和幂等 Release 交接、development 显式自动部署，以及有界脱敏 Build 日志。完整故障与攻击系统验收前仍属于 pre-release。
 
 产品首版同时支持 `zh-CN` 与 `en-US`。API 保持英文机器字段和稳定 error/status/action code，后端按请求语言生成安全错误文案；控制台、未来的客户 CLI、官网和客户文档在展示层本地化，详细边界见[多语言与本地化](localization.md)。
 
@@ -41,7 +41,7 @@ Installation
                 │     └── Releases
                 ├── Environments
                 ├── Runtime Targets
-                ├── Registry Credentials
+                ├── Registry Credentials（anonymous/basic）
                 └── Deployments
                       └── Container Terminal Sessions
 
@@ -50,6 +50,7 @@ Source Repository 1 --* Build Configuration
 Build Configuration 1 --* Build Trigger
 Build Configuration 1 --* Build Hook
 Build Configuration 1 --* Build 1 --0..1 Artifact
+External CI --register digest--> Artifact
 Artifact 1 --0..1 Release
 Application 1 --* Release
 Release 1 --* Deployment *--1 Environment
@@ -79,7 +80,11 @@ Application 是 Project 内长期存在、可多次发布的软件服务身份�
 
 Source Repository 保存平台无关的 Git HTTPS/SSH 地址，并通过 ID 关联只含外部秘密引用的 Repository Credential。Owner/Maintainer 可以显式探测连接：系统只列出远端引用，验证默认分支、HTTPS TLS 或固定 SSH Host Key，然后保存不含原始错误的安全状态。私有仓库读取凭据与 Webhook 秘密分开：前者允许 OwnDock 读取代码，后者只用于验证“何时触发构建”的通知。通俗解释、当前规则和安全隔离见 [Source Repository 使用说明](source-repositories.md) 与 [Git-to-Deploy 产品边界](git-to-deploy.md)。
 
-Build Configuration 属于 Application，声明 Source Repository、Dockerfile、构建上下文、精确允许 ref、目标 Registry、单一平台、资源/超时/并发、Release 运行规格、自动 Release 意图和可选 development 自动部署目标。它是可修改的版本化配方。Build 固定完整 Commit SHA 和触发时的非秘密配置快照；手动、独立 Trigger Token 与 GitHub/GitLab/Gitea/Forgejo Webhook 自动触发和幂等创建已实现。Build 状态机、协作取消、不可变重试、Mongo queue/lease/heartbeat/失联接管/generation fence 也已进入控制面。Trigger Token 与 Build Hook 都固定绑定配置并可进一步收窄 ref，不能让外部调用覆盖仓库或构建目标。独立 Build Worker 已实现固定 Git、HTTPS/SSH 临时凭据、Commit 二次验证、有界工作区、rootless BuildKit 与认证 Registry push；推送得到的真实 digest 会在 fence 下原子形成 Artifact 和成功 Build。Artifact 按 `source_artifact_id` 幂等创建不可变 Release，再按 Artifact/Environment/Runtime Target 幂等创建普通 Deployment；协调失败只重试交接、不重新构建。
+Build Configuration 属于 Application，声明 Source Repository、Dockerfile、构建上下文、精确允许 ref、目标 Registry、单一平台、资源/超时/并发、Release 运行规格、自动 Release 意图和可选 development 自动部署目标。它是可修改的版本化配方。Build 固定完整 Commit SHA 和触发时的非秘密配置快照；手动、独立 Trigger Token 与 GitHub/GitLab/Gitea/Forgejo Webhook 自动触发和幂等创建已实现。Build 状态机、协作取消、不可变重试、Mongo queue/lease/heartbeat/失联接管/generation fence 也已进入控制面。Trigger Token 与 Build Hook 都固定绑定配置并可进一步收窄 ref，不能让外部调用覆盖仓库或构建目标。独立 Build Worker 已实现固定 Git、HTTPS/SSH 临时凭据、Commit 二次验证、有界工作区、rootless BuildKit 与认证 Registry push；推送得到的真实 digest 会在 fence 下原子形成 Artifact 和成功 Build。
+
+外部 CI 则直接登记它已推送的完整 digest。Server 回读并哈希精确 Registry manifest，Artifact 标记为 `external/declared`，不伪造 Build/Build Configuration、OwnDock Provenance 或平台签名；随后自动排入适用的 Evidence Job。两种 Artifact 都按 `source_artifact_id` 幂等创建不可变 Release，再按 Artifact/Environment/Runtime Target 幂等创建普通 Deployment；OwnDock Build 协调失败只重试交接、不重新构建。
+
+Registry Credential 显式区分 `anonymous` 与 `basic`。公开 Registry 不需要虚假账号，也不会触发秘密读取；私有 Registry 的用户名和外部密码引用必须同时存在，执行失败不会降级为匿名。统一规则见 [Registry 连接与认证](registry-connections.md)。
 
 Git checkout、不可信 Dockerfile 和 BuildKit 缓存必须位于隔离 Build Boundary，不能写入 MongoDB、进入 API Server，或挂载生产 Runtime Target 的 Docker Socket 和数据卷。
 

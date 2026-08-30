@@ -100,6 +100,7 @@ type Deployment struct {
 	UpdatedAt       time.Time
 	Version         uint64
 	Lease           Lease
+	Admission       AdmissionSnapshot
 }
 
 func (d Deployment) CutoverScope() string {

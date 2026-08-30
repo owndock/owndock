@@ -24,8 +24,14 @@ type UseCase struct {
 	automaticReferences AutomaticReferenceLookup
 	transaction         transaction.Manager
 	audit               sharedaudit.Recorder
+	admission           AdmissionEvaluator
 	newID               IDGenerator
 	now                 Clock
+}
+
+func (u *UseCase) WithAdmissionEvaluator(evaluator AdmissionEvaluator) *UseCase {
+	u.admission = evaluator
+	return u
 }
 
 type FormalReferenceLookup interface {
@@ -136,6 +142,9 @@ func (u *UseCase) CreateFormal(
 	); err != nil {
 		return Deployment{}, err
 	}
+	if err := u.evaluateAdmission(ctx, &item); err != nil {
+		return Deployment{}, err
+	}
 	return u.persistFormal(ctx, principal, item, requestID, AuditActionCreate)
 }
 
@@ -178,6 +187,9 @@ func (u *UseCase) CreateAutomatic(
 		ctx, item.ProjectID, item.ReleaseID, item.ApplicationID,
 		item.EnvironmentID, item.RuntimeTargetID,
 	); err != nil {
+		return Deployment{}, err
+	}
+	if err := u.evaluateAdmission(ctx, &item); err != nil {
 		return Deployment{}, err
 	}
 	principal := security.Principal{
@@ -349,7 +361,28 @@ func (u *UseCase) createDerivedFormal(
 			return Deployment{}, ErrRollbackNotSucceeded
 		}
 	}
+	if err := u.evaluateAdmission(ctx, &item); err != nil {
+		return Deployment{}, err
+	}
 	return u.persistFormal(ctx, principal, item, requestID, action)
+}
+
+func (u *UseCase) evaluateAdmission(ctx context.Context, item *Deployment) error {
+	if u.admission == nil {
+		return ErrAdmissionUnavailable
+	}
+	snapshot, err := u.admission.EvaluateAdmission(ctx, AdmissionRequest{
+		OrganizationID: item.OrganizationID, ProjectID: item.ProjectID, ReleaseID: item.ReleaseID,
+		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
+	})
+	if err != nil {
+		return err
+	}
+	if snapshot.Validate() != nil || snapshot.Decision == AdmissionDenied {
+		return ErrAdmissionUnavailable
+	}
+	item.Admission = snapshot
+	return nil
 }
 
 func (u *UseCase) findReplay(ctx context.Context, intent Deployment) (Deployment, bool, error) {

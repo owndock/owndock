@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/build/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/transaction"
 	"go.opentelemetry.io/otel/codes"
@@ -395,7 +396,8 @@ func checkoutTestBuild(now time.Time) biz.Build {
 func checkoutRegistries() executionRegistriesStub {
 	return executionRegistriesStub{credential: biz.BuildRegistryCredential{
 		ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
-		Username: "builder", PasswordRef: "secret://production",
+		AuthenticationMode: registryauth.ModeBasic,
+		Username:           "builder", PasswordRef: "secret://production",
 	}}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -212,7 +213,7 @@ func TestRegistryCredentialMustMatchReleaseImage(t *testing.T) {
 	}
 	credential, err := useCase.CreateRegistryCredential(
 		t.Context(), owner, project.ID, "Registry", "registry.example.com",
-		"robot", "secret://registry-password", "request-registry",
+		registryauth.ModeBasic, "robot", "secret://registry-password", "request-registry",
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -243,6 +244,7 @@ func TestCreateReleaseFromArtifactIsIdempotent(t *testing.T) {
 		applications: []Application{{ID: "application-1", ProjectID: "project-1"}},
 		registries: []RegistryCredential{{
 			ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
+			AuthenticationMode: registryauth.ModeBasic,
 		}},
 	}
 	audits := &fakeAudits{}

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/controlplane/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -315,6 +316,21 @@ func (s *MongoStore) ReleaseExecutionRegistry(
 		err = biz.ErrInvalidRegistry
 		return
 	}
+	switch credential.AuthenticationMode {
+	case registryauth.ModeAnonymous:
+		if credential.Username != "" || credential.PasswordRef != "" {
+			err = biz.ErrInvalidRegistry
+			return
+		}
+	case registryauth.ModeBasic:
+		if strings.TrimSpace(credential.Username) == "" || strings.TrimSpace(credential.PasswordRef) == "" {
+			err = biz.ErrInvalidRegistry
+			return
+		}
+	default:
+		err = biz.ErrInvalidRegistry
+		return
+	}
 	server, username, passwordRef = credential.Server, credential.Username, credential.PasswordRef
 	return
 }
@@ -348,6 +364,27 @@ func (s *MongoStore) ReleaseExecutionSpec(
 		err = biz.ErrInvalidRuntimeSpec
 	}
 	return
+}
+
+// ReleaseSourceArtifactID is the narrow admission boundary between the
+// control plane and software-supply-chain evaluator. External-CI Releases may
+// legitimately return an empty Artifact ID; an enabled policy then applies
+// its advisory or fail-closed semantics explicitly.
+func (s *MongoStore) ReleaseSourceArtifactID(ctx context.Context,
+	projectID, applicationID, releaseID string) (string, error) {
+	var release struct {
+		SourceArtifactID string `bson:"source_artifact_id"`
+	}
+	err := s.releases.FindOne(ctx, bson.D{{Key: "_id", Value: releaseID},
+		{Key: "project_id", Value: projectID}, {Key: "application_id", Value: applicationID}},
+		options.FindOne().SetProjection(bson.D{{Key: "source_artifact_id", Value: 1}})).Decode(&release)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", biz.ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("find release source artifact: %w", err)
+	}
+	return release.SourceArtifactID, nil
 }
 
 // RuntimeTargetExists verifies that a deployment target belongs to the project.
@@ -583,7 +620,8 @@ func (s *MongoStore) CreateRegistryCredential(
 	_, err := s.registries.InsertOne(ctx, registryCredentialDocument{
 		ID: item.ID, ProjectID: item.ProjectID,
 		Name: item.Name, NameNormalized: normalizeName(item.Name),
-		Server: item.Server, Username: item.Username, PasswordRef: item.PasswordRef,
+		Server: item.Server, AuthenticationMode: item.AuthenticationMode,
+		Username: item.Username, PasswordRef: item.PasswordRef,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
 	})
 	if mongo.IsDuplicateKeyError(err) {
@@ -872,21 +910,23 @@ func (d releaseDocument) domain() biz.Release {
 }
 
 type registryCredentialDocument struct {
-	ID             string    `bson:"_id"`
-	ProjectID      string    `bson:"project_id"`
-	Name           string    `bson:"name"`
-	NameNormalized string    `bson:"name_normalized"`
-	Server         string    `bson:"server"`
-	Username       string    `bson:"username"`
-	PasswordRef    string    `bson:"password_ref"`
-	CreatedBy      string    `bson:"created_by"`
-	CreatedAt      time.Time `bson:"created_at"`
+	ID                 string            `bson:"_id"`
+	ProjectID          string            `bson:"project_id"`
+	Name               string            `bson:"name"`
+	NameNormalized     string            `bson:"name_normalized"`
+	Server             string            `bson:"server"`
+	AuthenticationMode registryauth.Mode `bson:"authentication_mode"`
+	Username           string            `bson:"username,omitempty"`
+	PasswordRef        string            `bson:"password_ref,omitempty"`
+	CreatedBy          string            `bson:"created_by"`
+	CreatedAt          time.Time         `bson:"created_at"`
 }
 
 func (d registryCredentialDocument) domain() biz.RegistryCredential {
 	return biz.RegistryCredential{
 		ID: d.ID, ProjectID: d.ProjectID, Name: d.Name,
-		Server: d.Server, Username: d.Username, PasswordRef: d.PasswordRef,
+		Server: d.Server, AuthenticationMode: d.AuthenticationMode,
+		Username: d.Username, PasswordRef: d.PasswordRef,
 		CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt,
 	}
 }

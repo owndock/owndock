@@ -31,6 +31,33 @@ func (r formalReferences) Validate(context.Context, string, string, string, stri
 
 type auditRecorder struct{}
 
+type allowAdmission struct{}
+
+func (allowAdmission) EvaluateAdmission(context.Context,
+	biz.AdmissionRequest) (biz.AdmissionSnapshot, error) {
+	return (biz.AdmissionSnapshot{EvaluatedAt: time.Unix(100, 0), EnvironmentStage: "development",
+		Policies: []biz.AdmissionPolicySnapshot{}, Evidence: []biz.AdmissionEvidenceSnapshot{},
+		Verifications: []biz.AdmissionVerificationSnapshot{}, Waivers: []biz.AdmissionWaiverSnapshot{},
+		Violations: []biz.AdmissionViolation{}, Decision: biz.AdmissionNotConfigured}).Seal()
+}
+
+type denyAdmission struct{}
+
+func (denyAdmission) EvaluateAdmission(context.Context,
+	biz.AdmissionRequest) (biz.AdmissionSnapshot, error) {
+	snapshot, err := (biz.AdmissionSnapshot{EvaluatedAt: time.Unix(100, 0), EnvironmentStage: "production",
+		Policies: []biz.AdmissionPolicySnapshot{{ID: "policy-1", Version: 2, Scope: "project",
+			Mode: "enforced", Requirements: biz.AdmissionRequirementsSnapshot{RequireSBOM: true,
+				AllowedSignaturePolicyIDs: []string{}}}},
+		Evidence: []biz.AdmissionEvidenceSnapshot{}, Verifications: []biz.AdmissionVerificationSnapshot{},
+		Waivers: []biz.AdmissionWaiverSnapshot{}, Violations: []biz.AdmissionViolation{{
+			PolicyID: "policy-1", Code: biz.AdmissionSBOMMissing}}, Decision: biz.AdmissionDenied}).Seal()
+	if err != nil {
+		return biz.AdmissionSnapshot{}, err
+	}
+	return snapshot, biz.AdmissionDeniedError{Snapshot: snapshot}
+}
+
 func (auditRecorder) Record(context.Context, sharedaudit.Event) error { return nil }
 
 func developerPrincipal() security.Principal {
@@ -74,7 +101,8 @@ func newTestUseCase(t *testing.T, withReferences bool) *biz.UseCase {
 		},
 		func() time.Time { return time.Unix(0, 0) },
 	).WithFormalReferences(formalReferences{}).
-		WithFormalSecurity(transaction.Passthrough{}, auditRecorder{})
+		WithFormalSecurity(transaction.Passthrough{}, auditRecorder{}).
+		WithAdmissionEvaluator(allowAdmission{})
 }
 
 func TestCreateRejectsMissingReferences(t *testing.T) {
@@ -110,7 +138,7 @@ func TestFormalCreateReturnsImmutableReferences(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("formal create response = %d %s", recorder.Code, recorder.Body.String())
 	}
-	for _, field := range []string{"release_id", "runtime_target_id"} {
+	for _, field := range []string{"release_id", "runtime_target_id", "admission", "evaluation_digest"} {
 		if !strings.Contains(recorder.Body.String(), `"`+field+`"`) {
 			t.Fatalf("response missing %s: %s", field, recorder.Body.String())
 		}
@@ -125,6 +153,23 @@ func TestFormalCreateAcceptsIdempotencyHeader(t *testing.T) {
 	service.HandleFormal(recorder, request)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestFormalCreateReturnsSafeAdmissionDenialDetails(t *testing.T) {
+	service := NewHTTP(newTestUseCase(t, true).WithAdmissionEvaluator(denyAdmission{}))
+	recorder := httptest.NewRecorder()
+	request := formalRequest(http.MethodPost,
+		`{"release_id":"rel-1","application_id":"app-1","environment_id":"env-1","runtime_target_id":"target-1"}`,
+		developerPrincipal())
+	request.Header.Set("Idempotency-Key", "denied-key")
+	service.HandleFormal(recorder, request)
+	if recorder.Code != http.StatusPreconditionFailed ||
+		!strings.Contains(recorder.Body.String(), `"code":"deployment_admission_denied"`) ||
+		!strings.Contains(recorder.Body.String(), `"code":"sbom_missing"`) ||
+		!strings.Contains(recorder.Body.String(), `"version":2`) ||
+		strings.Contains(recorder.Body.String(), "secret") {
+		t.Fatalf("admission denial = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 
@@ -219,7 +264,8 @@ func TestFormalRetryAndRollbackCreateLinkedOperations(t *testing.T) {
 		return fmt.Sprintf("derived-%d", sequence), nil
 	}, func() time.Time { return now }).
 		WithFormalReferences(formalReferences{}).
-		WithFormalSecurity(transaction.Passthrough{}, auditRecorder{})
+		WithFormalSecurity(transaction.Passthrough{}, auditRecorder{}).
+		WithAdmissionEvaluator(allowAdmission{})
 	service := NewHTTP(useCase)
 
 	source, err := biz.NewFormal(

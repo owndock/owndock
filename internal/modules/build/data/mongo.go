@@ -456,6 +456,20 @@ func (r *MongoRepository) GetArtifactByBuild(ctx context.Context, buildID string
 	return document.domain(), nil
 }
 
+func (r *MongoRepository) GetArtifactByRegistrationKey(ctx context.Context,
+	projectID, registrationKey string) (biz.Artifact, error) {
+	var document artifactDocument
+	err := r.artifacts.FindOne(ctx, bson.D{{Key: "project_id", Value: projectID},
+		{Key: "registration_key", Value: registrationKey}}).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.Artifact{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Artifact{}, fmt.Errorf("find external artifact registration: %w", err)
+	}
+	return document.domain(), nil
+}
+
 func (r *MongoRepository) CreateArtifact(ctx context.Context, item biz.Artifact) (biz.Artifact, error) {
 	_, err := r.artifacts.InsertOne(ctx, artifactDocumentFromDomain(item))
 	if mongo.IsDuplicateKeyError(err) {
@@ -1181,23 +1195,27 @@ func (d buildDocument) domain() biz.Build {
 }
 
 type artifactDocument struct {
-	ID                   string                        `bson:"_id"`
-	OrganizationID       string                        `bson:"organization_id"`
-	ProjectID            string                        `bson:"project_id"`
-	ApplicationID        string                        `bson:"application_id"`
-	BuildID              string                        `bson:"build_id"`
-	BuildConfigurationID string                        `bson:"build_configuration_id"`
-	RegistryCredentialID string                        `bson:"registry_credential_id"`
-	ImageRepository      string                        `bson:"image_repository"`
-	ImageDigest          string                        `bson:"image_digest"`
-	TargetPlatform       biz.BuildPlatform             `bson:"target_platform"`
-	ReleaseRuntimeSpec   releaseRuntimeSpecDocument    `bson:"release_runtime_spec"`
-	AutomaticDeployments []automaticDeploymentDocument `bson:"automatic_deployments"`
-	ReleaseStatus        biz.ArtifactReleaseStatus     `bson:"release_status"`
-	ReleaseID            string                        `bson:"release_id,omitempty"`
-	Version              uint64                        `bson:"version"`
-	CreatedAt            time.Time                     `bson:"created_at"`
-	ReleasedAt           time.Time                     `bson:"released_at,omitempty"`
+	ID                   string                           `bson:"_id"`
+	OrganizationID       string                           `bson:"organization_id"`
+	ProjectID            string                           `bson:"project_id"`
+	ApplicationID        string                           `bson:"application_id"`
+	Origin               biz.ArtifactOrigin               `bson:"origin"`
+	Producer             string                           `bson:"producer"`
+	ProducerVerification biz.ArtifactProducerVerification `bson:"producer_verification"`
+	RegistrationKey      string                           `bson:"registration_key,omitempty"`
+	BuildID              string                           `bson:"build_id,omitempty"`
+	BuildConfigurationID string                           `bson:"build_configuration_id,omitempty"`
+	RegistryCredentialID string                           `bson:"registry_credential_id"`
+	ImageRepository      string                           `bson:"image_repository"`
+	ImageDigest          string                           `bson:"image_digest"`
+	TargetPlatform       biz.BuildPlatform                `bson:"target_platform"`
+	ReleaseRuntimeSpec   releaseRuntimeSpecDocument       `bson:"release_runtime_spec"`
+	AutomaticDeployments []automaticDeploymentDocument    `bson:"automatic_deployments"`
+	ReleaseStatus        biz.ArtifactReleaseStatus        `bson:"release_status"`
+	ReleaseID            string                           `bson:"release_id,omitempty"`
+	Version              uint64                           `bson:"version"`
+	CreatedAt            time.Time                        `bson:"created_at"`
+	ReleasedAt           time.Time                        `bson:"released_at,omitempty"`
 }
 
 type buildLogStreamDocument struct {
@@ -1265,7 +1283,9 @@ func splitBuildLogMessage(value string, maximumBytes int) []string {
 func artifactDocumentFromDomain(item biz.Artifact) artifactDocument {
 	return artifactDocument{
 		ID: item.ID, OrganizationID: item.OrganizationID, ProjectID: item.ProjectID,
-		ApplicationID: item.ApplicationID, BuildID: item.BuildID,
+		ApplicationID: item.ApplicationID, Origin: item.Origin, Producer: item.Producer,
+		ProducerVerification: item.ProducerVerification, RegistrationKey: item.RegistrationKey,
+		BuildID:              item.BuildID,
 		BuildConfigurationID: item.BuildConfigurationID,
 		RegistryCredentialID: item.RegistryCredentialID,
 		ImageRepository:      item.ImageRepository, ImageDigest: item.ImageDigest,
@@ -1280,7 +1300,9 @@ func artifactDocumentFromDomain(item biz.Artifact) artifactDocument {
 func (d artifactDocument) domain() biz.Artifact {
 	return biz.Artifact{
 		ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID,
-		ApplicationID: d.ApplicationID, BuildID: d.BuildID,
+		ApplicationID: d.ApplicationID, Origin: d.Origin, Producer: d.Producer,
+		ProducerVerification: d.ProducerVerification, RegistrationKey: d.RegistrationKey,
+		BuildID:              d.BuildID,
 		BuildConfigurationID: d.BuildConfigurationID,
 		RegistryCredentialID: d.RegistryCredentialID,
 		ImageRepository:      d.ImageRepository, ImageDigest: d.ImageDigest,

@@ -19,6 +19,8 @@ type MongoRepository struct {
 	verifications             *mongo.Collection
 	signingProfiles           *mongo.Collection
 	vulnerabilityObservations *mongo.Collection
+	vulnerabilityWaivers      *mongo.Collection
+	deploymentPolicies        *mongo.Collection
 	client                    *mongo.Client
 }
 
@@ -30,6 +32,8 @@ func NewMongoRepository(database *mongo.Database) *MongoRepository {
 		verifications:             database.Collection("evidence_verifications"),
 		signingProfiles:           database.Collection("signature_signing_profiles"),
 		vulnerabilityObservations: database.Collection("vulnerability_observations"),
+		vulnerabilityWaivers:      database.Collection("vulnerability_waivers"),
+		deploymentPolicies:        database.Collection("deployment_policies"),
 	}
 }
 

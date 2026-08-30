@@ -13,24 +13,27 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 const PinnedCosignVersion = "3.0.6"
 
 type CosignVerifierOptions struct {
-	Executable      string
-	ExpectedVersion string
-	Credentials     biz.RegistryCredentialProvider
-	TemporaryRoot   string
-	AllowPlainHTTP  bool
+	Executable         string
+	ExpectedVersion    string
+	Credentials        biz.RegistryCredentialProvider
+	TemporaryRoot      string
+	AllowPlainHTTP     bool
+	RegistryCACertFile string
 }
 
 type CosignVerifier struct {
-	executable      string
-	expectedVersion string
-	credentials     biz.RegistryCredentialProvider
-	temporaryRoot   string
-	allowPlainHTTP  bool
+	executable         string
+	expectedVersion    string
+	credentials        biz.RegistryCredentialProvider
+	temporaryRoot      string
+	allowPlainHTTP     bool
+	registryCACertFile string
 }
 
 func NewCosignVerifier(options CosignVerifierOptions) (*CosignVerifier, error) {
@@ -38,19 +41,20 @@ func NewCosignVerifier(options CosignVerifierOptions) (*CosignVerifier, error) {
 	version := strings.TrimPrefix(strings.TrimSpace(options.ExpectedVersion), "v")
 	temporaryRoot := strings.TrimSpace(options.TemporaryRoot)
 	if !filepath.IsAbs(executable) || version != PinnedCosignVersion ||
-		options.Credentials == nil || !filepath.IsAbs(temporaryRoot) {
+		options.Credentials == nil || !filepath.IsAbs(temporaryRoot) ||
+		!validRegistryCACertFile(options.RegistryCACertFile) {
 		return nil, biz.ErrSignatureToolVersion
 	}
 	return &CosignVerifier{
 		executable: executable, expectedVersion: version,
 		credentials: options.Credentials, temporaryRoot: temporaryRoot,
-		allowPlainHTTP: options.AllowPlainHTTP,
+		allowPlainHTTP: options.AllowPlainHTTP, registryCACertFile: options.RegistryCACertFile,
 	}, nil
 }
 
 func (v *CosignVerifier) Verify(ctx context.Context) error {
 	command := exec.CommandContext(ctx, v.executable, "version", "--json")
-	command.Env = cosignEnvironment(v.temporaryRoot, "")
+	command.Env = cosignEnvironment(v.temporaryRoot, "", v.registryCACertFile)
 	output := &boundedBuffer{maximum: 64 * 1024}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 4096}
 	if err := command.Run(); err != nil {
@@ -139,7 +143,7 @@ func (v *CosignVerifier) VerifySignature(ctx context.Context,
 	}
 	arguments = append(arguments, request.CanonicalSubject())
 	command := exec.CommandContext(ctx, v.executable, arguments...)
-	command.Env = cosignEnvironment(directory, dockerDirectory)
+	command.Env = cosignEnvironment(directory, dockerDirectory, v.registryCACertFile)
 	output := &boundedBuffer{maximum: 1024 * 1024}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 16 * 1024}
 	if err := command.Run(); err != nil {
@@ -172,21 +176,38 @@ func verifiedBundleSetDigest(output []byte) (string, error) {
 }
 
 func validCosignCredential(value biz.RegistryCredential) bool {
-	username := strings.TrimSpace(value.Username)
-	return username != "" && username == value.Username && len(username) <= 255 &&
-		!strings.ContainsAny(username, ":\r\n\x00") && len(value.Password) > 0 && len(value.Password) <= 64*1024
+	switch value.AuthenticationMode {
+	case registryauth.ModeAnonymous:
+		return value.Username == "" && len(value.Password) == 0
+	case registryauth.ModeBasic:
+		username := strings.TrimSpace(value.Username)
+		return username != "" && username == value.Username && len(username) <= 255 &&
+			!strings.ContainsAny(username, ":\r\n\x00") && len(value.Password) > 0 && len(value.Password) <= 64*1024
+	default:
+		return false
+	}
 }
 
 func writeDockerCredential(path, registry string, credential biz.RegistryCredential) error {
-	auth := base64.StdEncoding.EncodeToString(append([]byte(credential.Username+":"), credential.Password...))
+	if !validCosignCredential(credential) {
+		return biz.ErrRegistryAuthentication
+	}
+	auth := ""
+	auths := map[string]struct {
+		Auth string `json:"auth"`
+	}{}
+	if credential.AuthenticationMode == registryauth.ModeBasic {
+		auth = base64.StdEncoding.EncodeToString(append([]byte(credential.Username+":"), credential.Password...))
+		auths[registry] = struct {
+			Auth string `json:"auth"`
+		}{Auth: auth}
+	}
 	defer func() { auth = "" }()
 	content, err := json.Marshal(struct {
 		Auths map[string]struct {
 			Auth string `json:"auth"`
 		} `json:"auths"`
-	}{Auths: map[string]struct {
-		Auth string `json:"auth"`
-	}{registry: {Auth: auth}}})
+	}{Auths: auths})
 	if err != nil {
 		return err
 	}
@@ -194,7 +215,7 @@ func writeDockerCredential(path, registry string, credential biz.RegistryCredent
 	return os.WriteFile(path, content, 0o600)
 }
 
-func cosignEnvironment(home, dockerConfig string) []string {
+func cosignEnvironment(home, dockerConfig, registryCACertFile string) []string {
 	result := []string{
 		"HOME=" + home,
 		"COSIGN_YES=false",
@@ -204,7 +225,18 @@ func cosignEnvironment(home, dockerConfig string) []string {
 	if dockerConfig != "" {
 		result = append(result, "DOCKER_CONFIG="+dockerConfig)
 	}
-	return result
+	return registryCAEnvironment(result, registryCACertFile)
+}
+
+func validRegistryCACertFile(path string) bool {
+	return path == "" || (filepath.IsAbs(path) && strings.TrimSpace(path) == path)
+}
+
+func registryCAEnvironment(environment []string, path string) []string {
+	if path == "" {
+		return environment
+	}
+	return append(environment, "SSL_CERT_FILE="+path)
 }
 
 var _ biz.SignatureVerifier = (*CosignVerifier)(nil)

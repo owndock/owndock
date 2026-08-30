@@ -1,16 +1,14 @@
 package data
 
 import (
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5/plumbing/transport"
+	"github.com/owndock/owndock/internal/shared/tlstrust"
 )
 
 const maximumGitCABundleBytes = int64(1024 * 1024)
@@ -54,31 +52,11 @@ func newGitNetworkPolicy(options GitNetworkOptions) (gitNetworkPolicy, error) {
 }
 
 func readGitCABundle(path string) ([]byte, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() < 1 || info.Size() > maximumGitCABundleBytes {
-		return nil, ErrInvalidGitNetwork
-	}
-	bundle, err := os.ReadFile(path)
-	if err != nil || int64(len(bundle)) > maximumGitCABundleBytes || !validCertificateBundle(bundle) {
+	bundle, err := tlstrust.ReadBundle(path, maximumGitCABundleBytes)
+	if err != nil {
 		return nil, ErrInvalidGitNetwork
 	}
 	return bundle, nil
-}
-
-func validCertificateBundle(bundle []byte) bool {
-	remaining, certificates := bundle, 0
-	for len(remaining) > 0 {
-		block, rest := pem.Decode(remaining)
-		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
-			return false
-		}
-		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return false
-		}
-		certificates++
-		remaining = rest
-	}
-	return certificates > 0
 }
 
 func validGitHTTPSProxyURL(value string) bool {

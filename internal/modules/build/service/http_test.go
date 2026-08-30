@@ -150,6 +150,15 @@ func (s *serviceRepository) GetArtifactByBuild(_ context.Context, buildID string
 	}
 	return biz.Artifact{}, biz.ErrNotFound
 }
+func (s *serviceRepository) GetArtifactByRegistrationKey(_ context.Context,
+	projectID, registrationKey string) (biz.Artifact, error) {
+	for _, item := range s.artifacts {
+		if item.ProjectID == projectID && item.RegistrationKey == registrationKey {
+			return item, nil
+		}
+	}
+	return biz.Artifact{}, biz.ErrNotFound
+}
 func (s *serviceRepository) CreateArtifact(_ context.Context, item biz.Artifact) (biz.Artifact, error) {
 	s.artifacts[item.ID] = item
 	return item, nil
@@ -176,6 +185,18 @@ type serviceArtifactReleaseCreator struct{}
 
 func (serviceArtifactReleaseCreator) CreateArtifactRelease(context.Context, biz.ArtifactReleaseRequest) (string, error) {
 	return "release-1", nil
+}
+
+type serviceArtifactEvidenceScheduler struct{}
+
+func (serviceArtifactEvidenceScheduler) EnsureArtifactEvidence(context.Context, biz.Artifact) error {
+	return nil
+}
+
+type serviceArtifactProbe struct{}
+
+func (serviceArtifactProbe) ProbeArtifact(context.Context, string, string, string, string) error {
+	return nil
 }
 
 func (s *serviceRepository) ListBuildHooks(_ context.Context, projectID, applicationID, configurationID string) ([]biz.BuildHookSummary, error) {
@@ -863,6 +884,8 @@ func TestHTTPArtifactListGetAndCreateRelease(t *testing.T) {
 	repository.artifacts["artifact-1"] = biz.Artifact{
 		ID: "artifact-1", OrganizationID: "organization-1", ProjectID: "project-1",
 		ApplicationID: "application-1", BuildID: "build-1",
+		Origin: biz.ArtifactOriginOwnDockBuild, Producer: "owndock-build-worker",
+		ProducerVerification: biz.ArtifactProducerVerified,
 		BuildConfigurationID: "configuration-1", RegistryCredentialID: "registry-1",
 		ImageRepository: "registry.example.com/team/api",
 		ImageDigest:     "registry.example.com/team/api@sha256:" + strings.Repeat("a", 64),
@@ -894,6 +917,48 @@ func TestHTTPArtifactListGetAndCreateRelease(t *testing.T) {
 	handler.ServeHTTP(getRecorder, get)
 	if getRecorder.Code != http.StatusOK || !strings.Contains(getRecorder.Body.String(), `"release_id":"release-1"`) {
 		t.Fatalf("get status/body = %d/%s", getRecorder.Code, getRecorder.Body.String())
+	}
+}
+
+func TestHTTPRegistersExternalArtifactWithoutExposingIdempotencyKey(t *testing.T) {
+	handler, _ := newBuildHTTPWithRepository(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/artifacts",
+		strings.NewReader(`{"application_id":"application-1","registry_credential_id":"registry-1","image_digest":"registry.example.com/team/api@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","target_platform":"linux/arm64","producer":"github-actions/team/api"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Idempotency-Key", "delivery-secret-123")
+	request = withBuildPrincipal(request, security.RoleDeveloper)
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusCreated ||
+		!strings.Contains(recorder.Body.String(), `"origin":"external"`) ||
+		!strings.Contains(recorder.Body.String(), `"producer":"github-actions/team/api"`) ||
+		!strings.Contains(recorder.Body.String(), `"producer_verification":"declared"`) ||
+		strings.Contains(recorder.Body.String(), "delivery-secret-123") ||
+		strings.Contains(recorder.Body.String(), `"build_id"`) {
+		t.Fatalf("register status/body = %d/%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestHTTPExternalArtifactRegistryErrorsAreSafe(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/project-1/artifacts", nil)
+	for name, testCase := range map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"authentication": {biz.ErrArtifactRegistryAuthentication, http.StatusUnprocessableEntity, "artifact_registry_authentication_failed"},
+		"unavailable":    {biz.ErrArtifactRegistryUnavailable, http.StatusServiceUnavailable, "artifact_registry_unavailable"},
+		"integrity":      {biz.ErrArtifactRegistryIntegrity, http.StatusBadGateway, "artifact_registry_integrity_failed"},
+		"registration":   {biz.ErrArtifactRegistrationUnavailable, http.StatusServiceUnavailable, "external_artifact_registration_unavailable"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			if !writeError(recorder, request, testCase.err) || recorder.Code != testCase.status ||
+				!strings.Contains(recorder.Body.String(), `"code":"`+testCase.code+`"`) ||
+				strings.Contains(recorder.Body.String(), testCase.err.Error()) {
+				t.Fatalf("status/body = %d/%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -966,6 +1031,7 @@ func newBuildHTTPWithRepository(t *testing.T) (*HTTP, *serviceRepository) {
 			serviceProjects{}, serviceProjects{},
 		).WithAutomaticDeploymentReferences(serviceProjects{}).
 		WithArtifactReleases(repository, serviceArtifactReleaseCreator{}).
+		WithExternalArtifactRegistration(serviceArtifactEvidenceScheduler{}, serviceArtifactProbe{}).
 		WithBuildLogs(repository))
 	return handler, repository
 }

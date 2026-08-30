@@ -23,6 +23,7 @@ import (
 	"github.com/moby/buildkit/session/auth/authprovider"
 	"github.com/opencontainers/go-digest"
 	"github.com/owndock/owndock/internal/modules/build/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/tonistiigi/fsutil"
 )
 
@@ -170,12 +171,15 @@ func (g *BuildKitGateway) Build(ctx context.Context, request biz.BuildExecutionR
 	if err != nil {
 		return biz.BuildExecutionOutput{}, biz.ErrInvalidBuildExecution
 	}
-	password, err := g.resolver.ResolveRegistryPassword(ctx, request.Credential)
-	if err != nil {
-		if ctx.Err() != nil {
-			return biz.BuildExecutionOutput{}, ctx.Err()
+	var password []byte
+	if request.Credential.AuthenticationMode == registryauth.ModeBasic {
+		password, err = g.resolver.ResolveRegistryPassword(ctx, request.Credential)
+		if err != nil {
+			if ctx.Err() != nil {
+				return biz.BuildExecutionOutput{}, ctx.Err()
+			}
+			return biz.BuildExecutionOutput{}, biz.ErrRegistryAuthentication
 		}
-		return biz.BuildExecutionOutput{}, biz.ErrRegistryAuthentication
 	}
 	defer clearBytes(password)
 	client, err := g.newClient(ctx)
@@ -341,6 +345,9 @@ func registryAuthProvider(credential biz.BuildRegistryCredential, password []byt
 		}
 		if host != server {
 			return containertypes.AuthConfig{}, nil
+		}
+		if credential.AuthenticationMode == registryauth.ModeAnonymous {
+			return containertypes.AuthConfig{ServerAddress: server}, nil
 		}
 		return containertypes.AuthConfig{ServerAddress: server, Username: username, Password: string(password)}, nil
 	}

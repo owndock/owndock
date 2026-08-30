@@ -8,6 +8,7 @@ import (
 
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 type registryCredentialSourceStub struct {
@@ -25,7 +26,8 @@ func TestEnvironmentRegistryCredentialProviderResolvesBoundSecret(t *testing.T) 
 	provider := NewEnvironmentRegistryCredentialProvider(registryCredentialSourceStub{
 		credential: controlplanebiz.RegistryCredential{
 			ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com:5443",
-			Username: "publisher", PasswordRef: "secret://production-registry",
+			AuthenticationMode: registryauth.ModeBasic,
+			Username:           "publisher", PasswordRef: "secret://production-registry",
 		},
 	})
 	provider.lookup = func(name string) (string, bool) {
@@ -43,11 +45,32 @@ func TestEnvironmentRegistryCredentialProviderResolvesBoundSecret(t *testing.T) 
 	clear(credential.Password)
 }
 
+func TestEnvironmentRegistryCredentialProviderResolvesAnonymousWithoutSecretLookup(t *testing.T) {
+	provider := NewEnvironmentRegistryCredentialProvider(registryCredentialSourceStub{
+		credential: controlplanebiz.RegistryCredential{
+			ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
+			AuthenticationMode: registryauth.ModeAnonymous,
+		},
+	})
+	provider.lookup = func(string) (string, bool) {
+		t.Fatal("anonymous Registry connection attempted a secret lookup")
+		return "", false
+	}
+	credential, err := provider.ResolveRegistryCredential(
+		t.Context(), "project-1", "registry-1", "registry.example.com",
+	)
+	if err != nil || credential.AuthenticationMode != registryauth.ModeAnonymous ||
+		credential.Username != "" || len(credential.Password) != 0 {
+		t.Fatalf("ResolveRegistryCredential() = %+v, %v", credential, err)
+	}
+}
+
 func TestEnvironmentRegistryCredentialProviderFailsClosedWithoutLeakingMetadata(t *testing.T) {
 	secretSentinel := "do-not-leak-password"
 	valid := controlplanebiz.RegistryCredential{
 		ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
-		Username: "publisher", PasswordRef: "secret://customer-production",
+		AuthenticationMode: registryauth.ModeBasic,
+		Username:           "publisher", PasswordRef: "secret://customer-production",
 	}
 	tests := []struct {
 		name       string

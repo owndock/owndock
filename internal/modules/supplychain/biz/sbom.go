@@ -8,6 +8,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 const (
@@ -111,8 +113,9 @@ type SBOMPublisher interface {
 }
 
 type RegistryCredential struct {
-	Username string
-	Password []byte
+	AuthenticationMode registryauth.Mode
+	Username           string
+	Password           []byte
 }
 
 type RegistryCredentialProvider interface {

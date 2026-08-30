@@ -267,6 +267,16 @@ func isSupplyChainPath(path string) bool {
 	segments := strings.Split(strings.Trim(path, "/"), "/")
 	if (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
 		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "deployment-policies" {
+		return len(segments) == 5 || segments[5] != ""
+	}
+	if (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "vulnerability-waivers" {
+		return len(segments) == 5 || segments[5] != ""
+	}
+	if (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
 		segments[4] == "signature-trust-policies" {
 		return len(segments) == 5 || segments[5] != ""
 	}

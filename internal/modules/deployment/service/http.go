@@ -33,6 +33,92 @@ type response struct {
 	SourceBuildID        string              `json:"source_build_id,omitempty"`
 	BuildConfigurationID string              `json:"build_configuration_id,omitempty"`
 	SourceDeploymentID   string              `json:"source_deployment_id,omitempty"`
+	Admission            *admissionResponse  `json:"admission,omitempty"`
+}
+
+type admissionRequirementsResponse struct {
+	RequireSBOM                  bool     `json:"require_sbom"`
+	RequireProvenance            bool     `json:"require_provenance"`
+	AllowedSignaturePolicyIDs    []string `json:"allowed_signature_policy_ids"`
+	MaximumVulnerabilitySeverity string   `json:"maximum_vulnerability_severity,omitempty"`
+	MaximumScanAgeSeconds        int64    `json:"maximum_scan_age_seconds,omitempty"`
+}
+
+type admissionPolicyResponse struct {
+	ID            string                        `json:"id"`
+	Version       uint64                        `json:"version"`
+	Scope         string                        `json:"scope"`
+	EnvironmentID string                        `json:"environment_id,omitempty"`
+	Mode          string                        `json:"mode"`
+	Requirements  admissionRequirementsResponse `json:"requirements"`
+}
+
+type admissionEvidenceResponse struct {
+	ID               string `json:"id"`
+	Kind             string `json:"kind"`
+	DescriptorDigest string `json:"descriptor_digest"`
+	ContentDigest    string `json:"content_digest"`
+}
+
+type admissionVerificationResponse struct {
+	ID                 string `json:"id"`
+	TrustPolicyID      string `json:"trust_policy_id"`
+	TrustPolicyVersion uint64 `json:"trust_policy_version"`
+	BundleSetDigest    string `json:"bundle_set_digest"`
+}
+
+type admissionVulnerabilityCountsResponse struct {
+	Unknown  uint64 `json:"unknown"`
+	Low      uint64 `json:"low"`
+	Medium   uint64 `json:"medium"`
+	High     uint64 `json:"high"`
+	Critical uint64 `json:"critical"`
+	Total    uint64 `json:"total"`
+}
+
+type admissionVulnerabilityResponse struct {
+	ObservationID     string                               `json:"observation_id"`
+	EvidenceID        string                               `json:"evidence_id"`
+	DescriptorDigest  string                               `json:"descriptor_digest"`
+	ContentDigest     string                               `json:"content_digest"`
+	Scanner           string                               `json:"scanner"`
+	ScannerVersion    string                               `json:"scanner_version"`
+	DatabaseVersion   uint64                               `json:"database_version"`
+	DatabaseUpdatedAt time.Time                            `json:"database_updated_at"`
+	ScannedAt         time.Time                            `json:"scanned_at"`
+	FreshUntil        time.Time                            `json:"fresh_until"`
+	OriginalCounts    admissionVulnerabilityCountsResponse `json:"original_counts"`
+	RemainingCounts   admissionVulnerabilityCountsResponse `json:"remaining_counts"`
+	HighestRemaining  string                               `json:"highest_remaining"`
+}
+
+type admissionWaiverResponse struct {
+	ID              string    `json:"id"`
+	Version         uint64    `json:"version"`
+	Scope           string    `json:"scope"`
+	VulnerabilityID string    `json:"vulnerability_id"`
+	ExpiresAt       time.Time `json:"expires_at"`
+}
+
+type admissionViolationResponse struct {
+	PolicyID string `json:"policy_id,omitempty"`
+	Code     string `json:"code"`
+}
+
+type admissionResponse struct {
+	EvaluatedAt       time.Time                       `json:"evaluated_at"`
+	EnvironmentStage  string                          `json:"environment_stage"`
+	ArtifactID        string                          `json:"artifact_id,omitempty"`
+	SubjectDigest     string                          `json:"subject_digest,omitempty"`
+	Policies          []admissionPolicyResponse       `json:"policies"`
+	Evidence          []admissionEvidenceResponse     `json:"evidence"`
+	Verifications     []admissionVerificationResponse `json:"verifications"`
+	Vulnerability     *admissionVulnerabilityResponse `json:"vulnerability,omitempty"`
+	Waivers           []admissionWaiverResponse       `json:"waivers"`
+	Violations        []admissionViolationResponse    `json:"violations"`
+	Decision          string                          `json:"decision"`
+	EvidenceSetDigest string                          `json:"evidence_set_digest"`
+	EvaluationDigest  string                          `json:"evaluation_digest"`
 }
 
 func NewHTTP(useCase *biz.UseCase) *HTTP {
@@ -162,6 +248,21 @@ func writeFormalError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusConflict, "idempotency_key_mismatch")
 	case errors.Is(err, biz.ErrRuntimeTargetNotReady):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "runtime_target_not_ready")
+	case errors.Is(err, biz.ErrAdmissionDenied):
+		var denied biz.AdmissionDeniedError
+		if errors.As(err, &denied) {
+			response := admissionResponseFromDomain(denied.Snapshot)
+			httpx.ErrorRequestWithDetails(w, r, http.StatusPreconditionFailed,
+				"deployment_admission_denied", admissionDeniedDetails{
+					EvaluatedAt: denied.Snapshot.EvaluatedAt, EnvironmentStage: denied.Snapshot.EnvironmentStage,
+					Policies: response.Policies, Violations: response.Violations,
+					EvaluationDigest: denied.Snapshot.EvaluationDigest,
+				})
+		} else {
+			httpx.ErrorRequest(w, r, http.StatusPreconditionFailed, "deployment_admission_denied")
+		}
+	case errors.Is(err, biz.ErrAdmissionUnavailable):
+		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "deployment_admission_unavailable")
 	case errors.Is(err, biz.ErrInvalidTransition),
 		errors.Is(err, biz.ErrRetryRequiresFailed),
 		errors.Is(err, biz.ErrRollbackRequiresFinal),
@@ -175,6 +276,14 @@ func writeFormalError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 	}
 	return true
+}
+
+type admissionDeniedDetails struct {
+	EvaluatedAt      time.Time                    `json:"evaluated_at"`
+	EnvironmentStage string                       `json:"environment_stage"`
+	Policies         []admissionPolicyResponse    `json:"policies"`
+	Violations       []admissionViolationResponse `json:"violations"`
+	EvaluationDigest string                       `json:"evaluation_digest"`
 }
 
 // HandleFormal is mounted behind session authentication by the product router.
@@ -272,9 +381,68 @@ func toResponse(item biz.Deployment) response {
 		BuildConfigurationID: item.BuildConfigurationID,
 		SourceDeploymentID:   item.SourceDeploymentID,
 	}
+	if item.Admission.EvaluationDigest != "" {
+		admission := admissionResponseFromDomain(item.Admission)
+		result.Admission = &admission
+	}
 	if item.ProjectID != "" {
 		updatedAt := item.UpdatedAt
 		result.UpdatedAt = &updatedAt
 	}
 	return result
+}
+
+func admissionResponseFromDomain(snapshot biz.AdmissionSnapshot) admissionResponse {
+	response := admissionResponse{EvaluatedAt: snapshot.EvaluatedAt,
+		EnvironmentStage: snapshot.EnvironmentStage, ArtifactID: snapshot.ArtifactID,
+		SubjectDigest: snapshot.SubjectDigest, Decision: string(snapshot.Decision),
+		EvidenceSetDigest: snapshot.EvidenceSetDigest, EvaluationDigest: snapshot.EvaluationDigest,
+		Policies:      make([]admissionPolicyResponse, len(snapshot.Policies)),
+		Evidence:      make([]admissionEvidenceResponse, len(snapshot.Evidence)),
+		Verifications: make([]admissionVerificationResponse, len(snapshot.Verifications)),
+		Waivers:       make([]admissionWaiverResponse, len(snapshot.Waivers)),
+		Violations:    make([]admissionViolationResponse, len(snapshot.Violations))}
+	for index, policy := range snapshot.Policies {
+		response.Policies[index] = admissionPolicyResponse{ID: policy.ID, Version: policy.Version,
+			Scope: policy.Scope, EnvironmentID: policy.EnvironmentID, Mode: policy.Mode,
+			Requirements: admissionRequirementsResponse{RequireSBOM: policy.Requirements.RequireSBOM,
+				RequireProvenance:            policy.Requirements.RequireProvenance,
+				AllowedSignaturePolicyIDs:    append([]string{}, policy.Requirements.AllowedSignaturePolicyIDs...),
+				MaximumVulnerabilitySeverity: policy.Requirements.MaximumVulnerabilitySeverity,
+				MaximumScanAgeSeconds:        policy.Requirements.MaximumScanAgeSeconds}}
+	}
+	for index, evidence := range snapshot.Evidence {
+		response.Evidence[index] = admissionEvidenceResponse{ID: evidence.ID, Kind: evidence.Kind,
+			DescriptorDigest: evidence.DescriptorDigest, ContentDigest: evidence.ContentDigest}
+	}
+	for index, verification := range snapshot.Verifications {
+		response.Verifications[index] = admissionVerificationResponse{ID: verification.ID,
+			TrustPolicyID: verification.TrustPolicyID, TrustPolicyVersion: verification.TrustPolicyVersion,
+			BundleSetDigest: verification.BundleSetDigest}
+	}
+	if snapshot.Vulnerability != nil {
+		vulnerability := snapshot.Vulnerability
+		response.Vulnerability = &admissionVulnerabilityResponse{ObservationID: vulnerability.ObservationID,
+			EvidenceID: vulnerability.EvidenceID, DescriptorDigest: vulnerability.DescriptorDigest,
+			ContentDigest: vulnerability.ContentDigest, Scanner: vulnerability.Scanner,
+			ScannerVersion: vulnerability.ScannerVersion, DatabaseVersion: vulnerability.DatabaseVersion,
+			DatabaseUpdatedAt: vulnerability.DatabaseUpdatedAt, ScannedAt: vulnerability.ScannedAt,
+			FreshUntil: vulnerability.FreshUntil, OriginalCounts: admissionCountsResponse(vulnerability.OriginalCounts),
+			RemainingCounts:  admissionCountsResponse(vulnerability.RemainingCounts),
+			HighestRemaining: vulnerability.HighestRemaining}
+	}
+	for index, waiver := range snapshot.Waivers {
+		response.Waivers[index] = admissionWaiverResponse{ID: waiver.ID, Version: waiver.Version,
+			Scope: waiver.Scope, VulnerabilityID: waiver.VulnerabilityID, ExpiresAt: waiver.ExpiresAt}
+	}
+	for index, violation := range snapshot.Violations {
+		response.Violations[index] = admissionViolationResponse{PolicyID: violation.PolicyID,
+			Code: string(violation.Code)}
+	}
+	return response
+}
+
+func admissionCountsResponse(counts biz.AdmissionVulnerabilityCounts) admissionVulnerabilityCountsResponse {
+	return admissionVulnerabilityCountsResponse{Unknown: counts.Unknown, Low: counts.Low,
+		Medium: counts.Medium, High: counts.High, Critical: counts.Critical, Total: counts.Total}
 }

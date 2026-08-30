@@ -114,6 +114,28 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			body: `{"name":"Delivery"}`, headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
+			name: "create deployment policy", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/deployment-policies",
+			body:    `{"name":"Release admission","scope":"project","mode":"enforced","requirements":{"require_sbom":true,"require_provenance":true,"allowed_signature_policy_ids":["signing-trust-policy"],"maximum_vulnerability_severity":"high","maximum_scan_age_seconds":86400},"enabled":true}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list deployment policies", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/deployment-policies",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get deployment policy", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/deployment-policies/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "update deployment policy", method: http.MethodPatch,
+			target:  "/api/v1/projects/test-id/deployment-policies/test-id",
+			body:    `{"name":"Updated release admission","scope":"project","mode":"enforced","requirements":{"require_sbom":true,"require_provenance":true,"allowed_signature_policy_ids":["signing-trust-policy"],"maximum_vulnerability_severity":"medium","maximum_scan_age_seconds":43200},"enabled":true,"expected_version":1}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "create signature trust policy", method: http.MethodPost,
 			target:  "/api/v1/projects/test-id/signature-trust-policies",
 			body:    `{"name":"Release signer","mode":"keyless","trusted_root_id":"offline-root-1","trusted_root_hash":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","certificate_identity":"https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v1.0.0","oidc_issuer":"https://token.actions.githubusercontent.com","enabled":true}`,
@@ -132,6 +154,28 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		{
 			name: "list artifact signature verifications", method: http.MethodGet,
 			target:  "/api/v1/projects/test-id/artifacts/test-id/verifications",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "create vulnerability waiver", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/vulnerability-waivers",
+			body:    `{"scope":"artifact","artifact_id":"test-id","vulnerability_id":"CVE-2026-12345","reason":"The affected feature is disabled until the maintenance window.","expires_at":"1970-01-02T00:01:40Z"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list vulnerability waivers", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/vulnerability-waivers?status=active&limit=50",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get vulnerability waiver", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/vulnerability-waivers/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "revoke vulnerability waiver", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/vulnerability-waivers/test-id:revoke",
+			body:    `{"reason":"The patched Artifact is now available.","expected_version":1}`,
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
@@ -213,7 +257,12 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 		},
 		{
 			name: "create registry credential", method: http.MethodPost, target: "/api/v1/projects/test-id/registry-credentials",
-			body:    `{"name":"Private Registry","server":"registry.example.com","username":"robot","password_ref":"secret://registry-password"}`,
+			body:    `{"name":"Private Registry","server":"registry.example.com","authentication_mode":"basic","username":"robot","password_ref":"secret://registry-password"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "create anonymous registry connection", method: http.MethodPost, target: "/api/v1/projects/test-id/registry-credentials",
+			body:    `{"name":"Public Registry","server":"registry-1.docker.io","authentication_mode":"anonymous"}`,
 			headers: bearerHeaders(), wantStatus: http.StatusCreated,
 		},
 		{
@@ -393,6 +442,16 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			target:  "/api/v1/projects/test-id/artifacts/test-id:create-release",
 			body:    `{"runtime_spec":{"ports":[],"environment_keys":[],"resources":{"cpu_milli":500,"memory_bytes":268435456}}}`,
 			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "register external artifact", method: http.MethodPost,
+			target: "/api/v1/projects/test-id/artifacts",
+			body:   `{"application_id":"test-id","registry_credential_id":"test-id","image_digest":"registry.example.com/team/external@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","target_platform":"linux/amd64","producer":"github-actions/example/external"}`,
+			headers: map[string]string{
+				"Authorization":   "Bearer " + contractAccessToken,
+				"Idempotency-Key": "external-delivery-1",
+			},
+			wantStatus: http.StatusCreated,
 		},
 		{
 			name: "create release", method: http.MethodPost, target: "/api/v1/projects/test-id/applications/test-id/releases",

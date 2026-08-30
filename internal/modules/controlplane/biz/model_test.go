@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
@@ -30,7 +31,7 @@ func TestNewReleaseRequiresSHA256Digest(t *testing.T) {
 func TestNewRegistryCredentialAndReleaseRuntimeSpec(t *testing.T) {
 	credential, err := NewRegistryCredential(
 		"credential", "project", "Private registry", "REGISTRY.EXAMPLE.COM:5443",
-		"robot", "secret://registry-password", "user", time.Unix(1, 0),
+		registryauth.ModeBasic, "robot", "secret://registry-password", "user", time.Unix(1, 0),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -58,9 +59,35 @@ func TestNewRegistryCredentialAndReleaseRuntimeSpec(t *testing.T) {
 	for _, server := range []string{"https://registry.example.com", "registry.example.com/path", ""} {
 		if _, err := NewRegistryCredential(
 			"credential", "project", "Registry", server,
-			"robot", "secret://password", "user", time.Now(),
+			registryauth.ModeBasic, "robot", "secret://password", "user", time.Now(),
 		); err != ErrInvalidRegistry {
 			t.Fatalf("server %q error = %v", server, err)
+		}
+	}
+	public, err := NewRegistryCredential(
+		"public", "project", "Public registry", "registry-1.docker.io",
+		registryauth.ModeAnonymous, "", "", "user", time.Unix(1, 0),
+	)
+	if err != nil || public.AuthenticationMode != registryauth.ModeAnonymous ||
+		public.Username != "" || public.PasswordRef != "" {
+		t.Fatalf("anonymous Registry Credential = %+v, %v", public, err)
+	}
+	for _, testCase := range []struct {
+		mode        registryauth.Mode
+		username    string
+		passwordRef string
+	}{
+		{registryauth.ModeAnonymous, "robot", ""},
+		{registryauth.ModeAnonymous, "", "secret://password"},
+		{registryauth.ModeBasic, "", "secret://password"},
+		{registryauth.ModeBasic, "robot", ""},
+		{"token", "robot", "secret://password"},
+	} {
+		if _, err := NewRegistryCredential(
+			"credential", "project", "Registry", "registry.example.com", testCase.mode,
+			testCase.username, testCase.passwordRef, "user", time.Now(),
+		); err != ErrInvalidRegistry {
+			t.Fatalf("mode %q username %q ref %q error = %v", testCase.mode, testCase.username, testCase.passwordRef, err)
 		}
 	}
 }

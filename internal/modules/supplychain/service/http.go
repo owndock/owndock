@@ -20,6 +20,18 @@ type HTTP struct {
 	signatureVerifications *biz.SignatureVerificationUseCase
 	signingProfiles        *biz.SignatureSigningProfileUseCase
 	vulnerabilityScans     *biz.VulnerabilityScanUseCase
+	vulnerabilityWaivers   *biz.VulnerabilityWaiverUseCase
+	deploymentPolicies     *biz.DeploymentPolicyUseCase
+}
+
+func (s *HTTP) WithDeploymentPolicies(useCase *biz.DeploymentPolicyUseCase) *HTTP {
+	s.deploymentPolicies = useCase
+	return s
+}
+
+func (s *HTTP) WithVulnerabilityWaivers(useCase *biz.VulnerabilityWaiverUseCase) *HTTP {
+	s.vulnerabilityWaivers = useCase
+	return s
 }
 
 func (s *HTTP) WithVulnerabilityScans(useCase *biz.VulnerabilityScanUseCase) *HTTP {
@@ -51,6 +63,18 @@ func (s *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	segments := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(segments) >= 5 && len(segments) <= 6 && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "deployment-policies" {
+		s.serveDeploymentPolicies(w, r, principal, segments)
+		return
+	}
+	if len(segments) >= 5 && len(segments) <= 6 && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "vulnerability-waivers" {
+		s.serveVulnerabilityWaivers(w, r, principal, segments)
+		return
+	}
 	if len(segments) >= 5 && len(segments) <= 6 && segments[0] == "api" &&
 		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
 		segments[4] == "signature-trust-policies" {
@@ -156,6 +180,175 @@ func (s *HTTP) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, responseFromDomain(item))
 }
 
+type deploymentPolicyRequirementsRequest struct {
+	RequireSBOM                  bool                      `json:"require_sbom"`
+	RequireProvenance            bool                      `json:"require_provenance"`
+	AllowedSignaturePolicyIDs    []string                  `json:"allowed_signature_policy_ids"`
+	MaximumVulnerabilitySeverity biz.VulnerabilitySeverity `json:"maximum_vulnerability_severity"`
+	MaximumScanAgeSeconds        int64                     `json:"maximum_scan_age_seconds"`
+}
+
+type deploymentPolicyRequest struct {
+	Name            string                              `json:"name"`
+	Scope           biz.DeploymentPolicyScope           `json:"scope"`
+	EnvironmentID   string                              `json:"environment_id"`
+	Mode            biz.DeploymentPolicyMode            `json:"mode"`
+	Requirements    deploymentPolicyRequirementsRequest `json:"requirements"`
+	Enabled         bool                                `json:"enabled"`
+	ExpectedVersion uint64                              `json:"expected_version,omitempty"`
+}
+
+type deploymentPolicyRequirementsResponse struct {
+	RequireSBOM                  bool                      `json:"require_sbom"`
+	RequireProvenance            bool                      `json:"require_provenance"`
+	AllowedSignaturePolicyIDs    []string                  `json:"allowed_signature_policy_ids"`
+	MaximumVulnerabilitySeverity biz.VulnerabilitySeverity `json:"maximum_vulnerability_severity,omitempty"`
+	MaximumScanAgeSeconds        int64                     `json:"maximum_scan_age_seconds,omitempty"`
+}
+
+type deploymentPolicyResponse struct {
+	ID             string                               `json:"id"`
+	OrganizationID string                               `json:"organization_id"`
+	ProjectID      string                               `json:"project_id"`
+	Name           string                               `json:"name"`
+	Scope          biz.DeploymentPolicyScope            `json:"scope"`
+	EnvironmentID  string                               `json:"environment_id,omitempty"`
+	Mode           biz.DeploymentPolicyMode             `json:"mode"`
+	Requirements   deploymentPolicyRequirementsResponse `json:"requirements"`
+	Enabled        bool                                 `json:"enabled"`
+	Version        uint64                               `json:"version"`
+	CreatedBy      string                               `json:"created_by"`
+	UpdatedBy      string                               `json:"updated_by"`
+	CreatedAt      time.Time                            `json:"created_at"`
+	UpdatedAt      time.Time                            `json:"updated_at"`
+}
+
+func (s *HTTP) serveDeploymentPolicies(w http.ResponseWriter, r *http.Request,
+	principal security.Principal, segments []string) {
+	if s.deploymentPolicies == nil {
+		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "deployment_policy_unavailable")
+		return
+	}
+	projectID := segments[3]
+	if len(segments) == 5 {
+		switch r.Method {
+		case http.MethodGet:
+			if len(r.URL.Query()) != 0 {
+				httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_deployment_policy")
+				return
+			}
+			items, err := s.deploymentPolicies.List(r.Context(), principal, projectID)
+			if writeError(w, r, err) {
+				return
+			}
+			responses := make([]deploymentPolicyResponse, len(items))
+			for index := range items {
+				responses[index] = deploymentPolicyResponseFromDomain(items[index])
+			}
+			httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
+		case http.MethodPost:
+			request, ok := decodeDeploymentPolicyRequest(w, r)
+			if !ok {
+				return
+			}
+			if request.ExpectedVersion != 0 {
+				httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_deployment_policy")
+				return
+			}
+			input, err := request.domain()
+			if err != nil {
+				writeError(w, r, err)
+				return
+			}
+			item, err := s.deploymentPolicies.Create(r.Context(), principal, projectID, input,
+				r.Header.Get("X-Request-ID"))
+			if writeError(w, r, err) {
+				return
+			}
+			httpx.JSON(w, http.StatusCreated, deploymentPolicyResponseFromDomain(item))
+		default:
+			httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+		return
+	}
+	if segments[5] == "" {
+		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		if len(r.URL.Query()) != 0 {
+			httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_deployment_policy")
+			return
+		}
+		item, err := s.deploymentPolicies.Get(r.Context(), principal, projectID, segments[5])
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusOK, deploymentPolicyResponseFromDomain(item))
+	case http.MethodPatch:
+		request, ok := decodeDeploymentPolicyRequest(w, r)
+		if !ok {
+			return
+		}
+		input, err := request.domain()
+		if err != nil {
+			writeError(w, r, err)
+			return
+		}
+		item, err := s.deploymentPolicies.Update(r.Context(), principal, projectID, segments[5],
+			request.ExpectedVersion, input, r.Header.Get("X-Request-ID"))
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusOK, deploymentPolicyResponseFromDomain(item))
+	default:
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+	}
+}
+
+func decodeDeploymentPolicyRequest(w http.ResponseWriter, r *http.Request) (deploymentPolicyRequest, bool) {
+	if r.Header.Get("Content-Type") != "application/json" {
+		httpx.ErrorRequest(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return deploymentPolicyRequest{}, false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var request deploymentPolicyRequest
+	if err := decoder.Decode(&request); err != nil || decoder.Decode(&struct{}{}) == nil {
+		httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_deployment_policy")
+		return deploymentPolicyRequest{}, false
+	}
+	return request, true
+}
+
+func (r deploymentPolicyRequest) domain() (biz.DeploymentPolicyInput, error) {
+	if r.Requirements.MaximumScanAgeSeconds < 0 ||
+		r.Requirements.MaximumScanAgeSeconds > int64(biz.MaximumDeploymentPolicyScanAge/time.Second) {
+		return biz.DeploymentPolicyInput{}, biz.ErrInvalidDeploymentPolicy
+	}
+	return biz.DeploymentPolicyInput{Name: r.Name, Scope: r.Scope, EnvironmentID: r.EnvironmentID,
+		Mode: r.Mode, Requirements: biz.DeploymentPolicyRequirements{
+			RequireSBOM: r.Requirements.RequireSBOM, RequireProvenance: r.Requirements.RequireProvenance,
+			AllowedSignaturePolicyIDs:    append([]string(nil), r.Requirements.AllowedSignaturePolicyIDs...),
+			MaximumVulnerabilitySeverity: r.Requirements.MaximumVulnerabilitySeverity,
+			MaximumScanAge:               time.Duration(r.Requirements.MaximumScanAgeSeconds) * time.Second,
+		}, Enabled: r.Enabled}, nil
+}
+
+func deploymentPolicyResponseFromDomain(item biz.DeploymentPolicy) deploymentPolicyResponse {
+	return deploymentPolicyResponse{ID: item.ID, OrganizationID: item.OrganizationID,
+		ProjectID: item.ProjectID, Name: item.Name, Scope: item.Scope, EnvironmentID: item.EnvironmentID,
+		Mode: item.Mode, Requirements: deploymentPolicyRequirementsResponse{
+			RequireSBOM: item.Requirements.RequireSBOM, RequireProvenance: item.Requirements.RequireProvenance,
+			AllowedSignaturePolicyIDs:    append([]string(nil), item.Requirements.AllowedSignaturePolicyIDs...),
+			MaximumVulnerabilitySeverity: item.Requirements.MaximumVulnerabilitySeverity,
+			MaximumScanAgeSeconds:        int64(item.Requirements.MaximumScanAge / time.Second),
+		}, Enabled: item.Enabled, Version: item.Version, CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
+		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
+}
+
 func (s *HTTP) serveVulnerabilityScanSchedule(w http.ResponseWriter, r *http.Request,
 	principal security.Principal, projectID, artifactID string) {
 	if r.Method != http.MethodPost {
@@ -233,6 +426,196 @@ func (s *HTTP) serveVulnerabilityObservation(w http.ResponseWriter, r *http.Requ
 		Counts: vulnerabilityCountsResponse{Unknown: item.Counts.Unknown, Low: item.Counts.Low,
 			Medium: item.Counts.Medium, High: item.Counts.High, Critical: item.Counts.Critical,
 			Total: item.Counts.Total, Fixable: item.Counts.Fixable}, HighestSeverity: item.HighestSeverity})
+}
+
+type vulnerabilityWaiverRequest struct {
+	Scope           biz.VulnerabilityWaiverScope `json:"scope"`
+	ArtifactID      string                       `json:"artifact_id,omitempty"`
+	VulnerabilityID string                       `json:"vulnerability_id"`
+	Reason          string                       `json:"reason"`
+	ExpiresAt       time.Time                    `json:"expires_at"`
+}
+
+type vulnerabilityWaiverRevokeRequest struct {
+	Reason          string `json:"reason"`
+	ExpectedVersion uint64 `json:"expected_version"`
+}
+
+type vulnerabilityWaiverResponse struct {
+	ID               string                        `json:"id"`
+	OrganizationID   string                        `json:"organization_id"`
+	ProjectID        string                        `json:"project_id"`
+	Scope            biz.VulnerabilityWaiverScope  `json:"scope"`
+	ArtifactID       string                        `json:"artifact_id,omitempty"`
+	SubjectDigest    string                        `json:"subject_digest,omitempty"`
+	VulnerabilityID  string                        `json:"vulnerability_id"`
+	Reason           string                        `json:"reason"`
+	ApprovedBy       string                        `json:"approved_by"`
+	ExpiresAt        time.Time                     `json:"expires_at"`
+	Status           biz.VulnerabilityWaiverStatus `json:"status"`
+	Version          uint64                        `json:"version"`
+	CreatedAt        time.Time                     `json:"created_at"`
+	RevokedAt        *time.Time                    `json:"revoked_at,omitempty"`
+	RevokedBy        string                        `json:"revoked_by,omitempty"`
+	RevocationReason string                        `json:"revocation_reason,omitempty"`
+}
+
+func (s *HTTP) serveVulnerabilityWaivers(w http.ResponseWriter, r *http.Request,
+	principal security.Principal, segments []string) {
+	if s.vulnerabilityWaivers == nil {
+		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "vulnerability_waiver_unavailable")
+		return
+	}
+	projectID := segments[3]
+	if len(segments) == 5 {
+		switch r.Method {
+		case http.MethodGet:
+			query, ok := decodeVulnerabilityWaiverQuery(w, r)
+			if !ok {
+				return
+			}
+			page, err := s.vulnerabilityWaivers.List(r.Context(), principal, projectID, query)
+			if writeError(w, r, err) {
+				return
+			}
+			items := make([]vulnerabilityWaiverResponse, len(page.Items))
+			for index := range page.Items {
+				items[index] = s.vulnerabilityWaiverResponse(page.Items[index])
+			}
+			httpx.JSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": page.NextCursor})
+		case http.MethodPost:
+			request, ok := decodeVulnerabilityWaiverRequest(w, r)
+			if !ok {
+				return
+			}
+			item, err := s.vulnerabilityWaivers.Create(r.Context(), principal, projectID,
+				biz.VulnerabilityWaiverInput{Scope: request.Scope, ArtifactID: request.ArtifactID,
+					VulnerabilityID: request.VulnerabilityID, Reason: request.Reason,
+					ExpiresAt: request.ExpiresAt}, httpx.RequestIDFromContext(r.Context()))
+			if writeError(w, r, err) {
+				return
+			}
+			httpx.JSON(w, http.StatusCreated, s.vulnerabilityWaiverResponse(item))
+		default:
+			httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		}
+		return
+	}
+	waiverID, revoke := strings.CutSuffix(segments[5], ":revoke")
+	if waiverID == "" {
+		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+		return
+	}
+	if revoke {
+		if r.Method != http.MethodPost {
+			httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+			return
+		}
+		request, ok := decodeVulnerabilityWaiverRevokeRequest(w, r)
+		if !ok {
+			return
+		}
+		item, err := s.vulnerabilityWaivers.Revoke(r.Context(), principal, projectID, waiverID,
+			request.Reason, httpx.RequestIDFromContext(r.Context()), request.ExpectedVersion)
+		if writeError(w, r, err) {
+			return
+		}
+		httpx.JSON(w, http.StatusOK, s.vulnerabilityWaiverResponse(item))
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	if len(r.URL.Query()) != 0 {
+		httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_vulnerability_waiver_query")
+		return
+	}
+	item, err := s.vulnerabilityWaivers.Get(r.Context(), principal, projectID, waiverID)
+	if writeError(w, r, err) {
+		return
+	}
+	httpx.JSON(w, http.StatusOK, s.vulnerabilityWaiverResponse(item))
+}
+
+func decodeVulnerabilityWaiverRequest(w http.ResponseWriter, r *http.Request) (vulnerabilityWaiverRequest, bool) {
+	var request vulnerabilityWaiverRequest
+	if !decodeVulnerabilityWaiverJSON(w, r, &request) {
+		return vulnerabilityWaiverRequest{}, false
+	}
+	return request, true
+}
+
+func decodeVulnerabilityWaiverRevokeRequest(w http.ResponseWriter,
+	r *http.Request) (vulnerabilityWaiverRevokeRequest, bool) {
+	var request vulnerabilityWaiverRevokeRequest
+	if !decodeVulnerabilityWaiverJSON(w, r, &request) {
+		return vulnerabilityWaiverRevokeRequest{}, false
+	}
+	return request, true
+}
+
+func decodeVulnerabilityWaiverJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	if r.Header.Get("Content-Type") != "application/json" {
+		httpx.ErrorRequest(w, r, http.StatusUnsupportedMediaType, "unsupported_media_type")
+		return false
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil || decoder.Decode(&struct{}{}) == nil {
+		httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_vulnerability_waiver")
+		return false
+	}
+	return true
+}
+
+func decodeVulnerabilityWaiverQuery(w http.ResponseWriter, r *http.Request) (biz.VulnerabilityWaiverQuery, bool) {
+	values := r.URL.Query()
+	allowed := map[string]bool{"limit": true, "cursor": true, "vulnerability_id": true,
+		"scope": true, "artifact_id": true, "status": true}
+	for key, items := range values {
+		if !allowed[key] || len(items) != 1 {
+			httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_vulnerability_waiver_query")
+			return biz.VulnerabilityWaiverQuery{}, false
+		}
+	}
+	query := biz.VulnerabilityWaiverQuery{Cursor: values.Get("cursor"),
+		VulnerabilityID: values.Get("vulnerability_id"),
+		Scope:           biz.VulnerabilityWaiverScope(values.Get("scope")),
+		ArtifactID:      values.Get("artifact_id"), ActiveOnly: true}
+	if raw := values.Get("limit"); raw != "" {
+		limit, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_vulnerability_waiver_query")
+			return biz.VulnerabilityWaiverQuery{}, false
+		}
+		query.Limit = limit
+	}
+	switch values.Get("status") {
+	case "", "active":
+		query.ActiveOnly = true
+	case "all":
+		query.ActiveOnly = false
+	default:
+		httpx.ErrorRequest(w, r, http.StatusBadRequest, "invalid_vulnerability_waiver_query")
+		return biz.VulnerabilityWaiverQuery{}, false
+	}
+	return query, true
+}
+
+func (s *HTTP) vulnerabilityWaiverResponse(item biz.VulnerabilityWaiver) vulnerabilityWaiverResponse {
+	response := vulnerabilityWaiverResponse{ID: item.ID, OrganizationID: item.OrganizationID,
+		ProjectID: item.ProjectID, Scope: item.Scope, ArtifactID: item.ArtifactID,
+		SubjectDigest: item.SubjectDigest, VulnerabilityID: item.VulnerabilityID,
+		Reason: item.Reason, ApprovedBy: item.ApprovedBy, ExpiresAt: item.ExpiresAt,
+		Status: s.vulnerabilityWaivers.CurrentStatus(item), Version: item.Version,
+		CreatedAt: item.CreatedAt, RevokedBy: item.RevokedBy,
+		RevocationReason: item.RevocationReason}
+	if !item.RevokedAt.IsZero() {
+		response.RevokedAt = &item.RevokedAt
+	}
+	return response
 }
 
 type signingProfileRequest struct {
@@ -602,6 +985,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_signature_verification")
 	case errors.Is(err, biz.ErrInvalidVulnerabilityScanRequest):
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_vulnerability_scan")
+	case errors.Is(err, biz.ErrInvalidVulnerabilityWaiver):
+		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_vulnerability_waiver")
+	case errors.Is(err, biz.ErrVulnerabilityWaiverConflict):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "vulnerability_waiver_conflict")
+	case errors.Is(err, biz.ErrInvalidDeploymentPolicy):
+		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_deployment_policy")
+	case errors.Is(err, biz.ErrDeploymentPolicyConflict):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "deployment_policy_conflict")
 	case errors.Is(err, biz.ErrSignatureTrustPolicyConflict):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "signature_trust_policy_conflict")
 	case errors.Is(err, biz.ErrInvalidSigningProfile), errors.Is(err, biz.ErrInvalidSigningKey):

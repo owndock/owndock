@@ -183,6 +183,32 @@ func run(ctx context.Context, arguments []string) error {
 		WithAutomaticDeployments(deploymentUseCase)
 	controller.WithArtifacts(repository)
 	evidenceRepository := supplychaindata.NewMongoRepository(client.Database())
+	registryCABundle, err := supplychaindata.LoadRegistryCABundle(cfg.Product.RegistryCACertFile)
+	if err != nil {
+		return fmt.Errorf("load Registry CA bundle: %w", err)
+	}
+	evidenceContentReader, err := supplychaindata.NewOCIContentReader(
+		supplychaindata.OCIContentReaderOptions{
+			Credentials:      supplychaindata.NewEnvironmentRegistryCredentialProvider(controlPlaneStore),
+			MaxDocumentBytes: cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
+			RegistryCABundle: registryCABundle,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create deployment admission Evidence reader: %w", err)
+	}
+	deploymentAdmission, err := supplychaindata.NewDeploymentAdmissionEvaluator(
+		supplychaindata.DeploymentAdmissionOptions{
+			Releases: controlPlaneStore, Artifacts: supplychaindata.NewArtifactLookupAdapter(repository),
+			Policies: evidenceRepository, Evidence: evidenceRepository, Content: evidenceContentReader,
+			Verifications: evidenceRepository, TrustPolicies: evidenceRepository,
+			Vulnerabilities: evidenceRepository, Waivers: evidenceRepository, Now: time.Now,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create deployment admission evaluator: %w", err)
+	}
+	deploymentUseCase.WithAdmissionEvaluator(deploymentAdmission)
 	controller.WithArtifactEvidence(supplychaindata.NewArtifactEvidenceScheduler(
 		evidenceRepository, id.New, time.Now,
 	).WithProvenance(repository, supplychaindata.ProvenanceBuilderIdentity{

@@ -73,6 +73,9 @@ func (s *queueStub) GetArtifactByBuild(_ context.Context, buildID string) (biz.A
 	}
 	return biz.Artifact{}, biz.ErrNotFound
 }
+func (s *queueStub) GetArtifactByRegistrationKey(context.Context, string, string) (biz.Artifact, error) {
+	return biz.Artifact{}, biz.ErrNotFound
+}
 func (s *queueStub) CreateArtifact(_ context.Context, item biz.Artifact) (biz.Artifact, error) {
 	s.artifacts = append(s.artifacts, item)
 	return item, nil

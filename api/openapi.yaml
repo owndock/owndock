@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, read-only digest-bound Artifact Evidence metadata and verified content download, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, digest-bound Artifact Evidence, vulnerability waivers, versioned restricted Deployment Policies and immutable admission snapshots, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -26,6 +26,8 @@ tags:
   - name: Builds
   - name: Artifacts
   - name: Artifact Evidence
+  - name: Deployment Policies
+  - name: Vulnerability Waivers
   - name: Audit
   - name: Applications
   - name: Environments
@@ -1999,6 +2001,44 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+    post:
+      tags: [Artifacts]
+      operationId: registerExternalArtifact
+      summary: Register an immutable image produced by an external CI system
+      description: Developer, Maintainer, or Owner. The caller supplies an OCI or Docker image by SHA-256 digest, never by a mutable tag. OwnDock verifies that the exact manifest is readable with the selected Registry credential, records the producer as declared rather than cryptographically verified, and atomically schedules SBOM, vulnerability, and applicable signature-verification jobs. Reusing an Idempotency-Key with the same request returns the original Artifact; reusing it with different intent is rejected.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegisterExternalArtifactRequest"
+      responses:
+        "201":
+          $ref: "#/components/responses/ArtifactResponse"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "502":
+          $ref: "#/components/responses/APIError"
+        "503":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/artifacts/{artifact_id}:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2040,7 +2080,7 @@ paths:
       tags: [Artifacts, Releases]
       operationId: createReleaseFromArtifact
       summary: Idempotently create an immutable Release from an Artifact
-      description: The Artifact already fixes the Registry repository, OCI SHA-256 digest, target platform, source Build, and credential reference. A retry returns the same Release link and never rebuilds or pushes the image again.
+      description: The Artifact already fixes the Registry repository, OCI SHA-256 digest, target platform, producer boundary, and credential reference. OwnDock-built Artifacts also retain their source Build; externally registered Artifacts intentionally do not invent one. A retry returns the same Release link and never rebuilds or pushes the image again.
       security:
         - bearerAuth: []
       requestBody:
@@ -2070,6 +2110,97 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/deployment-policies:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Deployment Policies]
+      operationId: listDeploymentPolicies
+      summary: List Project and Environment deployment admission policies
+      description: Viewer or above. At most one Project policy and one policy for each Environment can exist. The response contains only restricted fields; arbitrary Rego, Shell, and plugins are not supported.
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/DeploymentPolicyList" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    post:
+      tags: [Deployment Policies]
+      operationId: createDeploymentPolicy
+      summary: Create a versioned restricted deployment admission policy
+      description: Maintainer or Owner. Development Environment policies must be advisory; production Environment policies must be enforced; staging may use either mode. Project policies are evaluated together with any matching Environment policy, and an Environment policy cannot weaken the Project policy.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeploymentPolicyRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/DeploymentPolicyResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/deployment-policies/{policy_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: policy_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      tags: [Deployment Policies]
+      operationId: getDeploymentPolicy
+      summary: Get one deployment admission policy
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/DeploymentPolicyResponse" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    patch:
+      tags: [Deployment Policies]
+      operationId: updateDeploymentPolicy
+      summary: Create the next policy version using optimistic locking
+      description: Maintainer or Owner. Scope and Environment cannot be changed. Policy updates affect only future Deployments; every Deployment keeps the complete policy and evidence evaluation snapshot used when it was admitted.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/DeploymentPolicyRequest"
+                - type: object
+                  required: [expected_version]
+      responses:
+        "200": { $ref: "#/components/responses/DeploymentPolicyResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
   /api/v1/projects/{project_id}/signature-trust-policies:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2345,6 +2476,121 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/vulnerability-waivers:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Vulnerability Waivers]
+      operationId: listVulnerabilityWaivers
+      summary: List bounded, immutable vulnerability waivers
+      description: Viewer or above. Active waivers are returned by default and status is evaluated again on every page. Use `status=all` to include expired and revoked history. The opaque cursor is bound to the Organization, Project, and filters.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          schema: { type: string, maxLength: 2048 }
+        - name: vulnerability_id
+          in: query
+          schema: { type: string, pattern: '^[A-Za-z0-9][A-Za-z0-9._:+-]{1,127}$' }
+        - name: scope
+          in: query
+          schema: { type: string, enum: [project, artifact] }
+        - name: artifact_id
+          in: query
+          schema: { type: string, minLength: 1, maxLength: 128 }
+        - name: status
+          in: query
+          schema: { type: string, enum: [active, all], default: active }
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityWaiverPageResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    post:
+      tags: [Vulnerability Waivers]
+      operationId: createVulnerabilityWaiver
+      summary: Approve one exact, time-bounded vulnerability waiver
+      description: Maintainer or Owner. A waiver names exactly one vulnerability ID and expires between one hour and 180 days after approval. Project scope cannot name an Artifact. Artifact scope requires an Artifact ID and the server snapshots its immutable image digest. Wildcards, severity-wide ignores, permanent waivers, client-supplied approvers, and edits are rejected. Raw scan Evidence and observation counts are never changed.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VulnerabilityWaiverRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/VulnerabilityWaiverResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/vulnerability-waivers/{waiver_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: waiver_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      tags: [Vulnerability Waivers]
+      operationId: getVulnerabilityWaiver
+      summary: Get one immutable vulnerability waiver and its current status
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityWaiverResponse" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/vulnerability-waivers/{waiver_id}:revoke:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: waiver_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    post:
+      tags: [Vulnerability Waivers]
+      operationId: revokeVulnerabilityWaiver
+      summary: Irreversibly revoke an active vulnerability waiver
+      description: Maintainer or Owner. Revocation uses optimistic locking, requires a reason, preserves the original approval, and writes an audit event in the same MongoDB transaction. Expired or already revoked waivers cannot be rewritten.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/VulnerabilityWaiverRevokeRequest" }
+      responses:
+        "200": { $ref: "#/components/responses/VulnerabilityWaiverResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
   /api/v1/projects/{project_id}/artifacts/{artifact_id}/vulnerability-observation:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2642,7 +2888,7 @@ paths:
       tags: [Deployments]
       operationId: createProjectDeployment
       summary: Create an immutable deployment operation
-      description: The selected runtime target must have completed a successful probe and be in the ready state. Otherwise the API returns 409 with code runtime_target_not_ready.
+      description: The selected runtime target must have completed a successful probe and be in the ready state. Before persistence, the server evaluates the current Project and matching Environment admission policies against immutable Artifact evidence. Production enforced-policy failures return 412, evaluation outages return 503, and successful or development-advisory evaluations are frozen in the Deployment response.
       security:
         - bearerAuth: []
       parameters:
@@ -2672,9 +2918,13 @@ paths:
           $ref: "#/components/responses/APIError"
         "409":
           $ref: "#/components/responses/APIError"
+        "412":
+          $ref: "#/components/responses/APIError"
         "415":
           $ref: "#/components/responses/APIError"
         "422":
+          $ref: "#/components/responses/APIError"
+        "503":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
@@ -2748,7 +2998,11 @@ paths:
           $ref: "#/components/responses/APIError"
         "409":
           $ref: "#/components/responses/APIError"
+        "412":
+          $ref: "#/components/responses/APIError"
         "422":
+          $ref: "#/components/responses/APIError"
+        "503":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
@@ -2784,9 +3038,13 @@ paths:
           $ref: "#/components/responses/APIError"
         "409":
           $ref: "#/components/responses/APIError"
+        "412":
+          $ref: "#/components/responses/APIError"
         "415":
           $ref: "#/components/responses/APIError"
         "422":
+          $ref: "#/components/responses/APIError"
+        "503":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
@@ -3441,6 +3699,27 @@ components:
                 type: array
                 items:
                   $ref: "#/components/schemas/ArtifactEvidence"
+    DeploymentPolicyList:
+      description: Project and Environment deployment admission policies in stable scope order.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                items: { $ref: "#/components/schemas/DeploymentPolicy" }
+    DeploymentPolicyResponse:
+      description: One versioned restricted deployment admission policy.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/DeploymentPolicy" }
     SignatureTrustPolicyList:
       description: Versioned Project signature trust policies without private signing key material.
       headers:
@@ -3523,6 +3802,29 @@ components:
             properties:
               job_id: { type: string, minLength: 1, maxLength: 128 }
               scheduled: { type: boolean }
+    VulnerabilityWaiverPageResponse:
+      description: Newest-first bounded page of vulnerability waivers. `next_cursor` is empty when no later page exists.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items, next_cursor]
+            properties:
+              items:
+                type: array
+                maxItems: 100
+                items: { $ref: "#/components/schemas/VulnerabilityWaiver" }
+              next_cursor: { type: string, maxLength: 2048 }
+    VulnerabilityWaiverResponse:
+      description: One immutable, time-bounded vulnerability waiver with computed status.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/VulnerabilityWaiver" }
     SignatureVerificationScheduleResponse:
       description: Signature verification scheduling result. `scheduled=false` means this Artifact, policy version, and Idempotency-Key combination was already queued or processed. A new key creates a new attempt without changing the old Job.
       headers:
@@ -4154,6 +4456,136 @@ components:
           schema:
             $ref: "#/components/schemas/TerminalCredential"
   schemas:
+    DeploymentPolicyRequirements:
+      type: object
+      additionalProperties: false
+      description: Restricted admission fields. At least one requirement must be enabled. Vulnerability severity and scan age must be supplied together; maximum scan age is between 3600 and 2592000 seconds. `unknown` findings always fail a configured vulnerability gate.
+      required: [require_sbom, require_provenance, allowed_signature_policy_ids]
+      properties:
+        require_sbom:
+          type: boolean
+        require_provenance:
+          type: boolean
+        allowed_signature_policy_ids:
+          type: array
+          maxItems: 16
+          uniqueItems: true
+          items: { type: string, minLength: 1, maxLength: 128 }
+          description: A non-empty list means that at least one verified signature must match one of these exact Signature Trust Policy IDs.
+        maximum_vulnerability_severity:
+          type: string
+          enum: [none, low, medium, high, critical]
+          description: Highest allowed non-waived finding severity. Must be supplied with maximum_scan_age_seconds.
+        maximum_scan_age_seconds:
+          type: integer
+          format: int64
+          minimum: 3600
+          maximum: 2592000
+          description: Maximum age of the exact vulnerability observation used by admission. Must be supplied with maximum_vulnerability_severity.
+    DeploymentPolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [name, scope, mode, requirements, enabled]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        scope:
+          type: string
+          enum: [project, environment]
+        environment_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Required for Environment scope and forbidden for Project scope. Scope cannot change during update.
+        mode:
+          type: string
+          enum: [advisory, enforced]
+          description: Development Environment policies must be advisory and production Environment policies must be enforced. Staging and Project policies may select either; the evaluator still applies the target Environment safety floor.
+        requirements: { $ref: "#/components/schemas/DeploymentPolicyRequirements" }
+        enabled: { type: boolean }
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required only for update and rejected during create.
+    DeploymentPolicy:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, name, scope, mode, requirements, enabled, version, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        organization_id: { type: string, minLength: 1, maxLength: 128 }
+        project_id: { type: string, minLength: 1, maxLength: 128 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        scope: { type: string, enum: [project, environment] }
+        environment_id: { type: string, minLength: 1, maxLength: 128 }
+        mode: { type: string, enum: [advisory, enforced] }
+        requirements: { $ref: "#/components/schemas/DeploymentPolicyRequirements" }
+        enabled: { type: boolean }
+        version: { type: integer, format: int64, minimum: 1 }
+        created_by: { type: string, minLength: 1, maxLength: 128 }
+        updated_by: { type: string, minLength: 1, maxLength: 128 }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    VulnerabilityWaiverRequest:
+      type: object
+      additionalProperties: false
+      required: [scope, vulnerability_id, reason, expires_at]
+      properties:
+        scope:
+          type: string
+          enum: [project, artifact]
+        artifact_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: Required only for Artifact scope. The server resolves and stores the immutable subject digest.
+        vulnerability_id:
+          type: string
+          minLength: 2
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:+-]{1,127}$'
+          description: One exact scanner finding identifier such as CVE-2026-12345. Input is case-insensitive and stored in uppercase; wildcards are rejected.
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 1000
+        expires_at:
+          type: string
+          format: date-time
+          description: Must be between one hour and 180 days after server approval time.
+    VulnerabilityWaiverRevokeRequest:
+      type: object
+      additionalProperties: false
+      required: [reason, expected_version]
+      properties:
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        expected_version: { type: integer, format: int64, enum: [1] }
+    VulnerabilityWaiver:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, scope, vulnerability_id, reason, approved_by, expires_at, status, version, created_at]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        organization_id: { type: string, minLength: 1, maxLength: 128 }
+        project_id: { type: string, minLength: 1, maxLength: 128 }
+        scope: { type: string, enum: [project, artifact] }
+        artifact_id: { type: string, minLength: 1, maxLength: 128 }
+        subject_digest:
+          type: string
+          pattern: '^sha256:[0-9a-f]{64}$'
+          description: Present only for Artifact scope and fixed from the immutable Artifact at approval time.
+        vulnerability_id:
+          type: string
+          pattern: '^[A-Z0-9][A-Z0-9._:+-]{1,127}$'
+        reason: { type: string, minLength: 1, maxLength: 1000 }
+        approved_by: { type: string, minLength: 1, maxLength: 128 }
+        expires_at: { type: string, format: date-time }
+        status: { type: string, enum: [active, expired, revoked] }
+        version: { type: integer, format: int64, enum: [1, 2] }
+        created_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string, minLength: 1, maxLength: 128 }
+        revocation_reason: { type: string, minLength: 1, maxLength: 1000 }
     SignatureTrustPolicyRequest:
       type: object
       additionalProperties: false
@@ -4961,7 +5393,7 @@ components:
     RegistryCredential:
       type: object
       additionalProperties: false
-      required: [id, project_id, name, server, username, password_configured, created_by, created_at]
+      required: [id, project_id, name, server, authentication_mode, password_configured, created_by, created_at]
       properties:
         id:
           type: string
@@ -4976,13 +5408,19 @@ components:
         server:
           type: string
           minLength: 1
+        authentication_mode:
+          type: string
+          enum: [anonymous, basic]
+          description: Anonymous performs no Registry authentication. Basic resolves the configured password only for the current operation.
         username:
           type: string
           minLength: 1
           maxLength: 255
+          description: Present only when authentication_mode is basic.
         password_configured:
           type: boolean
           readOnly: true
+          description: False for anonymous connections. Secret references and password material are never returned.
         created_by:
           type: string
           minLength: 1
@@ -5395,7 +5833,7 @@ components:
     Artifact:
       type: object
       additionalProperties: false
-      required: [id, project_id, application_id, build_id, build_configuration_id, registry_credential_id, image_repository, image_digest, target_platform, release_runtime_spec, automatic_deployments, release_status, version, created_at]
+      required: [id, project_id, application_id, origin, producer, producer_verification, registry_credential_id, image_repository, image_digest, target_platform, release_runtime_spec, automatic_deployments, release_status, version, created_at]
       properties:
         id:
           type: string
@@ -5406,12 +5844,26 @@ components:
         application_id:
           type: string
           minLength: 1
+        origin:
+          type: string
+          enum: [owndock_build, external]
+          description: Whether OwnDock built the image or an external CI system registered it.
+        producer:
+          type: string
+          minLength: 1
+          maxLength: 200
+        producer_verification:
+          type: string
+          enum: [verified, declared]
+          description: "verified identifies OwnDock's own Build Worker boundary; declared means the external producer label is informational until signature or provenance evidence verifies it."
         build_id:
           type: string
           minLength: 1
+          description: Present only for an OwnDock-built Artifact.
         build_configuration_id:
           type: string
           minLength: 1
+          description: Present only for an OwnDock-built Artifact.
         registry_credential_id:
           type: string
           minLength: 1
@@ -5965,6 +6417,10 @@ components:
         request_id:
           type: string
           minLength: 1
+        details:
+          type: object
+          description: Optional operation-specific safe details. Deployment admission denials include evaluated policy versions, effective modes, stable violation codes, and the evaluation digest; raw infrastructure errors and secrets are never included.
+          additionalProperties: true
         created_at:
           type: string
           format: date-time
@@ -6009,11 +6465,40 @@ components:
       additionalProperties: false
       properties:
         runtime_spec:
+          allOf:
+            - $ref: "#/components/schemas/ReleaseRuntimeSpec"
+          description: Optional override. When omitted, the immutable runtime specification saved on the Artifact is used.
+    RegisterExternalArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [application_id, registry_credential_id, image_digest, target_platform, producer]
+      properties:
+        application_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        registry_credential_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        image_digest:
+          type: string
+          pattern: "^.+@sha256:[a-f0-9]{64}$"
+          description: Complete immutable image reference, for example registry.example.com/team/api@sha256:...; tags such as latest are rejected.
+        target_platform:
+          type: string
+          enum: [linux/amd64, linux/arm64]
+        producer:
+          type: string
+          minLength: 1
+          maxLength: 200
+          description: Human-readable identity declared by the external CI integration, for example github-actions/acme/api. This value is not treated as cryptographic proof.
+        release_runtime_spec:
           $ref: "#/components/schemas/ReleaseRuntimeSpec"
     CreateRegistryCredentialRequest:
       type: object
       additionalProperties: false
-      required: [name, server, username, password_ref]
+      required: [name, server, authentication_mode]
       properties:
         name:
           type: string
@@ -6022,13 +6507,20 @@ components:
         server:
           type: string
           minLength: 1
+        authentication_mode:
+          type: string
+          enum: [anonymous, basic]
+          description: Use anonymous for public registries. Basic requires both username and password_ref. Anonymous rejects both fields.
         username:
           type: string
           minLength: 1
           maxLength: 255
+          description: Required only when authentication_mode is basic.
         password_ref:
           type: string
           pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
+          writeOnly: true
+          description: Required only when authentication_mode is basic. The referenced password is resolved per operation and never stored in API payloads or job snapshots.
     CreateRepositoryCredentialRequest:
       type: object
       additionalProperties: false
@@ -6455,6 +6947,120 @@ components:
         created_at:
           type: string
           format: date-time
+    DeploymentAdmissionPolicySnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, version, scope, mode, requirements]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        version: { type: integer, format: int64, minimum: 1 }
+        scope: { type: string, enum: [project, environment] }
+        environment_id: { type: string, minLength: 1, maxLength: 128 }
+        mode:
+          type: string
+          enum: [advisory, enforced]
+          description: Effective mode after applying the target Environment safety floor, not merely the stored configuration.
+        requirements: { $ref: "#/components/schemas/DeploymentPolicyRequirements" }
+    DeploymentAdmissionEvidenceSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, kind, descriptor_digest, content_digest]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        kind: { type: string, enum: [sbom, provenance, vulnerability_report] }
+        descriptor_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        content_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+    DeploymentAdmissionVerificationSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, trust_policy_id, trust_policy_version, bundle_set_digest]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        trust_policy_id: { type: string, minLength: 1, maxLength: 128 }
+        trust_policy_version: { type: integer, format: int64, minimum: 1 }
+        bundle_set_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+    DeploymentAdmissionVulnerabilityCounts:
+      type: object
+      additionalProperties: false
+      required: [unknown, low, medium, high, critical, total]
+      properties:
+        unknown: { type: integer, format: int64, minimum: 0 }
+        low: { type: integer, format: int64, minimum: 0 }
+        medium: { type: integer, format: int64, minimum: 0 }
+        high: { type: integer, format: int64, minimum: 0 }
+        critical: { type: integer, format: int64, minimum: 0 }
+        total: { type: integer, format: int64, minimum: 0, maximum: 1000000 }
+    DeploymentAdmissionVulnerabilitySnapshot:
+      type: object
+      additionalProperties: false
+      required: [observation_id, evidence_id, descriptor_digest, content_digest, scanner, scanner_version, database_version, database_updated_at, scanned_at, fresh_until, original_counts, remaining_counts, highest_remaining]
+      properties:
+        observation_id: { type: string, minLength: 1, maxLength: 128 }
+        evidence_id: { type: string, minLength: 1, maxLength: 128 }
+        descriptor_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        content_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        scanner: { type: string, enum: [trivy] }
+        scanner_version: { type: string, enum: [0.74.0] }
+        database_version: { type: integer, format: int64, minimum: 1 }
+        database_updated_at: { type: string, format: date-time }
+        scanned_at: { type: string, format: date-time }
+        fresh_until: { type: string, format: date-time }
+        original_counts: { $ref: "#/components/schemas/DeploymentAdmissionVulnerabilityCounts" }
+        remaining_counts: { $ref: "#/components/schemas/DeploymentAdmissionVulnerabilityCounts" }
+        highest_remaining: { type: string, enum: [none, unknown, low, medium, high, critical] }
+    DeploymentAdmissionWaiverSnapshot:
+      type: object
+      additionalProperties: false
+      required: [id, version, scope, vulnerability_id, expires_at]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        version: { type: integer, format: int64, minimum: 1 }
+        scope: { type: string, enum: [project, artifact] }
+        vulnerability_id: { type: string, minLength: 1, maxLength: 256 }
+        expires_at: { type: string, format: date-time }
+    DeploymentAdmissionViolation:
+      type: object
+      additionalProperties: false
+      required: [code]
+      properties:
+        policy_id: { type: string, minLength: 1, maxLength: 128 }
+        code:
+          type: string
+          enum: [policy_unavailable, artifact_unavailable, sbom_missing, provenance_missing, evidence_unavailable, signature_missing, vulnerability_observation_missing, vulnerability_observation_stale, vulnerability_report_integrity, vulnerability_severity_unknown, vulnerability_severity_exceeded]
+    DeploymentAdmissionSnapshot:
+      type: object
+      additionalProperties: false
+      description: Immutable result used when this Deployment was created. The two digests make policy/evidence drift detectable; later policy updates, rescans, or waiver expiry do not rewrite this history.
+      required: [evaluated_at, environment_stage, policies, evidence, verifications, waivers, violations, decision, evidence_set_digest, evaluation_digest]
+      properties:
+        evaluated_at: { type: string, format: date-time }
+        environment_stage: { type: string, enum: [development, staging, production] }
+        artifact_id: { type: string, minLength: 1, maxLength: 128 }
+        subject_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        policies:
+          type: array
+          maxItems: 2
+          items: { $ref: "#/components/schemas/DeploymentAdmissionPolicySnapshot" }
+        evidence:
+          type: array
+          maxItems: 8
+          items: { $ref: "#/components/schemas/DeploymentAdmissionEvidenceSnapshot" }
+        verifications:
+          type: array
+          maxItems: 16
+          items: { $ref: "#/components/schemas/DeploymentAdmissionVerificationSnapshot" }
+        vulnerability: { $ref: "#/components/schemas/DeploymentAdmissionVulnerabilitySnapshot" }
+        waivers:
+          type: array
+          maxItems: 10000
+          items: { $ref: "#/components/schemas/DeploymentAdmissionWaiverSnapshot" }
+        violations:
+          type: array
+          maxItems: 64
+          items: { $ref: "#/components/schemas/DeploymentAdmissionViolation" }
+        decision: { type: string, enum: [not_configured, admitted, admitted_with_warnings, denied] }
+        evidence_set_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        evaluation_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
     ProjectDeployment:
       type: object
       additionalProperties: false
@@ -6508,6 +7114,8 @@ components:
           type: string
           description: Safe failure category present only when status is failed.
           enum: [configuration, credential, target_unreachable, image_pull, runtime, unsupported_target, unknown]
+        admission:
+          $ref: "#/components/schemas/DeploymentAdmissionSnapshot"
         created_at:
           type: string
           format: date-time
@@ -6853,3 +7461,6 @@ components:
         request_id:
           type: string
           minLength: 1
+        details:
+          type: object
+          description: Optional operation-specific, non-secret structured context. Clients must branch on error.code and treat this object as additive.

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"strings"
+
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 var (
@@ -22,19 +24,31 @@ var (
 // push. Password bytes are resolved for the operation and are never stored in
 // Build or Build Configuration snapshots.
 type BuildRegistryCredential struct {
-	ID          string
-	ProjectID   string
-	Server      string
-	Username    string
-	PasswordRef string
+	ID                 string
+	ProjectID          string
+	Server             string
+	AuthenticationMode registryauth.Mode
+	Username           string
+	PasswordRef        string
 }
 
 func (c BuildRegistryCredential) Validate(projectID, credentialID string) error {
 	if strings.TrimSpace(c.ID) != strings.TrimSpace(credentialID) ||
 		strings.TrimSpace(c.ProjectID) != strings.TrimSpace(projectID) ||
-		strings.TrimSpace(c.Server) == "" || strings.TrimSpace(c.Username) == "" ||
-		strings.TrimSpace(c.PasswordRef) == "" {
+		strings.TrimSpace(c.Server) == "" || !c.AuthenticationMode.Valid() {
 		return ErrInvalidBuildExecution
+	}
+	switch c.AuthenticationMode {
+	case registryauth.ModeAnonymous:
+		if strings.TrimSpace(c.Username) != "" || strings.TrimSpace(c.PasswordRef) != "" {
+			return ErrInvalidBuildExecution
+		}
+	case registryauth.ModeBasic:
+		username := strings.TrimSpace(c.Username)
+		if username == "" || username != c.Username || len(username) > 255 ||
+			strings.ContainsAny(username, ":\r\n\x00") || strings.TrimSpace(c.PasswordRef) == "" {
+			return ErrInvalidBuildExecution
+		}
 	}
 	return nil
 }

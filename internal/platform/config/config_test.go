@@ -548,6 +548,7 @@ func TestProductSourceGitNetworkValidation(t *testing.T) {
 	for _, product := range []Product{
 		{},
 		{SourceGitCACertFile: "/etc/owndock/git/ca.pem"},
+		{RegistryCACertFile: "/etc/owndock/registry/ca.pem"},
 		{SourceGitHTTPSProxy: "http://proxy.internal:3128"},
 		{SourceGitHTTPSProxy: "https://127.0.0.1:8443"},
 	} {
@@ -558,6 +559,8 @@ func TestProductSourceGitNetworkValidation(t *testing.T) {
 	for _, product := range []Product{
 		{SourceGitCACertFile: "relative/ca.pem"},
 		{SourceGitCACertFile: " /etc/ca.pem"},
+		{RegistryCACertFile: "relative/ca.pem"},
+		{RegistryCACertFile: " /etc/registry-ca.pem"},
 		{SourceGitHTTPSProxy: "http://user:secret@proxy.internal:3128"},
 		{SourceGitHTTPSProxy: "http://proxy.internal:3128/path"},
 		{SourceGitHTTPSProxy: "socks5://proxy.internal:1080"},

@@ -48,6 +48,7 @@ import (
 	"github.com/owndock/owndock/internal/platform/migration"
 	"github.com/owndock/owndock/internal/server"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -61,6 +62,16 @@ import (
 const integrationImage = "mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3"
 
 type readyRuntimeTargetProber struct{}
+
+type staticAdmissionEvaluator struct{ stage string }
+
+func (e staticAdmissionEvaluator) EvaluateAdmission(_ context.Context,
+	_ deploymentbiz.AdmissionRequest) (deploymentbiz.AdmissionSnapshot, error) {
+	return (deploymentbiz.AdmissionSnapshot{EvaluatedAt: time.Now().UTC(), EnvironmentStage: e.stage,
+		Policies: []deploymentbiz.AdmissionPolicySnapshot{}, Evidence: []deploymentbiz.AdmissionEvidenceSnapshot{},
+		Verifications: []deploymentbiz.AdmissionVerificationSnapshot{}, Waivers: []deploymentbiz.AdmissionWaiverSnapshot{},
+		Violations: []deploymentbiz.AdmissionViolation{}, Decision: deploymentbiz.AdmissionNotConfigured}).Seal()
+}
 
 func (readyRuntimeTargetProber) ProbeRuntimeTarget(
 	context.Context,
@@ -203,6 +214,37 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed legacy release: %v", err)
 	}
+	if _, err := client.Database().Collection("artifacts").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-artifact"},
+		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "application_id", Value: "legacy-application"},
+		{Key: "build_id", Value: "legacy-build"},
+		{Key: "build_configuration_id", Value: "legacy-build-configuration"},
+		{Key: "registry_credential_id", Value: "legacy-registry"},
+		{Key: "image_repository", Value: "registry.example.com/team/legacy"},
+		{Key: "image_digest", Value: "registry.example.com/team/legacy@sha256:" + strings.Repeat("e", 64)},
+		{Key: "target_platform", Value: "linux/amd64"},
+		{Key: "automatic_deployments", Value: bson.A{}},
+		{Key: "release_status", Value: "available"},
+		{Key: "version", Value: uint64(1)},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed legacy Artifact: %v", err)
+	}
+	if _, err := client.Database().Collection("registry_credentials").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-registry"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "name", Value: "Legacy Registry"},
+		{Key: "name_normalized", Value: "legacy registry"},
+		{Key: "server", Value: "registry.example.com"},
+		{Key: "username", Value: "legacy-robot"},
+		{Key: "password_ref", Value: "secret://legacy-registry"},
+		{Key: "created_by", Value: "legacy-user"},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed legacy Registry Credential: %v", err)
+	}
 	if _, err := client.Database().Collection("deployments").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "legacy-deployment"},
 		{Key: "project_id", Value: "legacy-project"},
@@ -274,6 +316,9 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	assertEvidenceVerificationIndexes(t, ctx, client.Database())
 	assertSignatureSigningProfileIndexes(t, ctx, client.Database())
 	assertVulnerabilityObservationIndexes(t, ctx, client.Database())
+	assertVulnerabilityWaiverIndexes(t, ctx, client.Database())
+	assertDeploymentPolicyIndexes(t, ctx, client.Database())
+	assertArtifactIndexes(t, ctx, client.Database())
 	verifyIngressRateLimitIntegration(t, ctx, client.Database())
 	verifyTerminalPersistenceIntegration(t, ctx, client.Database())
 	verifyBuildWorkerSIGKILLRecovery(t, ctx, uri, client)
@@ -282,6 +327,32 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	verifyArtifactEvidenceFenceIntegration(t, ctx, client.Database())
 	verifySignatureVerificationFenceIntegration(t, ctx, client.Database())
 	verifyVulnerabilityObservationIntegration(t, ctx, client.Database())
+	verifyVulnerabilityWaiverIntegration(t, ctx, client.Database())
+	verifyDeploymentPolicyIntegration(t, ctx, client.Database())
+	verifyExternalArtifactPersistenceIntegration(t, ctx, client.Database())
+	var migratedArtifact struct {
+		Origin               string `bson:"origin"`
+		Producer             string `bson:"producer"`
+		ProducerVerification string `bson:"producer_verification"`
+	}
+	if err := client.Database().Collection("artifacts").FindOne(ctx,
+		bson.D{{Key: "_id", Value: "legacy-artifact"}}).Decode(&migratedArtifact); err != nil {
+		t.Fatalf("read migrated Artifact: %v", err)
+	}
+	if migratedArtifact.Origin != "owndock_build" || migratedArtifact.Producer != "owndock-build-worker" ||
+		migratedArtifact.ProducerVerification != "verified" {
+		t.Fatalf("migrated Artifact producer = %+v", migratedArtifact)
+	}
+	var migratedRegistryCredential struct {
+		AuthenticationMode registryauth.Mode `bson:"authentication_mode"`
+	}
+	if err := client.Database().Collection("registry_credentials").FindOne(ctx,
+		bson.D{{Key: "_id", Value: "legacy-registry"}}).Decode(&migratedRegistryCredential); err != nil {
+		t.Fatalf("read migrated Registry Credential: %v", err)
+	}
+	if migratedRegistryCredential.AuthenticationMode != registryauth.ModeBasic {
+		t.Fatalf("migrated Registry authentication mode = %q", migratedRegistryCredential.AuthenticationMode)
+	}
 	var backfilledInventory bson.M
 	if err := client.Database().Collection("runtime_inventory_current").FindOne(ctx, bson.D{
 		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
@@ -369,6 +440,11 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		ctx, bson.D{{Key: "_id", Value: "legacy-release"}},
 	); err != nil {
 		t.Fatalf("delete legacy release fixture: %v", err)
+	}
+	if _, err := client.Database().Collection("artifacts").DeleteOne(
+		ctx, bson.D{{Key: "_id", Value: "legacy-artifact"}},
+	); err != nil {
+		t.Fatalf("delete legacy Artifact fixture: %v", err)
 	}
 	auditStore := platformaudit.NewMongoStore(client.Database())
 	passwords, err := identitydata.NewPasswordHasher()
@@ -928,10 +1004,26 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	registryCredential, err := controlPlaneUseCase.CreateRegistryCredential(
 		ctx, principal, project.ID, "Private Registry", "registry.example.com",
-		"robot", "secret://registry-password", "registry-request",
+		registryauth.ModeBasic, "robot", "secret://registry-password", "registry-request",
 	)
 	if err != nil {
 		t.Fatalf("create registry credential: %v", err)
+	}
+	anonymousRegistryCredential, err := controlPlaneUseCase.CreateRegistryCredential(
+		ctx, principal, project.ID, "Public Registry", "registry-1.docker.io",
+		registryauth.ModeAnonymous, "", "", "anonymous-registry-request",
+	)
+	if err != nil || anonymousRegistryCredential.AuthenticationMode != registryauth.ModeAnonymous {
+		t.Fatalf("create anonymous Registry Credential = %+v, %v", anonymousRegistryCredential, err)
+	}
+	var storedAnonymousRegistry bson.M
+	if err := client.Database().Collection("registry_credentials").FindOne(ctx,
+		bson.D{{Key: "_id", Value: anonymousRegistryCredential.ID}}).Decode(&storedAnonymousRegistry); err != nil {
+		t.Fatalf("read anonymous Registry Credential: %v", err)
+	}
+	if storedAnonymousRegistry["authentication_mode"] != string(registryauth.ModeAnonymous) ||
+		storedAnonymousRegistry["username"] != nil || storedAnonymousRegistry["password_ref"] != nil {
+		t.Fatalf("stored anonymous Registry Credential = %#v", storedAnonymousRegistry)
 	}
 	release, err := controlPlaneUseCase.CreateReleaseWithRuntimeSpec(
 		ctx, principal, project.ID, application.ID,
@@ -971,6 +1063,14 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create environment: %v", err)
 	}
+	anonymousRelease, err := controlPlaneUseCase.CreateReleaseWithRuntimeSpec(
+		ctx, principal, project.ID, application.ID,
+		"registry-1.docker.io/library/busybox@sha256:"+strings.Repeat("b", 64),
+		anonymousRegistryCredential.ID, runtimespec.Spec{}, "anonymous-release-request",
+	)
+	if err != nil {
+		t.Fatalf("create anonymous Registry release: %v", err)
+	}
 	if release.ApplicationID != application.ID || target.ProjectID != project.ID || environment.ProjectID != project.ID {
 		t.Fatalf("release=%+v target=%+v environment=%+v", release, target, environment)
 	}
@@ -987,11 +1087,23 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		executionPlan.RuntimeSpec.Resources.CPUMilli != runtimespec.DefaultCPUMilli {
 		t.Fatalf("execution plan = %+v, error = %v", executionPlan, err)
 	}
+	anonymousExecutionPlan, err := deploymentdata.NewExecutionResolver(controlPlaneStore).ResolveExecution(
+		ctx,
+		deploymentbiz.Deployment{
+			ID: "anonymous-execution-probe", ProjectID: project.ID, ApplicationID: application.ID,
+			ReleaseID: anonymousRelease.ID, EnvironmentID: environment.ID, RuntimeTargetID: target.ID,
+		},
+	)
+	if err != nil || anonymousExecutionPlan.RegistryServer != "registry-1.docker.io" ||
+		anonymousExecutionPlan.RegistryUsername != "" || anonymousExecutionPlan.RegistryPasswordRef != "" {
+		t.Fatalf("anonymous execution plan = %+v, error = %v", anonymousExecutionPlan, err)
+	}
 
 	deploymentStore := deploymentdata.NewMongoRepository(client.Database())
 	deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
 		WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlPlaneStore)).
-		WithFormalSecurity(client, auditStore)
+		WithFormalSecurity(client, auditStore).
+		WithAdmissionEvaluator(staticAdmissionEvaluator{stage: "production"})
 	deployment, err := deploymentUseCase.CreateFormal(
 		ctx, principal, project.ID, release.ID, application.ID, environment.ID, target.ID,
 		"integration-deployment", "deployment-request",
@@ -1002,11 +1114,21 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if deployment.CutoverSequence == 0 {
 		t.Fatal("formal deployment has no cutover sequence")
 	}
+	if deployment.Admission.Decision != deploymentbiz.AdmissionNotConfigured ||
+		deployment.Admission.EvaluationDigest == "" || deployment.Admission.Validate() != nil {
+		t.Fatalf("formal deployment admission = %+v", deployment.Admission)
+	}
+	storedDeployment, err := deploymentStore.Get(ctx, project.ID, deployment.ID)
+	if err != nil || storedDeployment.Admission.EvaluationDigest != deployment.Admission.EvaluationDigest ||
+		storedDeployment.Admission.Validate() != nil {
+		t.Fatalf("stored deployment admission = %+v, err = %v", storedDeployment.Admission, err)
+	}
 	replayed, err := deploymentUseCase.CreateFormal(
 		ctx, principal, project.ID, release.ID, application.ID, environment.ID, target.ID,
 		"integration-deployment", "deployment-replay-request",
 	)
-	if err != nil || replayed.ID != deployment.ID {
+	if err != nil || replayed.ID != deployment.ID ||
+		replayed.Admission.EvaluationDigest != deployment.Admission.EvaluationDigest {
 		t.Fatalf("replay deployment = %+v, err = %v", replayed, err)
 	}
 	duplicateID := deployment
@@ -1929,6 +2051,128 @@ func assertVulnerabilityObservationIndexes(t *testing.T, ctx context.Context, da
 	}
 }
 
+func assertVulnerabilityWaiverIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("vulnerability_waivers").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"idx_vulnerability_waiver_list", "idx_vulnerability_waiver_applicability"} {
+		if !names[name] {
+			t.Errorf("vulnerability waiver index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertDeploymentPolicyIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("deployment_policies").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"uniq_deployment_policy_scope", "idx_deployment_policy_evaluation"} {
+		if !names[name] {
+			t.Errorf("deployment policy index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func assertArtifactIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("artifacts").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"uniq_artifact_build", "uniq_external_artifact_registration",
+		"idx_artifact_project_origin", "idx_artifact_project_created", "idx_artifact_release_queue",
+		"idx_artifact_image"} {
+		if !names[name] {
+			t.Errorf("Artifact index %q is missing: %#v", name, names)
+		}
+	}
+}
+
+func verifyExternalArtifactPersistenceIntegration(t *testing.T, ctx context.Context,
+	database *drivermongo.Database) {
+	t.Helper()
+	repository := builddata.NewMongoRepository(database)
+	createdAt := time.Now().UTC()
+	create := func(id, key, digestCharacter string) buildbiz.Artifact {
+		item, err := buildbiz.NewExternalArtifact(buildbiz.ExternalArtifactInput{
+			ID: id, OrganizationID: "external-organization", ProjectID: "external-project",
+			ApplicationID: "external-application", RegistryCredentialID: "external-registry",
+			ImageDigest:    "registry.example.com/team/external@sha256:" + strings.Repeat(digestCharacter, 64),
+			TargetPlatform: buildbiz.BuildPlatformLinuxAMD64, Producer: "github-actions/team/external",
+			RegistrationKey: key, CreatedAt: createdAt,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	first, second := create("external-artifact-1", "external-delivery-1", "a"),
+		create("external-artifact-2", "external-delivery-2", "b")
+	defer func() {
+		_, _ = database.Collection("artifacts").DeleteMany(ctx, bson.D{{Key: "_id", Value: bson.D{
+			{Key: "$in", Value: bson.A{first.ID, second.ID, "external-artifact-duplicate"}},
+		}}})
+	}()
+	if _, err := repository.CreateArtifact(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.CreateArtifact(ctx, second); err != nil {
+		t.Fatalf("second external Artifact without Build ID: %v", err)
+	}
+	stored, err := repository.GetArtifactByRegistrationKey(ctx, first.ProjectID, first.RegistrationKey)
+	if err != nil || stored.Origin != buildbiz.ArtifactOriginExternal ||
+		stored.ProducerVerification != buildbiz.ArtifactProducerDeclared || stored.BuildID != "" ||
+		stored.ImageDigest != first.ImageDigest {
+		t.Fatalf("stored external Artifact = %+v/%v", stored, err)
+	}
+	duplicate := create("external-artifact-duplicate", first.RegistrationKey, "c")
+	if _, err := repository.CreateArtifact(ctx, duplicate); !errors.Is(err, buildbiz.ErrDuplicateArtifact) {
+		t.Fatalf("duplicate external registration error = %v", err)
+	}
+	var raw bson.M
+	if err := database.Collection("artifacts").FindOne(ctx,
+		bson.D{{Key: "_id", Value: first.ID}}).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := raw["build_id"]; present {
+		t.Fatalf("external Artifact unexpectedly persisted build_id: %#v", raw)
+	}
+}
+
 func assertSignatureSigningProfileIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
 	t.Helper()
 	cursor, err := database.Collection("signature_signing_profiles").Indexes().List(ctx)
@@ -2176,6 +2420,148 @@ func verifyVulnerabilityObservationIntegration(t *testing.T, ctx context.Context
 	latest, err := repository.GetLatestVulnerabilityObservation(ctx, job.ProjectID, job.ArtifactID)
 	if err != nil || latest.Counts.High != 1 || latest.DescriptorDigest != evidence.DescriptorDigest {
 		t.Fatalf("latest vulnerability observation = %+v/%v", latest, err)
+	}
+}
+
+func verifyVulnerabilityWaiverIntegration(t *testing.T, ctx context.Context,
+	database *drivermongo.Database) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newWaiver := func(id string, scope supplychainbiz.VulnerabilityWaiverScope,
+		createdAt, expiresAt time.Time) supplychainbiz.VulnerabilityWaiver {
+		input := supplychainbiz.VulnerabilityWaiverInput{ID: id,
+			OrganizationID: "waiver-integration-organization", ProjectID: "waiver-integration-project",
+			Scope: scope, VulnerabilityID: "CVE-2026-12345", Reason: "Integration-approved exception.",
+			ApprovedBy: "waiver-integration-maintainer", ExpiresAt: expiresAt,
+			Version: 1, CreatedAt: createdAt}
+		if scope == supplychainbiz.VulnerabilityWaiverScopeArtifact {
+			input.ArtifactID = "waiver-integration-artifact"
+			input.SubjectDigest = "sha256:" + strings.Repeat("9", 64)
+		}
+		item, err := supplychainbiz.NewVulnerabilityWaiver(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	items := []supplychainbiz.VulnerabilityWaiver{
+		newWaiver("waiver-integration-newest", supplychainbiz.VulnerabilityWaiverScopeArtifact,
+			now.Add(-time.Hour), now.Add(24*time.Hour)),
+		newWaiver("waiver-integration-project", supplychainbiz.VulnerabilityWaiverScopeProject,
+			now.Add(-2*time.Hour), now.Add(24*time.Hour)),
+		newWaiver("waiver-integration-expired", supplychainbiz.VulnerabilityWaiverScopeProject,
+			now.Add(-48*time.Hour), now.Add(-24*time.Hour)),
+	}
+	for _, item := range items {
+		if _, err := repository.CreateVulnerabilityWaiver(ctx, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, _ := (supplychainbiz.VulnerabilityWaiverQuery{Limit: 2}).Normalize(now)
+	first, err := repository.ListVulnerabilityWaivers(ctx, items[0].OrganizationID, items[0].ProjectID, all)
+	if err != nil || len(first.Items) != 2 || first.NextCursor == "" ||
+		first.Items[0].ID != items[0].ID || first.Items[1].ID != items[1].ID {
+		t.Fatalf("first waiver page = %+v/%v", first, err)
+	}
+	all.Cursor = first.NextCursor
+	second, err := repository.ListVulnerabilityWaivers(ctx, items[0].OrganizationID, items[0].ProjectID, all)
+	if err != nil || len(second.Items) != 1 || second.NextCursor != "" || second.Items[0].ID != items[2].ID {
+		t.Fatalf("second waiver page = %+v/%v", second, err)
+	}
+	active, _ := (supplychainbiz.VulnerabilityWaiverQuery{Limit: 100, ActiveOnly: true}).Normalize(now)
+	activePage, err := repository.ListVulnerabilityWaivers(ctx, items[0].OrganizationID, items[0].ProjectID, active)
+	if err != nil || len(activePage.Items) != 2 {
+		t.Fatalf("active waiver page = %+v/%v", activePage, err)
+	}
+	applicable, err := repository.ListApplicableVulnerabilityWaivers(ctx,
+		items[0].OrganizationID, items[0].ProjectID, items[0].ArtifactID, items[0].SubjectDigest, now)
+	if err != nil || len(applicable) != 2 || applicable[0].ID != items[1].ID ||
+		applicable[1].ID != items[0].ID {
+		t.Fatalf("applicable vulnerability waivers = %+v/%v", applicable, err)
+	}
+	nonMatching, err := repository.ListApplicableVulnerabilityWaivers(ctx,
+		items[0].OrganizationID, items[0].ProjectID, "another-artifact", items[0].SubjectDigest, now)
+	if err != nil || len(nonMatching) != 1 || nonMatching[0].ID != items[1].ID {
+		t.Fatalf("non-matching artifact vulnerability waivers = %+v/%v", nonMatching, err)
+	}
+	if _, err := repository.GetVulnerabilityWaiver(ctx, "another-organization", items[0].ProjectID,
+		items[0].ID); !errors.Is(err, supplychainbiz.ErrNotFound) {
+		t.Fatalf("cross-organization GetVulnerabilityWaiver() error = %v", err)
+	}
+	revocation := supplychainbiz.VulnerabilityWaiverInput{ID: items[0].ID,
+		OrganizationID: items[0].OrganizationID, ProjectID: items[0].ProjectID,
+		Scope: items[0].Scope, ArtifactID: items[0].ArtifactID, SubjectDigest: items[0].SubjectDigest,
+		VulnerabilityID: items[0].VulnerabilityID, Reason: items[0].Reason, ApprovedBy: items[0].ApprovedBy,
+		ExpiresAt: items[0].ExpiresAt, Version: 2, CreatedAt: items[0].CreatedAt,
+		RevokedAt: now, RevokedBy: "waiver-integration-maintainer", RevocationReason: "Patch deployed."}
+	revoked, err := supplychainbiz.NewVulnerabilityWaiver(revocation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SaveVulnerabilityWaiver(ctx, revoked, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SaveVulnerabilityWaiver(ctx, revoked, 1); !errors.Is(err, supplychainbiz.ErrVulnerabilityWaiverConflict) {
+		t.Fatalf("second SaveVulnerabilityWaiver() error = %v", err)
+	}
+}
+
+func verifyDeploymentPolicyIntegration(t *testing.T, ctx context.Context,
+	database *drivermongo.Database) {
+	t.Helper()
+	repository := supplychaindata.NewMongoRepository(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newPolicy := func(id string, scope supplychainbiz.DeploymentPolicyScope,
+		environmentID string) supplychainbiz.DeploymentPolicy {
+		item, err := supplychainbiz.NewDeploymentPolicy(supplychainbiz.DeploymentPolicyInput{
+			ID: id, OrganizationID: "policy-integration-organization", ProjectID: "policy-integration-project",
+			Name: "Integration baseline", Scope: scope, EnvironmentID: environmentID,
+			Mode: supplychainbiz.DeploymentPolicyEnforced, Requirements: supplychainbiz.DeploymentPolicyRequirements{
+				RequireSBOM: true, RequireProvenance: true,
+				AllowedSignaturePolicyIDs:    []string{"policy-integration-trust"},
+				MaximumVulnerabilitySeverity: supplychainbiz.VulnerabilitySeverityHigh,
+				MaximumScanAge:               24 * time.Hour,
+			}, Enabled: true, Version: 1, CreatedBy: "policy-integration-maintainer",
+			UpdatedBy: "policy-integration-maintainer", CreatedAt: now, UpdatedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	projectPolicy := newPolicy("policy-integration-project-policy",
+		supplychainbiz.DeploymentPolicyScopeProject, "")
+	if _, err := repository.CreateDeploymentPolicy(ctx, projectPolicy); err != nil {
+		t.Fatal(err)
+	}
+	duplicateScope := projectPolicy
+	duplicateScope.ID = "policy-integration-duplicate-scope"
+	if _, err := repository.CreateDeploymentPolicy(ctx, duplicateScope); !errors.Is(err, supplychainbiz.ErrDeploymentPolicyConflict) {
+		t.Fatalf("duplicate scope error = %v", err)
+	}
+	environmentPolicy := newPolicy("policy-integration-environment-policy",
+		supplychainbiz.DeploymentPolicyScopeEnvironment, "policy-integration-environment")
+	if _, err := repository.CreateDeploymentPolicy(ctx, environmentPolicy); err != nil {
+		t.Fatal(err)
+	}
+	items, err := repository.ListDeploymentPolicies(ctx, projectPolicy.OrganizationID, projectPolicy.ProjectID)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("ListDeploymentPolicies() = %+v, %v", items, err)
+	}
+	if _, err := repository.GetDeploymentPolicy(ctx, "another-organization", projectPolicy.ProjectID,
+		projectPolicy.ID); !errors.Is(err, supplychainbiz.ErrNotFound) {
+		t.Fatalf("cross-organization GetDeploymentPolicy() error = %v", err)
+	}
+	projectPolicy.Name = "Updated integration baseline"
+	projectPolicy.Version = 2
+	projectPolicy.UpdatedAt = now.Add(time.Second)
+	updated, err := repository.SaveDeploymentPolicy(ctx, projectPolicy, 1)
+	if err != nil || updated.Version != 2 || updated.Name != projectPolicy.Name {
+		t.Fatalf("SaveDeploymentPolicy() = %+v, %v", updated, err)
+	}
+	if _, err := repository.SaveDeploymentPolicy(ctx, projectPolicy, 1); !errors.Is(err, supplychainbiz.ErrDeploymentPolicyConflict) {
+		t.Fatalf("stale SaveDeploymentPolicy() error = %v", err)
 	}
 }
 
@@ -2927,7 +3313,8 @@ func verifyBuildSourceRepositoryIntegration(
 	automaticDeployments := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
 		WithFormalReferences(deploymentReferences).
 		WithAutomaticReferences(deploymentReferences).
-		WithFormalSecurity(client, platformaudit.NewMongoStore(database))
+		WithFormalSecurity(client, platformaudit.NewMongoStore(database)).
+		WithAdmissionEvaluator(staticAdmissionEvaluator{stage: "development"})
 	releaseAdapter := builddata.NewArtifactReleaseAdapter(artifactControlPlane).
 		WithAutomaticDeployments(automaticDeployments)
 	releaseID, err := releaseAdapter.CreateArtifactRelease(ctx, buildbiz.ArtifactReleaseRequest{

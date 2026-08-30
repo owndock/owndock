@@ -12,6 +12,7 @@ import (
 
 	"github.com/distribution/reference"
 	"github.com/opencontainers/go-digest"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/secretref"
@@ -130,14 +131,15 @@ type Release struct {
 // RegistryCredential stores only registry metadata and an external secret
 // reference. Password material never crosses the control-plane repository.
 type RegistryCredential struct {
-	ID          string
-	ProjectID   string
-	Name        string
-	Server      string
-	Username    string
-	PasswordRef string
-	CreatedBy   string
-	CreatedAt   time.Time
+	ID                 string
+	ProjectID          string
+	Name               string
+	Server             string
+	AuthenticationMode registryauth.Mode
+	Username           string
+	PasswordRef        string
+	CreatedBy          string
+	CreatedAt          time.Time
 }
 
 type RuntimeTargetStatus string
@@ -500,20 +502,23 @@ func NewReleaseFromArtifact(
 }
 
 func NewRegistryCredential(
-	id, projectID, name, server, username, passwordRef, createdBy string,
+	id, projectID, name, server string, authenticationMode registryauth.Mode,
+	username, passwordRef, createdBy string,
 	now time.Time,
 ) (RegistryCredential, error) {
 	name, err := validName(name)
 	if err != nil {
 		return RegistryCredential{}, err
 	}
-	server, username, passwordRef, err = validRegistryCredential(server, username, passwordRef)
+	server, username, passwordRef, err = validRegistryCredential(
+		server, authenticationMode, username, passwordRef,
+	)
 	if err != nil {
 		return RegistryCredential{}, err
 	}
 	return RegistryCredential{
 		ID: id, ProjectID: projectID, Name: name, Server: server,
-		Username: username, PasswordRef: passwordRef,
+		AuthenticationMode: authenticationMode, Username: username, PasswordRef: passwordRef,
 		CreatedBy: createdBy, CreatedAt: now.UTC(),
 	}, nil
 }
@@ -617,11 +622,13 @@ func canonicalDigestReference(value string) (string, error) {
 	return reference.FamiliarString(named), nil
 }
 
-func validRegistryCredential(server, username, passwordRef string) (string, string, string, error) {
+func validRegistryCredential(server string, authenticationMode registryauth.Mode,
+	username, passwordRef string,
+) (string, string, string, error) {
 	server = strings.ToLower(strings.TrimSpace(server))
 	username = strings.TrimSpace(username)
 	passwordRef = strings.TrimSpace(passwordRef)
-	if server == "" || username == "" || len(username) > 255 || passwordRef == "" {
+	if server == "" || !authenticationMode.Valid() {
 		return "", "", "", ErrInvalidRegistry
 	}
 	parsed, err := url.Parse("https://" + server)
@@ -630,7 +637,19 @@ func validRegistryCredential(server, username, passwordRef string) (string, stri
 		(parsed.Path != "" && parsed.Path != "/") {
 		return "", "", "", ErrInvalidRegistry
 	}
-	if _, err := secretref.Alias(passwordRef); err != nil {
+	switch authenticationMode {
+	case registryauth.ModeAnonymous:
+		if username != "" || passwordRef != "" {
+			return "", "", "", ErrInvalidRegistry
+		}
+	case registryauth.ModeBasic:
+		if username == "" || len(username) > 255 || strings.ContainsAny(username, ":\r\n\x00") || passwordRef == "" {
+			return "", "", "", ErrInvalidRegistry
+		}
+		if _, err := secretref.Alias(passwordRef); err != nil {
+			return "", "", "", ErrInvalidRegistry
+		}
+	default:
 		return "", "", "", ErrInvalidRegistry
 	}
 	return server, username, passwordRef, nil

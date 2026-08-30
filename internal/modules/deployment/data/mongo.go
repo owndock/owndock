@@ -46,7 +46,10 @@ func (r *MongoRepository) List(ctx context.Context, projectID, applicationID, en
 	}
 	items := make([]biz.Deployment, len(docs))
 	for i := range docs {
-		items[i] = docs[i].domain()
+		items[i], err = docs[i].domain()
+		if err != nil {
+			return nil, err
+		}
 	}
 	return items, nil
 }
@@ -60,7 +63,7 @@ func (r *MongoRepository) GetByIdempotency(ctx context.Context, projectID, key s
 	if err != nil {
 		return biz.Deployment{}, fmt.Errorf("find deployment idempotency: %w", err)
 	}
-	return doc.domain(), nil
+	return doc.domain()
 }
 
 func (r *MongoRepository) Get(ctx context.Context, projectID, deploymentID string) (biz.Deployment, error) {
@@ -75,7 +78,7 @@ func (r *MongoRepository) Get(ctx context.Context, projectID, deploymentID strin
 	if err != nil {
 		return biz.Deployment{}, fmt.Errorf("find deployment: %w", err)
 	}
-	return doc.domain(), nil
+	return doc.domain()
 }
 
 // CurrentSucceededForSlot returns the deployment that currently owns the
@@ -102,7 +105,7 @@ func (r *MongoRepository) CurrentSucceededForSlot(
 	if err != nil {
 		return biz.Deployment{}, fmt.Errorf("find current successful deployment: %w", err)
 	}
-	return document.domain(), nil
+	return document.domain()
 }
 
 func (r *MongoRepository) HasSucceeded(
@@ -255,7 +258,8 @@ func (r *MongoRepository) ClaimNext(ctx context.Context, claim biz.Claim) (biz.D
 	result := r.deployments.FindOneAndUpdate(ctx, append(base, bson.E{Key: "status", Value: string(biz.StatusQueued)}), claimUpdate, options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After))
 	err := result.Decode(&doc)
 	if err == nil {
-		return doc.domain(), true, nil
+		item, domainErr := doc.domain()
+		return item, domainErr == nil, domainErr
 	}
 	if err != mongo.ErrNoDocuments {
 		return biz.Deployment{}, false, err
@@ -273,11 +277,13 @@ func (r *MongoRepository) ClaimNext(ctx context.Context, claim biz.Claim) (biz.D
 		} else if cancelErr != nil {
 			return biz.Deployment{}, false, cancelErr
 		}
-		return doc.domain(), true, nil
+		item, domainErr := doc.domain()
+		return item, domainErr == nil, domainErr
 	} else if err != nil {
 		return biz.Deployment{}, false, err
 	}
-	return doc.domain(), true, nil
+	item, domainErr := doc.domain()
+	return item, domainErr == nil, domainErr
 }
 
 func (r *MongoRepository) SaveClaimed(ctx context.Context, item biz.Deployment, expectedVersion uint64, workerID string, now time.Time) (biz.Deployment, error) {
@@ -318,7 +324,7 @@ func (r *MongoRepository) RenewLease(ctx context.Context, deploymentID, workerID
 	} else if err != nil {
 		return biz.Deployment{}, err
 	}
-	return document.domain(), nil
+	return document.domain()
 }
 
 func (r *MongoRepository) ValidateFence(
@@ -382,6 +388,91 @@ func (r *MongoRepository) ValidateFence(
 	return nil
 }
 
+type admissionRequirementsDocument struct {
+	RequireSBOM                  bool     `bson:"require_sbom"`
+	RequireProvenance            bool     `bson:"require_provenance"`
+	AllowedSignaturePolicyIDs    []string `bson:"allowed_signature_policy_ids"`
+	MaximumVulnerabilitySeverity string   `bson:"maximum_vulnerability_severity,omitempty"`
+	MaximumScanAgeSeconds        int64    `bson:"maximum_scan_age_seconds,omitempty"`
+}
+
+type admissionPolicyDocument struct {
+	ID            string                        `bson:"id"`
+	Version       uint64                        `bson:"version"`
+	Scope         string                        `bson:"scope"`
+	EnvironmentID string                        `bson:"environment_id,omitempty"`
+	Mode          string                        `bson:"mode"`
+	Requirements  admissionRequirementsDocument `bson:"requirements"`
+}
+
+type admissionEvidenceDocument struct {
+	ID               string `bson:"id"`
+	Kind             string `bson:"kind"`
+	DescriptorDigest string `bson:"descriptor_digest"`
+	ContentDigest    string `bson:"content_digest"`
+}
+
+type admissionVerificationDocument struct {
+	ID                 string `bson:"id"`
+	TrustPolicyID      string `bson:"trust_policy_id"`
+	TrustPolicyVersion uint64 `bson:"trust_policy_version"`
+	BundleSetDigest    string `bson:"bundle_set_digest"`
+}
+
+type admissionVulnerabilityCountsDocument struct {
+	Unknown  uint64 `bson:"unknown"`
+	Low      uint64 `bson:"low"`
+	Medium   uint64 `bson:"medium"`
+	High     uint64 `bson:"high"`
+	Critical uint64 `bson:"critical"`
+	Total    uint64 `bson:"total"`
+}
+
+type admissionVulnerabilityDocument struct {
+	ObservationID     string                               `bson:"observation_id"`
+	EvidenceID        string                               `bson:"evidence_id"`
+	DescriptorDigest  string                               `bson:"descriptor_digest"`
+	ContentDigest     string                               `bson:"content_digest"`
+	Scanner           string                               `bson:"scanner"`
+	ScannerVersion    string                               `bson:"scanner_version"`
+	DatabaseVersion   uint64                               `bson:"database_version"`
+	DatabaseUpdatedAt time.Time                            `bson:"database_updated_at"`
+	ScannedAt         time.Time                            `bson:"scanned_at"`
+	FreshUntil        time.Time                            `bson:"fresh_until"`
+	OriginalCounts    admissionVulnerabilityCountsDocument `bson:"original_counts"`
+	RemainingCounts   admissionVulnerabilityCountsDocument `bson:"remaining_counts"`
+	HighestRemaining  string                               `bson:"highest_remaining"`
+}
+
+type admissionWaiverDocument struct {
+	ID              string    `bson:"id"`
+	Version         uint64    `bson:"version"`
+	Scope           string    `bson:"scope"`
+	VulnerabilityID string    `bson:"vulnerability_id"`
+	ExpiresAt       time.Time `bson:"expires_at"`
+}
+
+type admissionViolationDocument struct {
+	PolicyID string `bson:"policy_id,omitempty"`
+	Code     string `bson:"code"`
+}
+
+type admissionDocument struct {
+	EvaluatedAt       time.Time                       `bson:"evaluated_at"`
+	EnvironmentStage  string                          `bson:"environment_stage"`
+	ArtifactID        string                          `bson:"artifact_id,omitempty"`
+	SubjectDigest     string                          `bson:"subject_digest,omitempty"`
+	Policies          []admissionPolicyDocument       `bson:"policies"`
+	Evidence          []admissionEvidenceDocument     `bson:"evidence"`
+	Verifications     []admissionVerificationDocument `bson:"verifications"`
+	Vulnerability     *admissionVulnerabilityDocument `bson:"vulnerability,omitempty"`
+	Waivers           []admissionWaiverDocument       `bson:"waivers"`
+	Violations        []admissionViolationDocument    `bson:"violations"`
+	Decision          string                          `bson:"decision"`
+	EvidenceSetDigest string                          `bson:"evidence_set_digest"`
+	EvaluationDigest  string                          `bson:"evaluation_digest"`
+}
+
 type deploymentDocument struct {
 	ID                   string                  `bson:"_id"`
 	OrganizationID       string                  `bson:"organization_id,omitempty"`
@@ -405,6 +496,7 @@ type deploymentDocument struct {
 	UpdatedAt            time.Time               `bson:"updated_at"`
 	Version              uint64                  `bson:"version"`
 	Lease                deploymentLeaseDocument `bson:"lease"`
+	Admission            *admissionDocument      `bson:"admission,omitempty"`
 }
 type deploymentLeaseDocument struct {
 	Owner      string    `bson:"owner,omitempty"`
@@ -413,6 +505,10 @@ type deploymentLeaseDocument struct {
 }
 
 func deploymentDocumentFromDomain(d biz.Deployment) deploymentDocument {
+	var admission *admissionDocument
+	if d.Admission.EvaluationDigest != "" {
+		admission = admissionDocumentFromDomain(d.Admission)
+	}
 	return deploymentDocument{
 		ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID, ReleaseID: d.ReleaseID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
@@ -428,9 +524,10 @@ func deploymentDocumentFromDomain(d biz.Deployment) deploymentDocument {
 			Owner: d.Lease.Owner, ExpiresAt: d.Lease.ExpiresAt,
 			Generation: d.Lease.Generation,
 		},
+		Admission: admission,
 	}
 }
-func (d deploymentDocument) domain() biz.Deployment {
+func (d deploymentDocument) domain() (biz.Deployment, error) {
 	operation := biz.Operation(d.Operation)
 	if operation == "" {
 		operation = biz.OperationDeploy
@@ -439,7 +536,7 @@ func (d deploymentDocument) domain() biz.Deployment {
 	if triggerSource == "" {
 		triggerSource = biz.TriggerSourceManual
 	}
-	return biz.Deployment{
+	item := biz.Deployment{
 		ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID, ReleaseID: d.ReleaseID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID,
 		RuntimeTargetID: d.RuntimeTargetID, IdempotencyKey: d.IdempotencyKey,
@@ -455,4 +552,120 @@ func (d deploymentDocument) domain() biz.Deployment {
 			Generation: d.Lease.Generation,
 		},
 	}
+	if d.Admission != nil {
+		admission := d.Admission.domain()
+		if err := admission.Validate(); err != nil {
+			return biz.Deployment{}, fmt.Errorf("decode invalid deployment admission snapshot: %w", err)
+		}
+		item.Admission = admission
+	}
+	return item, nil
+}
+
+func admissionDocumentFromDomain(snapshot biz.AdmissionSnapshot) *admissionDocument {
+	document := &admissionDocument{EvaluatedAt: snapshot.EvaluatedAt,
+		EnvironmentStage: snapshot.EnvironmentStage, ArtifactID: snapshot.ArtifactID,
+		SubjectDigest: snapshot.SubjectDigest, Decision: string(snapshot.Decision),
+		EvidenceSetDigest: snapshot.EvidenceSetDigest, EvaluationDigest: snapshot.EvaluationDigest,
+		Policies:      make([]admissionPolicyDocument, len(snapshot.Policies)),
+		Evidence:      make([]admissionEvidenceDocument, len(snapshot.Evidence)),
+		Verifications: make([]admissionVerificationDocument, len(snapshot.Verifications)),
+		Waivers:       make([]admissionWaiverDocument, len(snapshot.Waivers)),
+		Violations:    make([]admissionViolationDocument, len(snapshot.Violations))}
+	for index, policy := range snapshot.Policies {
+		document.Policies[index] = admissionPolicyDocument{ID: policy.ID, Version: policy.Version,
+			Scope: policy.Scope, EnvironmentID: policy.EnvironmentID, Mode: policy.Mode,
+			Requirements: admissionRequirementsDocument{RequireSBOM: policy.Requirements.RequireSBOM,
+				RequireProvenance:            policy.Requirements.RequireProvenance,
+				AllowedSignaturePolicyIDs:    append([]string{}, policy.Requirements.AllowedSignaturePolicyIDs...),
+				MaximumVulnerabilitySeverity: policy.Requirements.MaximumVulnerabilitySeverity,
+				MaximumScanAgeSeconds:        policy.Requirements.MaximumScanAgeSeconds}}
+	}
+	for index, evidence := range snapshot.Evidence {
+		document.Evidence[index] = admissionEvidenceDocument{ID: evidence.ID, Kind: evidence.Kind,
+			DescriptorDigest: evidence.DescriptorDigest, ContentDigest: evidence.ContentDigest}
+	}
+	for index, verification := range snapshot.Verifications {
+		document.Verifications[index] = admissionVerificationDocument{ID: verification.ID,
+			TrustPolicyID: verification.TrustPolicyID, TrustPolicyVersion: verification.TrustPolicyVersion,
+			BundleSetDigest: verification.BundleSetDigest}
+	}
+	if snapshot.Vulnerability != nil {
+		vulnerability := snapshot.Vulnerability
+		document.Vulnerability = &admissionVulnerabilityDocument{ObservationID: vulnerability.ObservationID,
+			EvidenceID: vulnerability.EvidenceID, DescriptorDigest: vulnerability.DescriptorDigest,
+			ContentDigest: vulnerability.ContentDigest, Scanner: vulnerability.Scanner,
+			ScannerVersion: vulnerability.ScannerVersion, DatabaseVersion: vulnerability.DatabaseVersion,
+			DatabaseUpdatedAt: vulnerability.DatabaseUpdatedAt, ScannedAt: vulnerability.ScannedAt,
+			FreshUntil: vulnerability.FreshUntil, OriginalCounts: admissionCountsDocument(vulnerability.OriginalCounts),
+			RemainingCounts:  admissionCountsDocument(vulnerability.RemainingCounts),
+			HighestRemaining: vulnerability.HighestRemaining}
+	}
+	for index, waiver := range snapshot.Waivers {
+		document.Waivers[index] = admissionWaiverDocument{ID: waiver.ID, Version: waiver.Version,
+			Scope: waiver.Scope, VulnerabilityID: waiver.VulnerabilityID, ExpiresAt: waiver.ExpiresAt}
+	}
+	for index, violation := range snapshot.Violations {
+		document.Violations[index] = admissionViolationDocument{PolicyID: violation.PolicyID,
+			Code: string(violation.Code)}
+	}
+	return document
+}
+
+func (d admissionDocument) domain() biz.AdmissionSnapshot {
+	snapshot := biz.AdmissionSnapshot{EvaluatedAt: d.EvaluatedAt, EnvironmentStage: d.EnvironmentStage,
+		ArtifactID: d.ArtifactID, SubjectDigest: d.SubjectDigest, Decision: biz.AdmissionDecision(d.Decision),
+		EvidenceSetDigest: d.EvidenceSetDigest, EvaluationDigest: d.EvaluationDigest,
+		Policies:      make([]biz.AdmissionPolicySnapshot, len(d.Policies)),
+		Evidence:      make([]biz.AdmissionEvidenceSnapshot, len(d.Evidence)),
+		Verifications: make([]biz.AdmissionVerificationSnapshot, len(d.Verifications)),
+		Waivers:       make([]biz.AdmissionWaiverSnapshot, len(d.Waivers)),
+		Violations:    make([]biz.AdmissionViolation, len(d.Violations))}
+	for index, policy := range d.Policies {
+		snapshot.Policies[index] = biz.AdmissionPolicySnapshot{ID: policy.ID, Version: policy.Version,
+			Scope: policy.Scope, EnvironmentID: policy.EnvironmentID, Mode: policy.Mode,
+			Requirements: biz.AdmissionRequirementsSnapshot{RequireSBOM: policy.Requirements.RequireSBOM,
+				RequireProvenance:            policy.Requirements.RequireProvenance,
+				AllowedSignaturePolicyIDs:    append([]string{}, policy.Requirements.AllowedSignaturePolicyIDs...),
+				MaximumVulnerabilitySeverity: policy.Requirements.MaximumVulnerabilitySeverity,
+				MaximumScanAgeSeconds:        policy.Requirements.MaximumScanAgeSeconds}}
+	}
+	for index, evidence := range d.Evidence {
+		snapshot.Evidence[index] = biz.AdmissionEvidenceSnapshot{ID: evidence.ID, Kind: evidence.Kind,
+			DescriptorDigest: evidence.DescriptorDigest, ContentDigest: evidence.ContentDigest}
+	}
+	for index, verification := range d.Verifications {
+		snapshot.Verifications[index] = biz.AdmissionVerificationSnapshot{ID: verification.ID,
+			TrustPolicyID: verification.TrustPolicyID, TrustPolicyVersion: verification.TrustPolicyVersion,
+			BundleSetDigest: verification.BundleSetDigest}
+	}
+	if d.Vulnerability != nil {
+		vulnerability := d.Vulnerability
+		snapshot.Vulnerability = &biz.AdmissionVulnerabilitySnapshot{ObservationID: vulnerability.ObservationID,
+			EvidenceID: vulnerability.EvidenceID, DescriptorDigest: vulnerability.DescriptorDigest,
+			ContentDigest: vulnerability.ContentDigest, Scanner: vulnerability.Scanner,
+			ScannerVersion: vulnerability.ScannerVersion, DatabaseVersion: vulnerability.DatabaseVersion,
+			DatabaseUpdatedAt: vulnerability.DatabaseUpdatedAt, ScannedAt: vulnerability.ScannedAt,
+			FreshUntil: vulnerability.FreshUntil, OriginalCounts: vulnerability.OriginalCounts.domain(),
+			RemainingCounts: vulnerability.RemainingCounts.domain(), HighestRemaining: vulnerability.HighestRemaining}
+	}
+	for index, waiver := range d.Waivers {
+		snapshot.Waivers[index] = biz.AdmissionWaiverSnapshot{ID: waiver.ID, Version: waiver.Version,
+			Scope: waiver.Scope, VulnerabilityID: waiver.VulnerabilityID, ExpiresAt: waiver.ExpiresAt}
+	}
+	for index, violation := range d.Violations {
+		snapshot.Violations[index] = biz.AdmissionViolation{PolicyID: violation.PolicyID,
+			Code: biz.AdmissionViolationCode(violation.Code)}
+	}
+	return snapshot
+}
+
+func admissionCountsDocument(counts biz.AdmissionVulnerabilityCounts) admissionVulnerabilityCountsDocument {
+	return admissionVulnerabilityCountsDocument{Unknown: counts.Unknown, Low: counts.Low,
+		Medium: counts.Medium, High: counts.High, Critical: counts.Critical, Total: counts.Total}
+}
+
+func (d admissionVulnerabilityCountsDocument) domain() biz.AdmissionVulnerabilityCounts {
+	return biz.AdmissionVulnerabilityCounts{Unknown: d.Unknown, Low: d.Low, Medium: d.Medium,
+		High: d.High, Critical: d.Critical, Total: d.Total}
 }

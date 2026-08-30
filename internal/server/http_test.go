@@ -273,6 +273,9 @@ func TestProductAPIRoutesSupplyChainBeforeBuild(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/projects/project-1/artifacts/artifact-1/evidence",
 		"/api/v1/projects/project-1/artifacts/artifact-1/evidence/evidence-1",
+		"/api/v1/projects/project-1/vulnerability-waivers",
+		"/api/v1/projects/project-1/vulnerability-waivers/waiver-1",
+		"/api/v1/projects/project-1/vulnerability-waivers/waiver-1:revoke",
 	} {
 		recorder := httptest.NewRecorder()
 		api.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))

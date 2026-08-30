@@ -59,11 +59,16 @@ const (
 	PermissionBuildConfigurationRead     Permission = "build_configuration.read"
 	PermissionBuildConfigurationWrite    Permission = "build_configuration.write"
 	PermissionBuildRead                  Permission = "build.read"
+	PermissionArtifactCreate             Permission = "artifact.create"
 	PermissionArtifactEvidenceRead       Permission = "artifact_evidence.read"
 	PermissionSignatureTrustPolicyRead   Permission = "signature_trust_policy.read"
 	PermissionSignatureTrustPolicyWrite  Permission = "signature_trust_policy.write"
 	PermissionSignatureVerificationWrite Permission = "signature_verification.write"
 	PermissionVulnerabilityScanWrite     Permission = "vulnerability_scan.write"
+	PermissionVulnerabilityWaiverRead    Permission = "vulnerability_waiver.read"
+	PermissionVulnerabilityWaiverWrite   Permission = "vulnerability_waiver.write"
+	PermissionDeploymentPolicyRead       Permission = "deployment_policy.read"
+	PermissionDeploymentPolicyWrite      Permission = "deployment_policy.write"
 	PermissionBuildTrigger               Permission = "build.trigger"
 	PermissionBuildTriggerManage         Permission = "build_trigger.manage"
 	PermissionAutomaticDeploymentManage  Permission = "automatic_deployment.manage"
@@ -107,11 +112,13 @@ func allowed(role Role, permission Permission) bool {
 		PermissionEnvironmentRead, PermissionDeploymentRead,
 		PermissionRuntimeInventoryRead, PermissionSourceRepositoryRead,
 		PermissionBuildConfigurationRead, PermissionBuildRead, PermissionArtifactEvidenceRead,
-		PermissionSignatureTrustPolicyRead:
+		PermissionSignatureTrustPolicyRead, PermissionVulnerabilityWaiverRead,
+		PermissionDeploymentPolicyRead:
 		return role == RoleMaintainer || role == RoleDeveloper || role == RoleViewer
 	case PermissionManagedHostRead, PermissionHostInventoryRead:
 		return role == RoleMaintainer
-	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionDeploymentCreate, PermissionDeploymentCancel:
+	case PermissionApplicationWrite, PermissionReleaseCreate, PermissionArtifactCreate,
+		PermissionDeploymentCreate, PermissionDeploymentCancel:
 		return role == RoleMaintainer || role == RoleDeveloper
 	case PermissionRuntimeTargetWrite, PermissionRegistryWrite, PermissionEnvironmentWrite, PermissionDeploymentRollback, PermissionAuditRead:
 		return role == RoleMaintainer
@@ -124,6 +131,10 @@ func allowed(role Role, permission Permission) bool {
 	case PermissionAutomaticDeploymentManage:
 		return role == RoleMaintainer
 	case PermissionSignatureTrustPolicyWrite:
+		return role == RoleMaintainer
+	case PermissionVulnerabilityWaiverWrite:
+		return role == RoleMaintainer
+	case PermissionDeploymentPolicyWrite:
 		return role == RoleMaintainer
 	case PermissionBuildConfigurationWrite:
 		return role == RoleMaintainer || role == RoleDeveloper

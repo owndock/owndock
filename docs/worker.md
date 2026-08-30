@@ -41,7 +41,7 @@ OWNDOCK_RUNTIME_DOCKER_PRODUCTION_CERT_PEM
 OWNDOCK_RUNTIME_DOCKER_PRODUCTION_KEY_PEM
 ```
 
-Registry Credential 同样只保存 `password_ref`。例如 `secret://private-registry` 在执行时读取：
+Registry Credential 显式选择 `anonymous` 或 `basic`。匿名模式不解析秘密；Basic 模式只保存 `password_ref`。例如 `secret://private-registry` 在执行时读取：
 
 ```text
 OWNDOCK_REGISTRY_PRIVATE_REGISTRY_PASSWORD

@@ -16,6 +16,7 @@ Application 1 --* Build Configuration
 Build Configuration 1 --* Build Trigger
 Build Configuration 1 --* Build Hook
 Build Configuration 1 --* Build 1 --0..1 Artifact
+External CI --register digest--> Artifact
 Artifact 1 --* Artifact Evidence
 Artifact 1 --0..1 Release
 Release 1 --* Deployment *--1 Environment
@@ -34,7 +35,7 @@ Managed Host 1 --* Host Terminal Session
 - Agent Enrollment 是短时一次性首次接入凭据，Agent Identity 是固定到 Host 和安装 instance 的机器身份；
 - Source Repository 表示平台无关的标准 Git HTTPS/SSH 代码来源，Repository Credential 只保存外部秘密引用和安全展示元数据；
 - Build Configuration 描述 Dockerfile、上下文、Registry、平台、资源限制和可选 development 自动部署目标；
-- Build 是一次不可变构建执行，Artifact 是按 digest 固定的 OCI 构建结果；
+- Build 是一次不可变构建执行；Artifact 是按 digest 固定的 OCI 镜像产品记录，可来自 OwnDock Build 或外部 CI。外部来源不伪造 Build 关系，生产者保持 `declared`，直到独立签名或 Provenance 完成验证；
 - Artifact Evidence 是绑定 Artifact digest 的 SBOM、Provenance、签名或漏洞报告有界索引，完整证据正文不嵌入 MongoDB 主文档；授权下载按 OCI descriptor 读取并复核 subject、layer digest 与文档结构；
 - Application 是长期软件服务身份；
 - Release 是不可变可部署版本，并固定 OCI image digest；
@@ -75,6 +76,7 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Build 位于 Project 下，触发时固定 Application、Build Configuration、精确 ref、完整 Commit SHA 和非秘密配置快照；状态只能通过领域状态机转换，Worker 使用 lease/generation fencing，取消协作收敛，失败重试创建带来源关系的新 Build；相同 Project 幂等键只回放相同触发意图，资源变更与审计原子提交；
 - Build Trigger 绑定一个 Build Configuration，允许 ref 只能收窄配置范围；外部请求只能提交 ref 和 Commit SHA，Trigger ID 进入 Build 幂等意图与审计，撤销后不可恢复；
 - Build Hook 绑定一个平台和 Build Configuration，Webhook Secret 与 Repository Credential 分离；原始 body 验签后才解析，provider + Hook + delivery ID 唯一，合法但不适用的事件记录为 ignored；
+- Artifact 位于 Project/Application 下，来源固定为 `owndock_build` 或 `external`。外部登记只接受完整 OCI SHA-256 digest，先用所选 Registry Credential 回读并验证 manifest，再在同一事务中保存 Artifact、审计和 Evidence Jobs；登记幂等键不公开，外部 Artifact 没有 Build/Build Configuration ID，也不会生成 OwnDock Build Provenance 或由平台自动补签；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
 - Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
 - Environment 内部保存运行变量绑定，但公开 API 只返回排序后的 `variable_keys`，不回传明文值或 `secret://` 引用；

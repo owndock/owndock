@@ -61,7 +61,7 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Template | `GET /api/v1/templates`、`GET /api/v1/templates/{template_id}` | 查询无秘密、不可变版本的社区内置 Application 预设 |
 | Application | `GET/POST /api/v1/projects/{project_id}/applications` | 查询或创建 Project Application；可选复制 Template 快照 |
 | Release | `GET/POST /api/v1/projects/{project_id}/applications/{application_id}/releases` | 查询或创建固定 OCI digest 与运行规格的不可变 Release |
-| Registry | `GET/POST /api/v1/projects/{project_id}/registry-credentials` | 管理引用外部秘密的 Registry Credential 元数据；响应只返回 `password_configured` |
+| Registry | `GET/POST /api/v1/projects/{project_id}/registry-credentials` | 管理显式 `anonymous/basic` Registry 连接；Basic 只保存外部秘密引用，响应只返回 `password_configured` |
 | Source Repository | `GET/POST /api/v1/projects/{project_id}/repository-credentials` | 管理 Git 读取凭据元数据；响应不回读 `secret_ref` |
 | Source Repository | `GET/POST /api/v1/projects/{project_id}/source-repositories` | 管理不含凭据的 HTTPS/SSH 仓库连接；创建不触发 Git 或 Build |
 | Source Repository | `GET /api/v1/projects/{project_id}/source-repositories/{source_repository_id}` | 查询仓库协议、默认分支、Host Key 和安全连接状态 |
@@ -71,7 +71,8 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Build | `GET/POST /api/v1/projects/{project_id}/builds`、`POST .../builds/{build_id}:cancel|:retry` | 查询或幂等创建 Build，协作取消非终态 Build，或从 failed Build 的不可变快照创建重试 |
 | Build | `GET /api/v1/projects/{project_id}/builds/{build_id}` | 查询不可变源码身份、触发来源和构建配置快照 |
 | Build | `GET /api/v1/projects/{project_id}/builds/{build_id}/logs` | 使用 Build 绑定的 opaque cursor 增量读取有界、TTL、已脱敏日志；响应明确 complete/truncated |
-| Artifact | `GET /api/v1/projects/{project_id}/artifacts`、`GET .../artifacts/{artifact_id}` | 查询按 OCI digest 固定的成功构建结果和 Release 交接状态 |
+| Artifact | `GET /api/v1/projects/{project_id}/artifacts`、`GET .../artifacts/{artifact_id}` | 查询按 OCI digest 固定的 OwnDock Build 或外部 CI 镜像、生产者信任标记和 Release 交接状态 |
+| Artifact | `POST /api/v1/projects/{project_id}/artifacts` | Developer 以上用 `Idempotency-Key` 登记外部 CI 的精确 digest；Server 先验证 Registry manifest，再原子创建 Evidence Jobs 与审计 |
 | Artifact Evidence | `GET .../artifacts/{artifact_id}/evidence`、`GET .../evidence/{evidence_id}` | 查询绑定镜像 digest 的 SBOM、Provenance、签名或漏洞报告有界索引 |
 | Artifact Evidence | `GET .../evidence/{evidence_id}:download` | 授权读取 OCI 证据正文；返回前校验 manifest、subject、媒体类型、大小、layer digest 和已支持的文档结构 |
 | Artifact | `POST /api/v1/projects/{project_id}/artifacts/{artifact_id}:create-release` | 从 Artifact 幂等创建不可变 Release；可提供运行规格 |

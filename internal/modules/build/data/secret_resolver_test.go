@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/owndock/owndock/internal/modules/build/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 func TestEnvironmentRepositorySecretResolverUsesCredentialSpecificNames(t *testing.T) {
@@ -67,13 +68,15 @@ func TestEnvironmentRepositorySecretResolverResolvesRegistryPassword(t *testing.
 	}}
 	password, err := resolver.ResolveRegistryPassword(t.Context(), biz.BuildRegistryCredential{
 		ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
-		Username: "builder", PasswordRef: "secret://production",
+		AuthenticationMode: registryauth.ModeBasic,
+		Username:           "builder", PasswordRef: "secret://production",
 	})
 	if err != nil || string(password) != "registry-secret" {
 		t.Fatalf("ResolveRegistryPassword() = %q, %v", password, err)
 	}
 	if _, err := resolver.ResolveRegistryPassword(t.Context(), biz.BuildRegistryCredential{
-		Server: "registry.example.com", Username: "builder", PasswordRef: "secret://missing",
+		Server: "registry.example.com", AuthenticationMode: registryauth.ModeBasic,
+		Username: "builder", PasswordRef: "secret://missing",
 	}); err != biz.ErrRegistrySecretUnavailable {
 		t.Fatalf("missing password error = %v", err)
 	}

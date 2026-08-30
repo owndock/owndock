@@ -15,6 +15,7 @@ import (
 	"github.com/moby/buildkit/exporter/containerimage/exptypes"
 	"github.com/opencontainers/go-digest"
 	"github.com/owndock/owndock/internal/modules/build/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 type buildKitClientStub struct {
@@ -50,6 +51,13 @@ type registrySecretResolverStub struct{ secret []byte }
 
 func (s registrySecretResolverStub) ResolveRegistryPassword(context.Context, biz.BuildRegistryCredential) ([]byte, error) {
 	return s.secret, nil
+}
+
+type registrySecretResolverProbe struct{ called bool }
+
+func (p *registrySecretResolverProbe) ResolveRegistryPassword(context.Context, biz.BuildRegistryCredential) ([]byte, error) {
+	p.called = true
+	return nil, errors.New("anonymous Registry must not resolve a password")
 }
 
 func TestBuildKitGatewayUsesPinnedFrontendAndReturnsCanonicalDigest(t *testing.T) {
@@ -104,6 +112,39 @@ func TestBuildKitGatewayUsesPinnedFrontendAndReturnsCanonicalDigest(t *testing.T
 		if value != 0 {
 			t.Fatal("registry password was not cleared")
 		}
+	}
+}
+
+func TestBuildKitGatewayUsesAnonymousRegistryWithoutResolvingPassword(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "Dockerfile"), []byte("FROM scratch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &buildKitClientStub{
+		version: PinnedBuildKitVersion,
+		result: &buildkitclient.SolveResponse{ExporterResponse: map[string]string{
+			exptypes.ExporterImageDigestKey: "sha256:" + strings.Repeat("a", 64),
+		}},
+	}
+	resolver := &registrySecretResolverProbe{}
+	gateway, err := newBuildKitGateway(t.Context(), resolver, PinnedBuildKitVersion,
+		"http://build-egress-gateway:3128", func(context.Context) (buildKitClient, error) { return client, nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := buildExecutionRequestFixture(workspace)
+	request.Credential.AuthenticationMode = registryauth.ModeAnonymous
+	request.Credential.Username, request.Credential.PasswordRef = "", ""
+	if _, err := gateway.Build(t.Context(), request); err != nil {
+		t.Fatalf("anonymous Build() error = %v", err)
+	}
+	if resolver.called {
+		t.Fatal("anonymous Build resolved a Registry password")
+	}
+	provider := registryAuthProvider(request.Credential, nil)
+	auth, err := provider(t.Context(), request.Credential.Server, nil, nil)
+	if err != nil || auth.ServerAddress != request.Credential.Server || auth.Username != "" || auth.Password != "" {
+		t.Fatalf("anonymous Registry auth = %+v, %v", auth, err)
 	}
 }
 
@@ -292,7 +333,8 @@ func buildExecutionRequestFixture(workspace string) biz.BuildExecutionRequest {
 		},
 		Credential: biz.BuildRegistryCredential{
 			ID: "registry-1", ProjectID: "project-1", Server: "registry.example.com",
-			Username: "builder", PasswordRef: "secret://production",
+			AuthenticationMode: registryauth.ModeBasic,
+			Username:           "builder", PasswordRef: "secret://production",
 		},
 	}
 }

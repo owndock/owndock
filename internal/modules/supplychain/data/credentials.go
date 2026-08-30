@@ -8,6 +8,7 @@ import (
 
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/secretref"
 )
 
@@ -53,7 +54,17 @@ func (p *EnvironmentRegistryCredentialProvider) ResolveRegistryCredential(
 	}
 	if credential.ID != credentialID || credential.ProjectID != projectID ||
 		strings.ToLower(strings.TrimSpace(credential.Server)) != registry ||
-		strings.TrimSpace(credential.Username) == "" || len(credential.Username) > 255 {
+		!credential.AuthenticationMode.Valid() {
+		return biz.RegistryCredential{}, biz.ErrRegistryAuthentication
+	}
+	if credential.AuthenticationMode == registryauth.ModeAnonymous {
+		if strings.TrimSpace(credential.Username) != "" || strings.TrimSpace(credential.PasswordRef) != "" {
+			return biz.RegistryCredential{}, biz.ErrRegistryAuthentication
+		}
+		return biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}, nil
+	}
+	if strings.TrimSpace(credential.Username) == "" || len(credential.Username) > 255 ||
+		strings.ContainsAny(credential.Username, ":\r\n\x00") {
 		return biz.RegistryCredential{}, biz.ErrRegistryAuthentication
 	}
 	alias, err := secretref.Alias(credential.PasswordRef)
@@ -67,7 +78,8 @@ func (p *EnvironmentRegistryCredentialProvider) ResolveRegistryCredential(
 		return biz.RegistryCredential{}, biz.ErrRegistryAuthentication
 	}
 	return biz.RegistryCredential{
-		Username: strings.TrimSpace(credential.Username), Password: []byte(password),
+		AuthenticationMode: registryauth.ModeBasic,
+		Username:           strings.TrimSpace(credential.Username), Password: []byte(password),
 	}, nil
 }
 

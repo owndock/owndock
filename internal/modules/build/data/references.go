@@ -112,7 +112,8 @@ func (s *BuildRegistrySourceAdapter) GetBuildRegistryCredential(
 	}
 	result := biz.BuildRegistryCredential{
 		ID: credential.ID, ProjectID: credential.ProjectID, Server: credential.Server,
-		Username: credential.Username, PasswordRef: credential.PasswordRef,
+		AuthenticationMode: credential.AuthenticationMode,
+		Username:           credential.Username, PasswordRef: credential.PasswordRef,
 	}
 	if err := result.Validate(projectID, credentialID); err != nil {
 		return biz.BuildRegistryCredential{}, biz.ErrInvalidBuildExecution

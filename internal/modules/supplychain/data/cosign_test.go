@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 func TestCosignVerifierUsesPinnedBinaryExactDigestAndTemporaryDockerCredential(t *testing.T) {
@@ -65,6 +66,24 @@ func TestCosignVerifierUsesPinnedBinaryExactDigestAndTemporaryDockerCredential(t
 		if strings.HasPrefix(entry.Name(), ".owndock-cosign-") {
 			t.Fatalf("temporary trust/credential directory was retained: %s", entry.Name())
 		}
+	}
+}
+
+func TestAnonymousRegistryCredentialCreatesNoDockerAuthentication(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	credential := biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}
+	if !validCosignCredential(credential) {
+		t.Fatal("anonymous Registry credential was rejected")
+	}
+	if err := writeDockerCredential(path, "registry.example.com", credential); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != `{"auths":{}}` {
+		t.Fatalf("anonymous Docker config = %s", content)
 	}
 }
 

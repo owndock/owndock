@@ -25,6 +25,22 @@ func TestValidateMigrations(t *testing.T) {
 	}
 }
 
+func TestDefaultMigrationsRemainContiguousThroughRegistryAuthenticationModes(t *testing.T) {
+	items := Default()
+	if len(items) != 45 {
+		t.Fatalf("Default() migration count = %d, want 45", len(items))
+	}
+	for index, item := range items {
+		if item.Version != int64(index+1) {
+			t.Fatalf("migration[%d].Version = %d", index, item.Version)
+		}
+	}
+	last := items[len(items)-1]
+	if last.Name != "support_registry_authentication_modes" || last.Up == nil {
+		t.Fatalf("latest migration = %+v", last)
+	}
+}
+
 func sorted(items []Migration) []Migration {
 	result := append([]Migration(nil), items...)
 	if result[0].Version > result[1].Version {

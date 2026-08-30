@@ -22,27 +22,30 @@ type CosignSignerOptions struct {
 	SigningEnvironment biz.SigningEnvironmentResolver
 	TemporaryRoot      string
 	AllowPlainHTTP     bool
+	RegistryCACertFile string
 }
 
 type CosignSigner struct {
-	executable      string
-	expectedVersion string
-	credentials     biz.RegistryCredentialProvider
-	environment     biz.SigningEnvironmentResolver
-	temporaryRoot   string
-	allowPlainHTTP  bool
+	executable         string
+	expectedVersion    string
+	credentials        biz.RegistryCredentialProvider
+	environment        biz.SigningEnvironmentResolver
+	temporaryRoot      string
+	allowPlainHTTP     bool
+	registryCACertFile string
 }
 
 func NewCosignSigner(options CosignSignerOptions) (*CosignSigner, error) {
 	executable, version := strings.TrimSpace(options.Executable), strings.TrimPrefix(strings.TrimSpace(options.ExpectedVersion), "v")
 	root := strings.TrimSpace(options.TemporaryRoot)
 	if !filepath.IsAbs(executable) || version != PinnedCosignVersion || options.Credentials == nil ||
-		options.SigningEnvironment == nil || !filepath.IsAbs(root) {
+		options.SigningEnvironment == nil || !filepath.IsAbs(root) ||
+		!validRegistryCACertFile(options.RegistryCACertFile) {
 		return nil, biz.ErrSignatureToolVersion
 	}
 	return &CosignSigner{executable: executable, expectedVersion: version,
 		credentials: options.Credentials, environment: options.SigningEnvironment, temporaryRoot: root,
-		allowPlainHTTP: options.AllowPlainHTTP}, nil
+		allowPlainHTTP: options.AllowPlainHTTP, registryCACertFile: options.RegistryCACertFile}, nil
 }
 
 func (s *CosignSigner) SignSignature(ctx context.Context,
@@ -85,7 +88,7 @@ func (s *CosignSigner) SignSignature(ctx context.Context,
 	if err := os.WriteFile(signingConfig, []byte(offlineCosignSigningConfig), 0o600); err != nil {
 		return biz.SignatureSigningResult{}, biz.ErrSignatureSigning
 	}
-	environment := cosignEnvironment(directory, dockerDirectory)
+	environment := cosignEnvironment(directory, dockerDirectory, s.registryCACertFile)
 	keys := make([]string, 0, len(providerEnvironment))
 	for key := range providerEnvironment {
 		keys = append(keys, key)

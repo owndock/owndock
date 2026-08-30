@@ -11,6 +11,7 @@ import (
 	"github.com/owndock/owndock/internal/modules/controlplane/biz"
 	"github.com/owndock/owndock/internal/platform/httpx"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"github.com/owndock/owndock/internal/shared/security"
@@ -346,17 +347,19 @@ func (s *HTTP) registryCredentials(
 		httpx.JSON(w, http.StatusOK, map[string]any{"items": responses})
 	case http.MethodPost:
 		var request struct {
-			Name        string `json:"name"`
-			Server      string `json:"server"`
-			Username    string `json:"username"`
-			PasswordRef string `json:"password_ref"`
+			Name               string            `json:"name"`
+			Server             string            `json:"server"`
+			AuthenticationMode registryauth.Mode `json:"authentication_mode"`
+			Username           string            `json:"username"`
+			PasswordRef        string            `json:"password_ref"`
 		}
 		if !decodeRequest(w, r, &request) {
 			return
 		}
 		item, err := s.useCase.CreateRegistryCredential(
 			r.Context(), principal, projectID,
-			request.Name, request.Server, request.Username, request.PasswordRef,
+			request.Name, request.Server, request.AuthenticationMode,
+			request.Username, request.PasswordRef,
 			httpx.RequestIDFromContext(r.Context()),
 		)
 		if writeError(w, r, err) {
@@ -662,20 +665,22 @@ func releaseResponseFromDomain(item biz.Release) releaseResponse {
 }
 
 type registryCredentialResponse struct {
-	ID                 string    `json:"id"`
-	ProjectID          string    `json:"project_id"`
-	Name               string    `json:"name"`
-	Server             string    `json:"server"`
-	Username           string    `json:"username"`
-	PasswordConfigured bool      `json:"password_configured"`
-	CreatedBy          string    `json:"created_by"`
-	CreatedAt          time.Time `json:"created_at"`
+	ID                 string            `json:"id"`
+	ProjectID          string            `json:"project_id"`
+	Name               string            `json:"name"`
+	Server             string            `json:"server"`
+	AuthenticationMode registryauth.Mode `json:"authentication_mode"`
+	Username           string            `json:"username,omitempty"`
+	PasswordConfigured bool              `json:"password_configured"`
+	CreatedBy          string            `json:"created_by"`
+	CreatedAt          time.Time         `json:"created_at"`
 }
 
 func registryCredentialResponseFromDomain(item biz.RegistryCredential) registryCredentialResponse {
 	return registryCredentialResponse{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name,
-		Server: item.Server, Username: item.Username, PasswordConfigured: item.PasswordRef != "",
+		Server: item.Server, AuthenticationMode: item.AuthenticationMode,
+		Username: item.Username, PasswordConfigured: item.PasswordRef != "",
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
 	}
 }

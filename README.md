@@ -18,8 +18,8 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - 可观测性：结构化 Access Log、HTTP 与统一 Worker Prometheus 指标、独立 Build Worker 健康/就绪端点；OpenTelemetry HTTP/Worker Trace 默认关闭，可通过 OTLP/HTTP 导出
 - 浏览器 API 安全：默认同源；可配置精确 HTTPS CORS Origin，拒绝通配符和 credentialed CORS；`/api/` 统一 `no-store` 并设置 API 安全响应头
 - MongoDB：官方 Go Driver v2.8.0；服务端测试基线 8.3.7，默认关闭
-- 正式产品切片：本地 bootstrap/login/session、一次性用户邀请、Owner 管理员会话治理、Project 成员绑定与即时撤权、可信代理来源识别和来源/实例共享入口限流、内置 RBAC、只读内置 Template 与 Application 快照、Organization Managed Host、一次性 Agent enrollment 与证书身份、Project、Project Application、Source Repository/Repository Credential 与只读连接探测、Build Configuration、三类 Build 触发入口、状态机、取消/重试与 Mongo queue/lease/fence、隔离 Build Worker 的固定 Git HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建与认证 Registry push、按 digest 固定的 Artifact、Artifact Evidence 有界索引/授权下载 API、OCI Referrers 原生/Tag Schema 探测、Evidence Job queue/lease/generation fence、CycloneDX 1.6 SBOM 与 SLSA Provenance v1、幂等 Release 交接、development 显式自动部署、不可变 Release、Runtime Target、Runtime Inventory 安全查询、基础审计和 MongoDB migration
-- 已接受、尚未实现：漏洞误报豁免、持续重扫、Deployment Policy、其他 KMS 客户矩阵，以及 Evidence Worker 的真实超大镜像/生产出口系统验收；Git 自建 CA/代理兼容矩阵、首个受保护 Agent Tag 的公开发行证据、多主机升级/回滚系统验收，以及 enrollment/证书轮换/Terminal 的真实远程与浏览器安全验收
+- 正式产品切片：本地 bootstrap/login/session、一次性用户邀请、Owner 管理员会话治理、Project 成员绑定与即时撤权、可信代理来源识别和来源/实例共享入口限流、内置 RBAC、只读内置 Template 与 Application 快照、Organization Managed Host、一次性 Agent enrollment 与证书身份、Project、Project Application、Source Repository/Repository Credential 与只读连接探测、Build Configuration、三类 Build 触发入口、状态机、取消/重试与 Mongo queue/lease/fence、隔离 Build Worker 的固定 Git HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建与认证 Registry push、OwnDock Build 或外部 CI digest 双来源 Artifact、Registry manifest 完整性探测和生产者信任标记、Artifact Evidence 有界索引/授权下载 API、OCI Referrers 原生/Tag Schema 探测、Evidence Job queue/lease/generation fence、CycloneDX 1.6 SBOM、SLSA Provenance v1、固定 Trivy 漏洞扫描及原子数据库快照、精确漏洞 ID 的 Project/Artifact 限时豁免、Project/Environment 版本化 Deployment Policy 与不可变准入快照、幂等 Release 交接、development 显式自动部署、不可变 Release、Runtime Target、Runtime Inventory 安全查询、基础审计和 MongoDB migration
+- 已接受、尚未实现：持续重扫调度、其他 KMS 客户矩阵，以及 Evidence Worker 的真实超大镜像/生产出口系统验收；Git 自建 CA/代理兼容矩阵、首个受保护 Agent Tag 的公开发行证据、多主机升级/回滚系统验收，以及 enrollment/证书轮换/Terminal 的真实远程与浏览器安全验收
 - 默认接口：健康和版本接口；产品切片需要显式启用 MongoDB 与 `product.enabled`
 - 工程样例：Application、Environment、Deployment JSON API，默认关闭；概念已进入产品模型，但当前实现不属于正式产品契约
 
@@ -66,9 +66,9 @@ export OWNDOCK_BOOTSTRAP_TOKEN='use-a-long-random-bootstrap-token'
 make run
 ```
 
-随后调用 `POST /api/v1/auth/bootstrap` 创建首个 Organization 和 Owner。Bootstrap、登录、资源写入和未来部署流程见 [docs/flows.md](docs/flows.md)，Agent 首次安全接入见 [docs/agent-enrollment.md](docs/agent-enrollment.md)，完整请求契约见 [api/openapi.yaml](api/openapi.yaml)。
+随后调用 `POST /api/v1/auth/bootstrap` 创建首个 Organization 和 Owner。Bootstrap、登录、资源写入和部署流程见 [docs/flows.md](docs/flows.md)，部署前的镜像证据门禁见 [docs/deployment-policies.md](docs/deployment-policies.md)，Agent 首次安全接入见 [docs/agent-enrollment.md](docs/agent-enrollment.md)，完整请求契约见 [api/openapi.yaml](api/openapi.yaml)。
 
-`make build` 会同时生成 `bin/owndock`、`bin/owndock-agent`、`bin/owndock-build-worker`、`bin/owndock-evidence-worker` 和一次性 `bin/owndock-vulnerability-db-updater`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)，正式发布身份与客户离线验签见 [docs/release-security.md](docs/release-security.md)；Build Worker 见 [docs/build-worker.md](docs/build-worker.md)，Evidence Worker 见 [docs/artifact-evidence.md](docs/artifact-evidence.md)，漏洞库更新与恢复见 [docs/vulnerability-database.md](docs/vulnerability-database.md)。提交的配置文件只是非敏感模板，不能直接用于生产。
+`make build` 会同时生成 `bin/owndock`、`bin/owndock-agent`、`bin/owndock-build-worker`、`bin/owndock-evidence-worker` 和一次性 `bin/owndock-vulnerability-db-updater`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)，正式发布身份与客户离线验签见 [docs/release-security.md](docs/release-security.md)；Build Worker 见 [docs/build-worker.md](docs/build-worker.md)，Evidence Worker 见 [docs/artifact-evidence.md](docs/artifact-evidence.md)，漏洞库更新与恢复见 [docs/vulnerability-database.md](docs/vulnerability-database.md)，限时风险接受见 [docs/vulnerability-waivers.md](docs/vulnerability-waivers.md)。提交的配置文件只是非敏感模板，不能直接用于生产。
 
 如需启用链路追踪，将 `observability.tracing.enabled` 设为 `true`，并将 `endpoint` 配置为 OTLP/HTTP Collector 的 `host:port`（通常为 `localhost:4318`）。`sample_ratio` 取值为 `0` 到 `1`，默认配置为 `1`；设为 `0` 时不采样新的根 Span，无需追踪时应直接关闭 tracing。生产环境建议由应用发送至 OpenTelemetry Collector，再由 Collector 转发到后端。
 

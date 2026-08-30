@@ -4,9 +4,11 @@ Artifact Evidence 是“这个镜像有哪些可验证材料”的安全目录�
 
 当前后端已实现 Evidence 领域模型、MongoDB 索引、元数据查询与授权下载 API，以及内部 Evidence Job 的原子领取、租约续期、generation fence 和事务发布协议。Build 发布 Artifact 时会在同一 MongoDB 事务中幂等创建 CycloneDX 1.6 SBOM、SLSA Provenance v1 和 Trivy 漏洞扫描 Job；Provenance Recipe 同时冻结精确 Commit、无秘密 Build Configuration 快照、Builder/BuildKit/frontend 身份、执行时间和最终 output digest，Evidence Worker 不回查可变配置。
 
+外部 CI 镜像使用同一个 Artifact/Evidence 模型，但信任边界不同：登记精确 digest 后，OwnDock 原子排入 SBOM、漏洞扫描以及当前 Project 适用的已有签名验证 Job；不会生成 OwnDock Build Provenance，也不会调用 OwnDock Signing Profile 代替第三方生产者签名。Artifact 的 `producer` 保持调用方声明，`producer_verification=declared`。OwnDock 后续生成的 SBOM 或漏洞报告只能证明“平台检查过这个 digest”，不能证明“平台构建了这个镜像”。登记流程与 API 见 [Artifact 与 Release 交接](artifacts.md)。
+
 独立 `owndock-evidence-worker` 已完成 MongoDB 队列、固定 Syft 启动验版、标准 in-toto Statement v1/SLSA Provenance v1 生成、ORAS Publisher、健康端点和有界指标装配。固定 Syft 1.50.0 镜像已在非 root、只读、无 capabilities 和资源上限下读取真实 htpasswd Registry；SBOM 与 Provenance 随后由 ORAS 认证发布，并可通过 Referrer 查询和授权 API 下载。错误密码失败关闭，Registry 密码只在单次拉取、发布或下载操作中存在并清零；证据、OCI manifest/blob、错误和 Registry 日志均通过秘密哨兵检查。
 
-当前 Provenance 的 `verification_status` 是 `unverified`：它已经按 OCI digest 校验存储完整性和来源字段，但 Provenance 自身尚未形成受信任 Builder 的 DSSE 签名声明。镜像签名验证会单独写入不可变的 `EvidenceVerification` 摘要，不能用它反向把所有 SBOM 或 Provenance 自动标记为可信。生产出口策略、真实超大镜像、漏洞报告与部署阻断仍待后续任务，因此不能据此宣称镜像已完成完整供应链验证，也不能宣称 SLSA Build L2/L3。
+当前 Provenance 的 `verification_status` 是 `unverified`：它已经按 OCI digest 校验存储完整性和来源字段，但 Provenance 自身尚未形成受信任 Builder 的 DSSE 签名声明。镜像签名验证会单独写入不可变的 `EvidenceVerification` 摘要，不能用它反向把所有 SBOM 或 Provenance 自动标记为可信。漏洞报告、原子数据库更新、限时豁免和版本化 Deployment Policy 已实现，但真实超大镜像和客户生产环境矩阵仍待后续任务，因此不能据此宣称镜像已完成完整供应链验证，也不能宣称 SLSA Build L2/L3。
 
 ## 签名信任策略
 
@@ -259,6 +261,8 @@ Evidence Worker 默认关闭。启用时配置 `runtime.evidence_worker.enabled:
 
 Registry Credential 仍只在 MongoDB 保存 `secret://production` 这样的引用。对应的执行环境变量是 `OWNDOCK_REGISTRY_PRODUCTION_PASSWORD`；别名中的连字符转换为下划线。Evidence Worker 用它完成私有镜像拉取和证据发布，Server 用它完成已授权的证据下载；两种进程都只在单次 Registry 操作中解析密码并随后清零，不会写入 Job、Evidence、响应或错误消息。部署时必须把同一别名的秘密安全注入需要下载能力的 Server 实例，不能通过 API 配置或回读密码。
 
+自建 Registry 使用企业 CA 时，通过 `product.registry_ca_cert_file` 给 Server、Build Worker 和 Evidence Worker 挂载同一份只读 PEM。Worker 启动时固定经过校验的内容，再用私有 `0600` 快照向 Syft、Trivy 和 Cosign 提供 `SSL_CERT_FILE`；不会关闭 TLS 或主机名校验。完整文件规则及 BuildKit/Docker daemon 的独立信任边界见 [Registry 连接与认证](registry-connections.md#自建-registry-的私有-ca)。
+
 ```bash
 make docker-evidence-worker VERSION=dev
 
@@ -277,7 +281,7 @@ docker compose -f deploy/evidence-worker.compose.yaml up -d
 
 ## 后续阶段
 
-签名公钥与 Vault Transit KMS 闭环已落地，keyless 私有根真实 bundle 门禁已接入专用 CI 并等待首次远程结果；后续供应链阶段继续补齐其他 KMS provider 与客户网络矩阵、漏洞扫描、持续重扫和版本化 Deployment Policy。生产环境一旦启用强制策略，证据缺失、过期或无法验证必须失败关闭。
+签名公钥与 Vault Transit KMS 闭环、固定 Trivy 漏洞扫描、原子数据库更新、限时漏洞豁免和版本化 Deployment Policy 已经落地；策略会在创建 Deployment 前读取并完整校验证据正文，把实际策略版本、证据 digest、签名验证、漏洞观察值和命中豁免冻结为不可变快照。keyless 私有根真实 bundle 门禁已接入专用 CI 并等待首次远程结果；后续供应链阶段继续补齐其他 KMS provider、客户网络矩阵和持续重扫。生产环境一旦启用强制策略，证据缺失、过期或无法验证必须失败关闭。详见 [Deployment Policy](deployment-policies.md)。
 
 ## 漏洞扫描与重扫
 
@@ -317,4 +321,4 @@ GET /api/v1/projects/{project_id}/artifacts/{artifact_id}/vulnerability-observat
 Authorization: Bearer <session-token>
 ```
 
-Developer、Maintainer 和 Owner 可以手动重扫；同一幂等键只代表同一次尝试，需要新扫描时必须换新键。Viewer 可读摘要和下载报告，不能发起扫描。`stale=true` 表示已达到配置的扫描年龄上限，或漏洞库已达到它声明的下次更新时间；这不等于“没有漏洞”。社区核心支持构建后自动扫描和手动重扫；持续定时重扫、集中风险看板和通知属于后续商业治理能力。误报豁免仍未对外开放；后续接入时必须精确限定 CVE ID、Project/Artifact 范围、理由、批准人和到期时间，不接受永久或全局“忽略全部”。
+Developer、Maintainer 和 Owner 可以手动重扫；同一幂等键只代表同一次尝试，需要新扫描时必须换新键。Viewer 可读摘要和下载报告，不能发起扫描。`stale=true` 表示已达到配置的扫描年龄上限，或漏洞库已达到它声明的下次更新时间；这不等于“没有漏洞”。社区核心支持构建后自动扫描、手动重扫和 Project 级基础豁免；持续定时重扫、集中风险看板和通知属于后续商业治理能力。误报豁免必须精确限定单个漏洞 ID、Project/Artifact 范围、理由、批准人和到期时间，不接受永久或全局“忽略全部”，详见[漏洞豁免](vulnerability-waivers.md)。

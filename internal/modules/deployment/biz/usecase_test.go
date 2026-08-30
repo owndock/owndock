@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,6 +32,33 @@ func (p *referenceProbe) ValidateAutomatic(context.Context, string, string, stri
 
 type auditProbe struct{ events []sharedaudit.Event }
 
+type allowAdmission struct{}
+
+func (allowAdmission) EvaluateAdmission(context.Context,
+	biz.AdmissionRequest) (biz.AdmissionSnapshot, error) {
+	return (biz.AdmissionSnapshot{EvaluatedAt: time.Unix(100, 0), EnvironmentStage: "development",
+		Policies: []biz.AdmissionPolicySnapshot{}, Evidence: []biz.AdmissionEvidenceSnapshot{},
+		Verifications: []biz.AdmissionVerificationSnapshot{}, Waivers: []biz.AdmissionWaiverSnapshot{},
+		Violations: []biz.AdmissionViolation{}, Decision: biz.AdmissionNotConfigured}).Seal()
+}
+
+type changingAdmission struct{ calls int }
+
+func (e *changingAdmission) EvaluateAdmission(context.Context,
+	biz.AdmissionRequest) (biz.AdmissionSnapshot, error) {
+	e.calls++
+	return (biz.AdmissionSnapshot{EvaluatedAt: time.Unix(int64(100+e.calls), 0), EnvironmentStage: "production",
+		ArtifactID: "artifact-1", SubjectDigest: "sha256:" + strings.Repeat("a", 64),
+		Policies: []biz.AdmissionPolicySnapshot{{ID: "policy-1", Version: uint64(e.calls), Scope: "project",
+			Mode: "enforced", Requirements: biz.AdmissionRequirementsSnapshot{RequireSBOM: true,
+				AllowedSignaturePolicyIDs: []string{}}}},
+		Evidence: []biz.AdmissionEvidenceSnapshot{{ID: "evidence-1", Kind: "sbom",
+			DescriptorDigest: "sha256:" + strings.Repeat("b", 64),
+			ContentDigest:    "sha256:" + strings.Repeat("c", 64)}},
+		Verifications: []biz.AdmissionVerificationSnapshot{}, Waivers: []biz.AdmissionWaiverSnapshot{},
+		Violations: []biz.AdmissionViolation{}, Decision: biz.AdmissionAdmitted}).Seal()
+}
+
 func (p *auditProbe) Record(_ context.Context, event sharedaudit.Event) error {
 	p.events = append(p.events, event)
 	return nil
@@ -47,7 +75,8 @@ func TestCreateFormalIsProjectScopedAuditedAndIdempotent(t *testing.T) {
 	}, func() time.Time {
 		return time.Unix(100, 0)
 	}).WithFormalReferences(references).
-		WithFormalSecurity(transaction.Passthrough{}, audits)
+		WithFormalSecurity(transaction.Passthrough{}, audits).
+		WithAdmissionEvaluator(allowAdmission{})
 	principal := security.Principal{
 		UserID: "user-1", OrganizationID: "organization-1", SessionID: "session-1",
 		Role: security.RoleDeveloper,
@@ -83,11 +112,44 @@ func TestCreateFormalIsProjectScopedAuditedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestCreateFormalReplaysFrozenAdmissionBeforeReevaluation(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	evaluator := &changingAdmission{}
+	sequence := 0
+	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+		sequence++
+		return fmt.Sprintf("deployment-%d", sequence), nil
+	}, func() time.Time { return time.Unix(100, 0) }).
+		WithFormalReferences(&referenceProbe{}).
+		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
+		WithAdmissionEvaluator(evaluator)
+	principal := security.Principal{UserID: "developer", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleDeveloper}
+	first, err := useCase.CreateFormal(t.Context(), principal, "project-1", "release-1",
+		"application-1", "environment-1", "target-1", "same-key", "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := useCase.CreateFormal(t.Context(), principal, "project-1", "release-1",
+		"application-1", "environment-1", "target-1", "same-key", "request-2")
+	if err != nil || replayed.ID != first.ID || replayed.Admission.EvaluationDigest != first.Admission.EvaluationDigest ||
+		evaluator.calls != 1 || replayed.Admission.Policies[0].Version != 1 {
+		t.Fatalf("replay = %+v, %v calls=%d", replayed, err, evaluator.calls)
+	}
+	second, err := useCase.CreateFormal(t.Context(), principal, "project-1", "release-1",
+		"application-1", "environment-1", "target-1", "new-key", "request-3")
+	if err != nil || evaluator.calls != 2 || second.Admission.Policies[0].Version != 2 ||
+		second.Admission.EvaluationDigest == first.Admission.EvaluationDigest {
+		t.Fatalf("future deployment = %+v, %v calls=%d", second, err, evaluator.calls)
+	}
+}
+
 func TestCreateFormalRequiresDeploymentPermission(t *testing.T) {
 	useCase := biz.NewUseCase(data.NewMemoryRepository(), nil, nil, func() (string, error) {
 		return "id", nil
 	}, time.Now).WithFormalReferences(&referenceProbe{}).
-		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{})
+		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
+		WithAdmissionEvaluator(allowAdmission{})
 	viewer := security.Principal{
 		UserID: "user", OrganizationID: "organization", SessionID: "session", Role: security.RoleViewer,
 	}
@@ -108,7 +170,8 @@ func TestCreateAutomaticIsDevelopmentOnlyAuditedAndIdempotent(t *testing.T) {
 		return fmt.Sprintf("automatic-%d", sequence), nil
 	}, func() time.Time { return time.Unix(100, 0) }).
 		WithAutomaticReferences(references).
-		WithFormalSecurity(transaction.Passthrough{}, audits)
+		WithFormalSecurity(transaction.Passthrough{}, audits).
+		WithAdmissionEvaluator(allowAdmission{})
 	input := biz.AutomaticDeploymentInput{
 		OrganizationID: "organization-1", ProjectID: "project-1",
 		ReleaseID: "release-1", ApplicationID: "application-1",
@@ -149,7 +212,8 @@ func TestCancelFormalPersistsAndAuditsCommand(t *testing.T) {
 		return fmt.Sprintf("id-%d", sequence), nil
 	}, func() time.Time { return time.Unix(100, 0) }).
 		WithFormalReferences(&referenceProbe{}).
-		WithFormalSecurity(transaction.Passthrough{}, audits)
+		WithFormalSecurity(transaction.Passthrough{}, audits).
+		WithAdmissionEvaluator(allowAdmission{})
 	principal := security.Principal{
 		UserID: "developer", OrganizationID: "organization", SessionID: "session",
 		Role: security.RoleDeveloper,
@@ -184,7 +248,8 @@ func TestRetryAndRollbackCreateAuditedLinkedOperations(t *testing.T) {
 		return fmt.Sprintf("id-%d", sequence), nil
 	}, func() time.Time { return now }).
 		WithFormalReferences(references).
-		WithFormalSecurity(transaction.Passthrough{}, audits)
+		WithFormalSecurity(transaction.Passthrough{}, audits).
+		WithAdmissionEvaluator(allowAdmission{})
 	principal := security.Principal{
 		UserID: "maintainer", OrganizationID: "organization", SessionID: "session",
 		Role: security.RoleMaintainer,
@@ -269,7 +334,8 @@ func TestRollbackRequiresMaintainerAndPreviouslySuccessfulRelease(t *testing.T) 
 		return "new-id", nil
 	}, func() time.Time { return time.Unix(100, 0) }).
 		WithFormalReferences(&referenceProbe{}).
-		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{})
+		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
+		WithAdmissionEvaluator(allowAdmission{})
 	source, err := biz.NewFormal(
 		"source", "project", "release-new", "app", "env", "target", "source-key", time.Unix(1, 0),
 	)

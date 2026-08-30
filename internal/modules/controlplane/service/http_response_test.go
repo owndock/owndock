@@ -5,14 +5,23 @@ import (
 	"testing"
 
 	"github.com/owndock/owndock/internal/modules/controlplane/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
 func TestSecretBackedResourcesExposeConfigurationStateWithoutReferences(t *testing.T) {
 	registry := registryCredentialResponseFromDomain(biz.RegistryCredential{
-		PasswordRef: "secret://registry-production",
+		AuthenticationMode: registryauth.ModeBasic,
+		PasswordRef:        "secret://registry-production",
 	})
 	if !registry.PasswordConfigured {
 		t.Fatal("registry password was not reported as configured")
+	}
+	anonymous := registryCredentialResponseFromDomain(biz.RegistryCredential{
+		AuthenticationMode: registryauth.ModeAnonymous,
+	})
+	if anonymous.PasswordConfigured || anonymous.Username != "" ||
+		anonymous.AuthenticationMode != registryauth.ModeAnonymous {
+		t.Fatalf("anonymous Registry response = %+v", anonymous)
 	}
 	target := runtimeTargetResponseFromDomain(biz.RuntimeTarget{
 		CredentialRef: "secret://docker-production",

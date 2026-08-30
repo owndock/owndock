@@ -2,9 +2,7 @@ package data
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 
@@ -12,9 +10,9 @@ import (
 	"github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
-	"oras.land/oras-go/v2/registry/remote/retry"
 )
 
 const maximumEvidenceManifestBytes = int64(1024 * 1024)
@@ -23,6 +21,7 @@ type OCIContentReaderOptions struct {
 	Credentials      biz.RegistryCredentialProvider
 	AllowPlainHTTP   bool
 	MaxDocumentBytes int64
+	RegistryCABundle []byte
 }
 
 // OCIContentReader returns only the single evidence layer referenced by the
@@ -40,23 +39,15 @@ func NewOCIContentReader(options OCIContentReaderOptions) (*OCIContentReader, er
 	if options.MaxDocumentBytes < 1024 || options.MaxDocumentBytes > 64*1024*1024 {
 		return nil, biz.ErrInvalidEvidence
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 	reader := &OCIContentReader{
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
 		maxDocumentBytes: options.MaxDocumentBytes,
 	}
-	reader.client = &http.Client{
-		Transport: retry.NewTransport(transport),
-		CheckRedirect: func(request *http.Request, via []*http.Request) error {
-			if len(via) >= 3 || request.URL.Scheme != "https" &&
-				!(reader.allowPlainHTTP && loopbackRegistry(request.URL.Host)) {
-				return errors.New("unsafe Registry redirect")
-			}
-			return nil
-		},
+	client, err := newRegistryHTTPClient(reader.allowPlainHTTP, options.RegistryCABundle)
+	if err != nil {
+		return nil, biz.ErrInvalidEvidence
 	}
+	reader.client = client
 	return reader, nil
 }
 
@@ -78,12 +69,11 @@ func (r *OCIContentReader) ReadEvidence(ctx context.Context,
 		return biz.EvidenceContent{}, biz.ErrInvalidEvidence
 	}
 	repository.PlainHTTP = r.allowPlainHTTP
-	credential := biz.RegistryCredential{}
+	credential := biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}
 	if r.credentials != nil {
 		credential, err = r.credentials.ResolveRegistryCredential(ctx, subject.ProjectID,
 			subject.RegistryCredentialID, registry)
-		if err != nil || credential.Username == "" || len(credential.Username) > 255 ||
-			len(credential.Password) == 0 || len(credential.Password) > 64*1024 {
+		if err != nil || !validCosignCredential(credential) {
 			clear(credential.Password)
 			return biz.EvidenceContent{}, biz.ErrRegistryAuthentication
 		}

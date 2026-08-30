@@ -8,7 +8,7 @@ OwnDock 把“能登录”和“能进入某个 Project”分成两件事。Owne
 |---|---|
 | Owner | 隐式访问全部 Project、创建 Project、管理任意 Project 成员；不会写入成员表 |
 | Maintainer | 管理当前 Project 成员、凭据、构建设置、运行目标、部署和回滚 |
-| Developer | 查看资源，创建 Application、Release、Build、Deployment，并取消工作流 |
+| Developer | 查看资源，创建 Application、Release、Build、Deployment，登记外部 CI Artifact，并取消工作流 |
 | Viewer | 只读 Project 资源 |
 
 Project 成员只能选择 `maintainer`、`developer` 或 `viewer`。Organization Owner 是全局恢复入口，不能被写成普通 Project 成员。Maintainer 也不能修改或删除自己的成员关系，避免误操作立即锁死当前管理入口。

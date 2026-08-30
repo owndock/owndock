@@ -36,6 +36,7 @@ import (
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/migration"
 	platformmongo "github.com/owndock/owndock/internal/platform/mongo"
+	"github.com/owndock/owndock/internal/shared/registryauth"
 	"github.com/testcontainers/testcontainers-go"
 	testmongo "github.com/testcontainers/testcontainers-go/modules/mongodb"
 	"golang.org/x/crypto/bcrypt"
@@ -540,7 +541,8 @@ func integrationBuildRequest(workspace, buildID, _ string) biz.BuildExecutionReq
 		},
 		Credential: biz.BuildRegistryCredential{
 			ID: "registry-1", ProjectID: "project-1", Server: "registry:5000",
-			Username: "builder", PasswordRef: "secret://integration",
+			AuthenticationMode: registryauth.ModeBasic,
+			Username:           "builder", PasswordRef: "secret://integration",
 		},
 	}
 }
@@ -717,7 +719,7 @@ func verifyBuildWorkerBinarySIGKILLDuringRealBuild(t *testing.T, root string,
 	}
 	controlPlaneStore := controlplanedata.NewMongoStore(client.Database())
 	registryCredential, err := controlplanebiz.NewRegistryCredential(
-		registryID, projectID, "Process registry", "registry:5000", "builder",
+		registryID, projectID, "Process registry", "registry:5000", registryauth.ModeBasic, "builder",
 		"secret://integration", actorID, now,
 	)
 	if err != nil {
