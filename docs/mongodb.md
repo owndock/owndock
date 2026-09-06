@@ -17,6 +17,7 @@ database:
   mongo:
     enabled: true
     uri_env: OWNDOCK_MONGODB_URI
+    uri_file: ""
     database: owndock
     connect_timeout: 10s
     operation_timeout: 5s
@@ -25,7 +26,9 @@ database:
     max_pool_size: 100
 ```
 
-连接串只从 `uri_env` 指定的环境变量读取，不写入配置模板、日志或版本库。生产环境需要认证和 TLS，并使用经过容量与故障转移验证的 Replica Set。
+连接串从 `uri_env` 指定的环境变量，或从 `uri_file` 指定的绝对路径二选一读取；同时配置或都不配置会拒绝启动。文件必须是最多 8 KiB 的普通文件，不能是符号链接或允许 group/world 写入，且只能包含一个非空行。连接串不写入配置模板、日志或版本库。Compose 基线使用文件型 Secret，生产环境需要认证和 TLS，并使用经过容量与故障转移验证的 Replica Set。
+
+单节点安装、备份和恢复边界见[社区版单节点安装与恢复](community-installation.md)。
 
 ## 生命周期
 

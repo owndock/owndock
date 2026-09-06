@@ -238,6 +238,20 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	}
 }
 
+func TestLoadCommunityDeploymentConfig(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "deploy", "community.config.yaml")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.Product.Enabled || !cfg.Database.Mongo.Enabled ||
+		cfg.Database.Mongo.URIEnv != "" || cfg.Database.Mongo.URIFile != "/run/secrets/owndock-mongodb-uri" ||
+		cfg.Security.BootstrapTokenEnv != "" || cfg.Security.BootstrapTokenFile != "/run/secrets/owndock-bootstrap-token" ||
+		!cfg.Runtime.DeploymentWorker.Enabled || !cfg.Runtime.InventoryWorker.Enabled {
+		t.Fatalf("community deployment config = %+v", cfg)
+	}
+}
+
 func TestAgentPKIValidationAndMaterialLoading(t *testing.T) {
 	pki := AgentPKI{
 		Enabled:          true,
@@ -757,6 +771,25 @@ func TestBootstrapTokenReadsOnlyNamedEnvironmentVariable(t *testing.T) {
 	}
 }
 
+func TestBootstrapTokenReadsRestrictedSecretFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bootstrap-token")
+	if err := os.WriteFile(path, []byte("bootstrap-secret\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	securityConfig := Security{BootstrapTokenFile: path, SessionTTL: "1h"}
+	if err := securityConfig.Validate(true); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	token, err := securityConfig.BootstrapToken()
+	if err != nil || token != "bootstrap-secret" {
+		t.Fatalf("BootstrapToken() = %q, %v", token, err)
+	}
+	securityConfig.BootstrapTokenEnv = "TEST_BOOTSTRAP_TOKEN"
+	if err := securityConfig.Validate(true); err == nil {
+		t.Fatal("environment and file bootstrap sources were accepted together")
+	}
+}
+
 func TestMongoValidation(t *testing.T) {
 	valid := Mongo{
 		Enabled:          true,
@@ -793,5 +826,64 @@ func TestMongoURIReadsOnlyNamedEnvironmentVariable(t *testing.T) {
 	}
 	if uri != "mongodb://localhost:27017" {
 		t.Fatalf("URI() = %q", uri)
+	}
+}
+
+func TestMongoURIReadsRestrictedSecretFile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "mongodb-uri")
+	if err := os.WriteFile(path, []byte("mongodb://mongo:27017/?replicaSet=rs0\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	mongoConfig := Mongo{Enabled: true, URIFile: path, Database: "test", MaxPoolSize: 10}
+	if err := mongoConfig.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	uri, err := mongoConfig.URI()
+	if err != nil || uri != "mongodb://mongo:27017/?replicaSet=rs0" {
+		t.Fatalf("URI() = %q, %v", uri, err)
+	}
+
+	mongoConfig.URIEnv = "TEST_MONGODB_URI"
+	if err := mongoConfig.Validate(); err == nil {
+		t.Fatal("environment and file MongoDB URI sources were accepted together")
+	}
+}
+
+func TestSecretFileRejectsUnsafeInputs(t *testing.T) {
+	directory := t.TempDir()
+	writable := filepath.Join(directory, "writable")
+	if err := os.WriteFile(writable, []byte("secret"), 0o622); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(writable, 0o622); err != nil {
+		t.Fatal(err)
+	}
+	multiline := filepath.Join(directory, "multiline")
+	if err := os.WriteFile(multiline, []byte("first\nsecond\n"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	oversized := filepath.Join(directory, "oversized")
+	if err := os.WriteFile(oversized, make([]byte, maximumSecretFileBytes+1), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(directory, "symlink")
+	if err := os.Symlink(multiline, symlink); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, path := range map[string]string{
+		"relative":   "relative/secret",
+		"whitespace": " " + multiline,
+		"writable":   writable,
+		"multiline":  multiline,
+		"oversized":  oversized,
+		"symlink":    symlink,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := readSecretFile(path, "test secret"); err == nil {
+				t.Fatal("unsafe secret file was accepted")
+			}
+		})
 	}
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/url"
 	"os"
@@ -98,6 +99,7 @@ const (
 	defaultAgentMaxFrameBytes    = 64 * 1024
 	defaultAgentOutboundBuffer   = 32
 	defaultAgentCompletedCache   = 256
+	maximumSecretFileBytes       = 8 * 1024
 )
 
 // Config is the process configuration root. Keep transport and infrastructure
@@ -263,6 +265,7 @@ type InventoryWorker struct {
 
 type Security struct {
 	BootstrapTokenEnv  string   `json:"bootstrap_token_env"`
+	BootstrapTokenFile string   `json:"bootstrap_token_file"`
 	SessionTTL         string   `json:"session_ttl"`
 	MaxActiveSessions  int      `json:"max_active_sessions"`
 	UserInvitationTTL  string   `json:"user_invitation_ttl"`
@@ -290,6 +293,7 @@ type Database struct {
 type Mongo struct {
 	Enabled          bool   `json:"enabled"`
 	URIEnv           string `json:"uri_env"`
+	URIFile          string `json:"uri_file"`
 	Database         string `json:"database"`
 	ConnectTimeout   string `json:"connect_timeout"`
 	OperationTimeout string `json:"operation_timeout"`
@@ -1205,8 +1209,13 @@ func (m Mongo) Validate() error {
 	if !m.Enabled {
 		return nil
 	}
-	if strings.TrimSpace(m.URIEnv) == "" {
-		return fmt.Errorf("uri_env is required when enabled")
+	hasEnvironment := strings.TrimSpace(m.URIEnv) != ""
+	hasFile := strings.TrimSpace(m.URIFile) != ""
+	if hasEnvironment == hasFile {
+		return fmt.Errorf("exactly one of uri_env or uri_file is required when enabled")
+	}
+	if hasFile && !validSecretFilePath(m.URIFile) {
+		return fmt.Errorf("uri_file must be a trimmed absolute path")
 	}
 	if strings.TrimSpace(m.Database) == "" {
 		return fmt.Errorf("database is required when enabled")
@@ -1230,6 +1239,9 @@ func (m Mongo) Validate() error {
 }
 
 func (m Mongo) URI() (string, error) {
+	if strings.TrimSpace(m.URIFile) != "" {
+		return readSecretFile(m.URIFile, "MongoDB URI")
+	}
 	name := strings.TrimSpace(m.URIEnv)
 	if name == "" {
 		return "", fmt.Errorf("uri_env is required")
@@ -1257,8 +1269,13 @@ func (s Security) Validate(productEnabled bool) error {
 	if !productEnabled {
 		return nil
 	}
-	if strings.TrimSpace(s.BootstrapTokenEnv) == "" {
-		return fmt.Errorf("bootstrap_token_env is required when product is enabled")
+	hasEnvironment := strings.TrimSpace(s.BootstrapTokenEnv) != ""
+	hasFile := strings.TrimSpace(s.BootstrapTokenFile) != ""
+	if hasEnvironment == hasFile {
+		return fmt.Errorf("exactly one of bootstrap_token_env or bootstrap_token_file is required when product is enabled")
+	}
+	if hasFile && !validSecretFilePath(s.BootstrapTokenFile) {
+		return fmt.Errorf("bootstrap_token_file must be a trimmed absolute path")
 	}
 	if _, err := s.SessionTTLDuration(); err != nil {
 		return fmt.Errorf("session_ttl: %w", err)
@@ -1410,6 +1427,9 @@ func (s Security) LoginAttemptWindowDuration() (time.Duration, error) {
 }
 
 func (s Security) BootstrapToken() (string, error) {
+	if strings.TrimSpace(s.BootstrapTokenFile) != "" {
+		return readSecretFile(s.BootstrapTokenFile, "bootstrap token")
+	}
 	name := strings.TrimSpace(s.BootstrapTokenEnv)
 	if name == "" {
 		return "", fmt.Errorf("bootstrap_token_env is required")
@@ -1419,6 +1439,45 @@ func (s Security) BootstrapToken() (string, error) {
 		return "", fmt.Errorf("environment variable %s is required for bootstrap", name)
 	}
 	return strings.TrimSpace(value), nil
+}
+
+func validSecretFilePath(path string) bool {
+	return path != "" && path == strings.TrimSpace(path) && filepath.IsAbs(path)
+}
+
+func readSecretFile(path, description string) (string, error) {
+	if !validSecretFilePath(path) {
+		return "", fmt.Errorf("%s file must be a trimmed absolute path", description)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "", fmt.Errorf("read %s file metadata: %w", description, err)
+	}
+	if !before.Mode().IsRegular() || before.Mode().Perm()&0o022 != 0 ||
+		before.Size() <= 0 || before.Size() > maximumSecretFileBytes {
+		return "", fmt.Errorf("%s file must be regular, not group/world writable, and no larger than %d bytes", description, maximumSecretFileBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open %s file: %w", description, err)
+	}
+	defer func() { _ = file.Close() }()
+	after, err := file.Stat()
+	if err != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return "", fmt.Errorf("%s file changed while opening", description)
+	}
+	contents, err := io.ReadAll(io.LimitReader(file, maximumSecretFileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read %s file: %w", description, err)
+	}
+	if len(contents) > maximumSecretFileBytes {
+		return "", fmt.Errorf("%s file exceeds %d bytes", description, maximumSecretFileBytes)
+	}
+	value := strings.TrimSpace(string(contents))
+	if value == "" || strings.ContainsAny(value, "\x00\r\n") {
+		return "", fmt.Errorf("%s file must contain exactly one non-empty line", description)
+	}
+	return value, nil
 }
 
 func requiredEnvironmentValue(name string) (string, error) {

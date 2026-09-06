@@ -1,0 +1,107 @@
+services:
+  mongodb-keyfile-init:
+    image: mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3
+    restart: "no"
+    user: "0:0"
+    entrypoint:
+      - /bin/sh
+      - -eu
+      - -c
+      - install -o 999 -g 999 -m 0400 /source/keyfile /target/keyfile
+    volumes:
+      - ${OWNDOCK_MONGODB_KEYFILE_PATH:?set the absolute MongoDB keyfile path}:/source/keyfile:ro
+      - mongodb-keyfile:/target
+    network_mode: none
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  mongodb:
+    image: mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3
+    restart: unless-stopped
+    depends_on:
+      mongodb-keyfile-init:
+        condition: service_completed_successfully
+    command:
+      - mongod
+      - --replSet
+      - rs0
+      - --bind_ip_all
+      - --auth
+      - --keyFile
+      - /run/mongodb-keyfile/keyfile
+    environment:
+      MONGO_INITDB_ROOT_USERNAME_FILE: /run/secrets/mongodb-root-username
+      MONGO_INITDB_ROOT_PASSWORD_FILE: /run/secrets/mongodb-root-password
+    volumes:
+      - mongodb-data:/data/db
+      - mongodb-keyfile:/run/mongodb-keyfile:ro
+    secrets:
+      - mongodb-root-username
+      - mongodb-root-password
+      - owndock-mongodb-uri
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+
+  mongodb-init:
+    image: mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3
+    restart: "no"
+    depends_on:
+      - mongodb
+    entrypoint: ["/bin/sh", "/opt/owndock/init-replica-set.sh"]
+    volumes:
+      - ./mongodb/init-replica-set.sh:/opt/owndock/init-replica-set.sh:ro
+    secrets:
+      - mongodb-root-username
+      - mongodb-root-password
+    networks:
+      - data
+    security_opt:
+      - no-new-privileges:true
+
+  server:
+    image: ${OWNDOCK_SERVER_IMAGE:?set a signed image@sha256 digest from CONTAINER_IMAGES.txt}
+    restart: unless-stopped
+    depends_on:
+      mongodb-init:
+        condition: service_completed_successfully
+    command: ["-conf", "/etc/owndock/config.yaml"]
+    ports:
+      - 127.0.0.1:${OWNDOCK_HTTP_PORT:-8000}:8000
+    volumes:
+      - ./community.config.yaml:/etc/owndock/config.yaml:ro
+    secrets:
+      - owndock-bootstrap-token
+      - owndock-mongodb-uri
+    networks:
+      - data
+      - ingress
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  mongodb-data:
+  mongodb-keyfile:
+
+networks:
+  data:
+    internal: true
+  ingress:
+
+secrets:
+  mongodb-root-username:
+    file: ${OWNDOCK_MONGODB_ROOT_USERNAME_PATH:?set the absolute MongoDB root username file path}
+  mongodb-root-password:
+    file: ${OWNDOCK_MONGODB_ROOT_PASSWORD_PATH:?set the absolute MongoDB root password file path}
+  owndock-bootstrap-token:
+    file: ${OWNDOCK_BOOTSTRAP_TOKEN_PATH:?set the absolute OwnDock bootstrap token file path}
+  owndock-mongodb-uri:
+    file: ${OWNDOCK_MONGODB_URI_PATH:?set the absolute OwnDock MongoDB URI file path}

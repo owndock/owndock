@@ -44,7 +44,7 @@ sequenceDiagram
 
 ## 已实现：首次初始化与本地登录
 
-Bootstrap 只用于创建首个 Organization 和 Owner。调用方必须同时提供环境变量配置的 bootstrap token；创建首个用户后，再次 bootstrap 会返回冲突。密码使用 Argon2id 保存，Bearer token 只向客户端返回一次，MongoDB 中仅保存其单向哈希。
+Bootstrap 只用于创建首个 Organization 和 Owner。调用方必须同时提供安装配置从环境变量或受限 Secret 文件读取的 bootstrap token；创建首个用户后，再次 bootstrap 会返回冲突。密码使用 Argon2id 保存，Bearer token 只向客户端返回一次，MongoDB 中仅保存其单向哈希。
 
 ```mermaid
 sequenceDiagram

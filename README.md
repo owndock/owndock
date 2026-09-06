@@ -56,7 +56,7 @@ curl http://127.0.0.1:8000/api/v1/meta/version
 
 如需在本地验证工程样例，可在非生产配置中将 `development.enable_engineering_samples` 显式设为 `true`。这些未认证的样例接口不得暴露到共享或生产网络。
 
-MongoDB 启用时只从 `database.mongo.uri_env` 指定的环境变量读取连接串，默认变量名为 `OWNDOCK_MONGODB_URI`。启动会连接并 Ping，运行期 `/readyz` 会检查主节点可用性，停止时关闭连接池。开发与 CI 使用固定的 MongoDB 8.3.7 单节点 Replica Set，详见 [docs/mongodb.md](docs/mongodb.md)。
+MongoDB 启用时从 `database.mongo.uri_env` 指定的环境变量或 `uri_file` 指定的受限 Secret 文件二选一读取连接串，默认开发变量名为 `OWNDOCK_MONGODB_URI`。启动会连接并 Ping，运行期 `/readyz` 会检查主节点可用性，停止时关闭连接池。开发与 CI 使用固定的 MongoDB 8.3.7 单节点 Replica Set，详见 [docs/mongodb.md](docs/mongodb.md)。
 
 本地启用正式产品切片时，将 `database.mongo.enabled` 和 `product.enabled` 设为 `true`，并通过环境变量提供 MongoDB URI 与一次性 bootstrap token：
 
@@ -89,7 +89,7 @@ internal/server/     HTTP/gRPC transport 装配
 internal/shared/     Server 与 Agent 的仓内共享纯 Go 契约
 ```
 
-文档入口见 [docs/README.md](docs/README.md)，本地用户接入见 [docs/users-and-invitations.md](docs/users-and-invitations.md)，Project 授权见 [docs/project-members.md](docs/project-members.md)，第一次从 Git 部署见 [docs/git-to-deploy-quickstart.md](docs/git-to-deploy-quickstart.md)，产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，Git 仓库连接见 [docs/source-repositories.md](docs/source-repositories.md)，构建配方见 [docs/build-configurations.md](docs/build-configurations.md)，手动构建见 [docs/builds.md](docs/builds.md)，自动部署见 [docs/automatic-deployments.md](docs/automatic-deployments.md)，Docker 资源清单见 [docs/runtime-inventory.md](docs/runtime-inventory.md)，核心时序见 [docs/flows.md](docs/flows.md)，发布候选门禁见 [docs/release-readiness.md](docs/release-readiness.md)，发布前契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、OpenAPI 校验、静态检查和构建验证；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make test-runtime-integration` 针对本机 Docker Engine 验证固定 digest 的容器切换；`make test-release-candidate` 组合正式 Tag 前可重复执行的仓库内门禁；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
+文档入口见 [docs/README.md](docs/README.md)，单节点安装与恢复见 [docs/community-installation.md](docs/community-installation.md)，本地用户接入见 [docs/users-and-invitations.md](docs/users-and-invitations.md)，Project 授权见 [docs/project-members.md](docs/project-members.md)，第一次从 Git 部署见 [docs/git-to-deploy-quickstart.md](docs/git-to-deploy-quickstart.md)，产品定义见 [docs/product.md](docs/product.md)，架构约束见 [docs/architecture.md](docs/architecture.md)，Git 仓库连接见 [docs/source-repositories.md](docs/source-repositories.md)，构建配方见 [docs/build-configurations.md](docs/build-configurations.md)，手动构建见 [docs/builds.md](docs/builds.md)，自动部署见 [docs/automatic-deployments.md](docs/automatic-deployments.md)，Docker 资源清单见 [docs/runtime-inventory.md](docs/runtime-inventory.md)，核心时序见 [docs/flows.md](docs/flows.md)，发布候选门禁见 [docs/release-readiness.md](docs/release-readiness.md)，发布前契约见 [api/openapi.yaml](api/openapi.yaml)。其中标记为工程样例的 operation 不构成稳定产品承诺。`make check` 会执行格式、依赖完整性、架构边界、单元/契约测试、GitHub Actions 静态校验、OpenAPI 校验、静态检查和构建验证；`make test-community-deployment` 校验单节点 Secret 和 Compose 配置；`make test-integration` 使用 Docker 验证固定 MongoDB Replica Set；`make test-runtime-integration` 针对本机 Docker Engine 验证固定 digest 的容器切换；`make test-release-candidate` 组合正式 Tag 前可重复执行的仓库内门禁；`make vuln` 使用固定版本的 Govulncheck 检查可达漏洞。漏洞报告方式见 [SECURITY.md](SECURITY.md)。
 
 入口限流与反向代理信任配置见 [docs/ingress-protection.md](docs/ingress-protection.md)。
 

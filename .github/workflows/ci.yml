@@ -30,6 +30,7 @@ jobs:
       - run: make test-agent-control-process
       - run: make test-agent-rotation-process
       - run: make test-agent-dual-process
+      - run: make test-community-deployment
       - name: Build Agent release packages
         run: |
           make package-agent VERSION=0.0.0-ci AGENT_GOARCH=amd64

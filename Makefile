@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-terminal-security test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker run-vulnerability-db-updater
+.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-terminal-security test-community-deployment test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -6,6 +6,7 @@ BUILD_TIME ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 GOVULNCHECK_VERSION := v1.6.0
 OASDIFF_VERSION := v1.25.0
+ACTIONLINT_VERSION := v1.7.12
 AGENT_GOOS ?= linux
 AGENT_GOARCH ?= amd64
 ALLOW_DIRTY_RELEASE ?= 0
@@ -28,6 +29,9 @@ vet:
 
 test:
 	go test ./...
+
+workflow-validate:
+	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) .github/workflows/*.yml
 
 test-integration:
 	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test ./internal/platform/mongo -run TestMongoReplicaSetIntegration -count=1 -timeout=5m
@@ -115,7 +119,20 @@ test-terminal-security:
 # test-release-candidate is the repeatable repository-local gate for an
 # immutable release tag. Customer-equivalent remote hosts, browser E2E and
 # external KMS/Registry matrices remain explicit system acceptance gates.
-test-release-candidate: check
+test-community-deployment:
+	go test ./deploy -count=1
+	sh -n deploy/prepare-community-secrets.sh deploy/mongodb/init-replica-set.sh
+	@command -v docker >/dev/null 2>&1 || (echo "docker CLI is required to validate the community Compose file" >&2; exit 2)
+	@docker compose version >/dev/null 2>&1 || (echo "docker compose is required to validate the community Compose file" >&2; exit 2)
+	@OWNDOCK_SERVER_IMAGE=ghcr.io/owndock/owndock@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+		OWNDOCK_MONGODB_KEYFILE_PATH=/dev/null \
+		OWNDOCK_MONGODB_ROOT_USERNAME_PATH=/dev/null \
+		OWNDOCK_MONGODB_ROOT_PASSWORD_PATH=/dev/null \
+		OWNDOCK_BOOTSTRAP_TOKEN_PATH=/dev/null \
+		OWNDOCK_MONGODB_URI_PATH=/dev/null \
+		docker compose -f deploy/community.compose.yaml config --quiet
+
+test-release-candidate: check test-community-deployment
 	go test -race ./... -count=1
 	$(MAKE) test-integration
 	$(MAKE) test-runtime-integration
@@ -240,7 +257,7 @@ api-breaking:
 	@test -n "$(BASE_SPEC)" || (echo "BASE_SPEC is required, for example main:api/openapi.yaml" && exit 2)
 	go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) breaking --allow-external-refs=false --fail-on ERR "$(BASE_SPEC)" api/openapi.yaml
 
-check: fmt-check mod-verify vet test api-validate build
+check: fmt-check mod-verify vet test workflow-validate api-validate build
 
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION) ./...

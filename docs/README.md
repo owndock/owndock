@@ -42,6 +42,7 @@
 | 终端页面、状态与客户操作说明 | [容器与主机终端用户旅程](terminal-user-journey.md) |
 | 终端安全评审与发布门禁 | [终端威胁模型、安全指标与验收](terminal-security-acceptance.md) |
 | 部署和运维人员 | [产品 API 入口保护](ingress-protection.md)、[MongoDB 基线](mongodb.md)、[Deployment Worker](worker.md)、[Docker Runtime Inventory](runtime-inventory.md)、[Inventory 验收手册](runtime-inventory-acceptance.md) |
+| 单节点安装和恢复 | [社区版单节点安装、备份与恢复](community-installation.md) |
 | Agent 安装与安全评审 | [Agent 安装、升级与回滚](agent-installation.md)、[Agent 运行与配置](agent.md)、[Agent 安全接入](agent-enrollment.md) |
 | Agent 发布者与下载验签 | [Agent 正式发布与制品验签](release-security.md) |
 | Agent/Server 升级与协议兼容 | [Agent 与 Server 版本兼容策略](agent-compatibility.md) |

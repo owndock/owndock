@@ -71,6 +71,18 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: make package-agent-release VERSION="${VERSION}" COMMIT="${GITHUB_SHA}"
+      - name: Build deterministic community deployment bundle
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar HEAD \
+            deploy/community.compose.yaml \
+            deploy/community.config.yaml \
+            deploy/mongodb/init-replica-set.sh \
+            deploy/prepare-community-secrets.sh \
+            | gzip -n > "dist/owndock-community_${VERSION}.tar.gz"
       - name: Install fixed Cosign release
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
@@ -257,6 +269,19 @@ jobs:
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --offline
+          cd dist
+          sha256sum \
+            "owndock-community_${{ needs.validate.outputs.version }}.tar.gz" \
+            CONTAINER_IMAGES.txt > COMMUNITY_SHA256SUMS
+          cd ..
+          cosign sign-blob --yes \
+            --bundle dist/COMMUNITY_SHA256SUMS.sigstore.json \
+            dist/COMMUNITY_SHA256SUMS
+          cosign verify-blob dist/COMMUNITY_SHA256SUMS \
+            --bundle dist/COMMUNITY_SHA256SUMS.sigstore.json \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --offline
       - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -284,4 +309,7 @@ jobs:
             dist/SHA256SUMS.sigstore.json \
             dist/CONTAINER_IMAGES.txt \
             dist/CONTAINER_IMAGES.sigstore.json \
+            "dist/owndock-community_${VERSION}.tar.gz" \
+            dist/COMMUNITY_SHA256SUMS \
+            dist/COMMUNITY_SHA256SUMS.sigstore.json \
             dist/verify-owndock-agent-release

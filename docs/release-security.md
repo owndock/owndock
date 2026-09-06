@@ -30,11 +30,16 @@ SHA256SUMS.sigstore.json
 verify-owndock-agent-release
 CONTAINER_IMAGES.txt
 CONTAINER_IMAGES.sigstore.json
+owndock-community_0.1.0.tar.gz
+COMMUNITY_SHA256SUMS
+COMMUNITY_SHA256SUMS.sigstore.json
 ```
 
 `RELEASE.txt` 把产品、版本、Git Tag、完整 commit SHA 和源码仓绑定在一起。`SHA256SUMS.sigstore.json` 是 Sigstore bundle，包含签名证书和透明日志证明。GitHub 自动生成的 “Source code” zip/tar.gz 不在该清单内，不属于 OwnDock Agent 签名制品。
 
 `CONTAINER_IMAGES.txt` 另外列出 Server、Build Worker、Build Egress Gateway、Evidence Worker 和 Vulnerability DB Updater 的五个 `image@sha256:digest`。每个 digest 都有同一 Release 工作流身份产生的 keyless 镜像签名；该文本清单本身也有独立 bundle。镜像先按 digest 推送，全部构建成功后才提升 SemVer tag；工作流只允许同一 digest 的幂等恢复，拒绝把已有版本 tag 改指其他内容。
+
+`owndock-community_0.1.0.tar.gz` 是可复现的单节点 Compose 安装包。`COMMUNITY_SHA256SUMS` 同时固定该安装包和 `CONTAINER_IMAGES.txt`，并由独立 Sigstore bundle 保护，避免攻击者替换安装配置后仍引用合法镜像。
 
 ## 客户验签
 
