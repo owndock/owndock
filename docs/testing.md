@@ -27,6 +27,14 @@ make test-changed-coverage COVERAGE_BASE=<完整或可解析的 commit SHA>
 
 CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、MongoDB 集成测试、API 契约、构建、Agent 进程测试和 race 检测。定时/手动双架构安全 Job 还会重复执行供应链真实 Registry/KMS 门禁，防止只在相关源码发生变化时运行。变更覆盖率只是其中一道门禁。
 
+正式 Tag 会执行更完整的仓库内发布候选组合门禁：
+
+```bash
+make test-release-candidate
+```
+
+它在上述基础上组合真实本机 Docker、Agent 进程轮换/双 Host 隔离和 Terminal 专项竞态测试。它与客户等价环境的人工阻断项见[社区版发布候选门禁](release-readiness.md)。
+
 ## 私有 Sigstore keyless 门禁
 
 `.github/workflows/supply-chain-keyless.yml` 会启动固定版本的私有 Sigstore 栈，使用其 Fulcio、Rekor、CT Log、TSA 和 OIDC 签发真实 keyless bundle。签名完成后，测试会停止承载这些服务的 KinD 节点，再仅依赖固定 trusted root 和 Registry 调用 OwnDock 适配器验证 bundle。门禁同时要求正确 identity/issuer 通过，错误 identity、错误 issuer、跨 digest 重放和缺少透明日志根材料全部失败关闭。

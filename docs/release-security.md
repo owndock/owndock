@@ -1,6 +1,6 @@
 # Agent 正式发布与制品验签
 
-> 状态：仓库已经实现确定性双架构制品、统一 SHA-256 清单、Sigstore keyless 签名、精确发布身份校验和离线验签脚本。首个受保护正式 Tag 的公开 Release 及其下载/隔离网络验收仍需在 GitHub 上执行，因此当前不能把本地构建包描述为正式签名发行版。
+> 状态：仓库已经实现确定性双架构 Agent 制品、五个多架构后端镜像、统一摘要清单、Sigstore keyless 签名、精确发布身份校验和离线验签。首个受保护正式 Tag 的公开 Release 及其下载/隔离网络验收仍需在 GitHub 上执行，因此当前不能把本地构建包或镜像描述为正式签名发行版。
 
 本页面向两类读者：下载 Agent 的管理员需要确认“文件确实来自 OwnDock 的指定版本”；发布维护者需要保证“CI 之外没有人可以悄悄替换发行文件”。
 
@@ -28,9 +28,13 @@ RELEASE.txt
 SHA256SUMS
 SHA256SUMS.sigstore.json
 verify-owndock-agent-release
+CONTAINER_IMAGES.txt
+CONTAINER_IMAGES.sigstore.json
 ```
 
 `RELEASE.txt` 把产品、版本、Git Tag、完整 commit SHA 和源码仓绑定在一起。`SHA256SUMS.sigstore.json` 是 Sigstore bundle，包含签名证书和透明日志证明。GitHub 自动生成的 “Source code” zip/tar.gz 不在该清单内，不属于 OwnDock Agent 签名制品。
+
+`CONTAINER_IMAGES.txt` 另外列出 Server、Build Worker、Build Egress Gateway、Evidence Worker 和 Vulnerability DB Updater 的五个 `image@sha256:digest`。每个 digest 都有同一 Release 工作流身份产生的 keyless 镜像签名；该文本清单本身也有独立 bundle。镜像先按 digest 推送，全部构建成功后才提升 SemVer tag；工作流只允许同一 digest 的幂等恢复，拒绝把已有版本 tag 改指其他内容。
 
 ## 客户验签
 
@@ -105,7 +109,7 @@ git tag -s v0.1.0 -m "OwnDock v0.1.0"
 git push origin v0.1.0
 ```
 
-`.github/workflows/release.yml` 会再次执行完整门禁，构建 linux/amd64 与 linux/arm64 确定性包，生成 `RELEASE.txt`/`SHA256SUMS`，取得短时 OIDC 证书，签名并做在线与离线双重自校验，最后创建 GitHub Release。
+`.github/workflows/release.yml` 会再次执行仓库内发布候选门禁，构建 linux/amd64 与 linux/arm64 确定性 Agent 包以及五个多架构后端镜像。工作流为镜像生成 SBOM/Provenance，分别签名镜像 digest，再生成并签名 `CONTAINER_IMAGES.txt`；Agent 的 `RELEASE.txt`/`SHA256SUMS` 仍执行在线与离线双重自校验。只有全部矩阵成功后才创建 GitHub Release。
 
 工作流发现同名 Release 已存在时拒绝替换资产。正式资产有问题时应修复代码并发布新的 patch Tag，不能删除、覆盖或悄悄重签旧版本。
 

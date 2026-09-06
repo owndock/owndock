@@ -13,13 +13,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  agent:
+  validate:
     if: github.repository == 'owndock/owndock'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 40
     environment: release
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      identity: ${{ steps.release.outputs.identity }}
+      build_time: ${{ steps.release.outputs.build_time }}
     permissions:
-      contents: write
+      contents: read
       id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -46,17 +50,23 @@ jobs:
             echo "release checkout is not clean" >&2
             exit 2
           fi
+          if gh release view "${tag}" >/dev/null 2>&1; then
+            echo "release ${tag} already exists; refusing to rebuild it" >&2
+            exit 2
+          fi
           printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
           printf 'identity=%s\n' \
             "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${tag}" \
+            >> "${GITHUB_OUTPUT}"
+          printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)" \
             >> "${GITHUB_OUTPUT}"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: 1.26.5
           cache: true
       - run: go mod download
-      - run: make check
-      - run: make test-agent-package test-agent-release
+      - name: Run repository-local release candidate gate
+        run: make test-release-candidate
       - name: Build deterministic Agent release
         env:
           VERSION: ${{ steps.release.outputs.version }}
@@ -82,10 +92,175 @@ jobs:
             --certificate-identity "${CERTIFICATE_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --offline
+      - name: Preserve verified Agent release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agent-release-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 1
+
+  containers:
+    if: github.repository == 'owndock/owndock'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: owndock
+            dockerfile: Dockerfile
+          - image: owndock-build-worker
+            dockerfile: Dockerfile.build-worker
+          - image: owndock-build-egress-gateway
+            dockerfile: Dockerfile.build-egress-gateway
+          - image: owndock-evidence-worker
+            dockerfile: Dockerfile.evidence-worker
+          - image: owndock-vulnerability-db-updater
+            dockerfile: Dockerfile.vulnerability-db-updater
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4.2.0
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Build and push immutable multi-architecture image
+        id: build
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=ghcr.io/owndock/${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+          build-args: |
+            VERSION=${{ needs.validate.outputs.version }}
+            COMMIT=${{ github.sha }}
+            BUILD_TIME=${{ needs.validate.outputs.build_time }}
+          provenance: mode=max
+          sbom: true
+      - name: Install fixed Cosign release
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Sign and verify immutable image digest
+        env:
+          CERTIFICATE_IDENTITY: ${{ needs.validate.outputs.identity }}
+          IMAGE: ghcr.io/owndock/${{ matrix.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${DIGEST}"
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          mkdir -p container-digests
+          printf '%s@%s\n' "${IMAGE}" "${DIGEST}" \
+            > "container-digests/${{ matrix.image }}.txt"
+      - name: Preserve immutable image digest
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: container-digest-${{ matrix.image }}-${{ github.sha }}
+          path: container-digests/
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: github.repository == 'owndock/owndock'
+    needs: [validate, containers]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+    steps:
+      - name: Restore verified Agent release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agent-release-${{ github.sha }}
+          path: dist
+      - name: Restore container image digests
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: container-digest-*-${{ github.sha }}
+          path: container-digests
+          merge-multiple: true
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Promote verified digests to immutable version tags
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find container-digests -type f -name '*.txt' | wc -l | xargs)" = "5"
+          while IFS= read -r reference; do
+            image=${reference%@*}
+            digest=${reference#*@}
+            test "${image}" != "${reference}"
+            tag="${image}:${VERSION}"
+            existing="$(docker buildx imagetools inspect "${tag}" \
+              --format '{{json .Manifest}}' 2>/dev/null | jq -r '.digest // empty' || true)"
+            if [[ -n "${existing}" && "${existing}" != "${digest}" ]]; then
+              echo "container image ${tag} already points to ${existing}; refusing replacement" >&2
+              exit 2
+            fi
+            if [[ "${existing}" == "${digest}" ]]; then
+              continue
+            fi
+            docker buildx imagetools create --tag "${tag}" "${reference}"
+            promoted="$(docker buildx imagetools inspect "${tag}" \
+              --format '{{json .Manifest}}' | jq -r '.digest // empty')"
+            test "${promoted}" = "${digest}"
+          done < <(LC_ALL=C sort container-digests/*.txt)
+      - name: Install fixed Cosign release
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Create and sign container digest manifest
+        env:
+          CERTIFICATE_IDENTITY: ${{ needs.validate.outputs.identity }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find container-digests -type f -name '*.txt' | wc -l | xargs)" = "5"
+          LC_ALL=C sort container-digests/*.txt > dist/CONTAINER_IMAGES.txt
+          test "$(wc -l < dist/CONTAINER_IMAGES.txt | xargs)" = "5"
+          cosign sign-blob --yes \
+            --bundle dist/CONTAINER_IMAGES.sigstore.json \
+            dist/CONTAINER_IMAGES.txt
+          cosign verify-blob dist/CONTAINER_IMAGES.txt \
+            --bundle dist/CONTAINER_IMAGES.sigstore.json \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify-blob dist/CONTAINER_IMAGES.txt \
+            --bundle dist/CONTAINER_IMAGES.sigstore.json \
+            --certificate-identity "${CERTIFICATE_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --offline
       - name: Publish immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ needs.validate.outputs.version }}
         shell: bash
         run: |
           set -euo pipefail
@@ -107,4 +282,6 @@ jobs:
             dist/RELEASE.txt \
             dist/SHA256SUMS \
             dist/SHA256SUMS.sigstore.json \
+            dist/CONTAINER_IMAGES.txt \
+            dist/CONTAINER_IMAGES.sigstore.json \
             dist/verify-owndock-agent-release

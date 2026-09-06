@@ -32,6 +32,7 @@
 | GitHub/GitLab/Gitea/Forgejo 自动触发 | [Git 平台 Webhook](webhooks.md) |
 | 后端开发者 | [目标架构](architecture.md) 与 [领域模型](domain-model.md) |
 | 后端测试与 CI | [Go 测试与变更覆盖率门禁](testing.md) |
+| 社区版发布维护者 | [发布候选自动门禁与外部验收边界](release-readiness.md) |
 | 前端和 API 客户端 | [API 契约说明](../api/README.md)、[OpenAPI](../api/openapi.yaml) 与 [Agent Control v1](../api/agent-control.md) |
 | Web 前端跨域与 Token 安全 | [浏览器接入 API：Origin、Token 与安全响应头](browser-api-security.md) |
 | 中英文界面、官网与开发文档 | [多语言与本地化](localization.md) |
