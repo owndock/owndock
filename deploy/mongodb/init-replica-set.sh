@@ -4,11 +4,15 @@ set -eu
 username=$(tr -d '\r\n' </run/secrets/mongodb-root-username)
 password=$(tr -d '\r\n' </run/secrets/mongodb-root-password)
 app_password=$(tr -d '\r\n' </run/secrets/mongodb-app-password)
+tools_password=$(tr -d '\r\n' </run/secrets/mongodb-tools-password)
 test -n "$username"
 test -n "$password"
 test -n "$app_password"
-test "${#app_password}" -eq 64
-test -z "$(printf '%s' "$app_password" | tr -d '0-9a-f')"
+test -n "$tools_password"
+for generated_password in "$app_password" "$tools_password"; do
+  test "${#generated_password}" -eq 64
+  test -z "$(printf '%s' "$generated_password" | tr -d '0-9a-f')"
+done
 
 attempt=0
 while [ "$attempt" -lt 60 ]; do
@@ -69,9 +73,37 @@ if ! mongosh --quiet --host mongodb:27017 \
       --authenticationDatabase admin >/dev/null
 fi
 
+if ! mongosh --quiet --host mongodb:27017 \
+  --username "$username" \
+  --password "$password" \
+  --authenticationDatabase admin \
+  --eval 'quit(db.getSiblingDB("admin").getUser("owndock-tools") ? 0 : 3)' \
+  >/dev/null 2>&1; then
+  printf '%s\n' \
+    'db = db.getSiblingDB("admin");' \
+    'db.createUser({' \
+    '  user: "owndock-tools",' \
+    "  pwd: \"$tools_password\"," \
+    '  roles: [' \
+    '    {role: "backup", db: "admin"},' \
+    '    {role: "restore", db: "admin"}' \
+    '  ]' \
+    '});' | mongosh --quiet --host mongodb:27017 \
+      --username "$username" \
+      --password "$password" \
+      --authenticationDatabase admin >/dev/null
+fi
+
 mongosh --quiet --host mongodb:27017 \
   --username owndock-app \
   --password "$app_password" \
   --authenticationDatabase owndock \
   --eval 'quit(db.getSiblingDB("owndock").runCommand({ping: 1}).ok === 1 ? 0 : 2)' \
+  >/dev/null
+
+mongosh --quiet --host mongodb:27017 \
+  --username owndock-tools \
+  --password "$tools_password" \
+  --authenticationDatabase admin \
+  --eval 'quit(db.getSiblingDB("admin").runCommand({connectionStatus: 1}).ok === 1 ? 0 : 2)' \
   >/dev/null

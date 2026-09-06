@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-terminal-security test-community-deployment test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker run-vulnerability-db-updater
+.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-terminal-security test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-build-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-build-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -122,7 +122,8 @@ test-terminal-security:
 test-community-deployment:
 	go test ./deploy -count=1
 	sh -n deploy/prepare-community-secrets.sh deploy/backup-community.sh \
-		deploy/restore-community.sh deploy/mongodb/init-replica-set.sh
+		deploy/restore-community.sh deploy/community_process_integration_test.sh \
+		deploy/mongodb/init-replica-set.sh
 	@command -v docker >/dev/null 2>&1 || (echo "docker CLI is required to validate the community Compose file" >&2; exit 2)
 	@docker compose version >/dev/null 2>&1 || (echo "docker compose is required to validate the community Compose file" >&2; exit 2)
 	@OWNDOCK_SERVER_IMAGE=ghcr.io/owndock/owndock@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
@@ -130,15 +131,26 @@ test-community-deployment:
 		OWNDOCK_MONGODB_ROOT_USERNAME_PATH=/dev/null \
 		OWNDOCK_MONGODB_ROOT_PASSWORD_PATH=/dev/null \
 		OWNDOCK_MONGODB_APP_PASSWORD_PATH=/dev/null \
+		OWNDOCK_MONGODB_TOOLS_PASSWORD_PATH=/dev/null \
 		OWNDOCK_BOOTSTRAP_TOKEN_PATH=/dev/null \
 		OWNDOCK_MONGODB_URI_PATH=/dev/null \
 		OWNDOCK_MONGODB_TOOLS_CONFIG_PATH=/dev/null \
 		docker compose -f deploy/community.compose.yaml config --quiet
 
+test-community-integration:
+	docker build \
+		--build-arg VERSION=0.0.0-community-integration \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--tag owndock-community-integration:$(COMMIT) .
+	sh deploy/community_process_integration_test.sh \
+		owndock-community-integration:$(COMMIT)
+
 test-release-candidate: check test-community-deployment
 	go test -race ./... -count=1
 	$(MAKE) test-integration
 	$(MAKE) test-runtime-integration
+	$(MAKE) test-community-integration
 	$(MAKE) test-agent-package
 	$(MAKE) test-agent-release
 	$(MAKE) test-agent-control-process

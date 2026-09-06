@@ -23,6 +23,7 @@ func TestPrepareCommunitySecrets(t *testing.T) {
 		"mongodb-root-username",
 		"mongodb-root-password",
 		"mongodb-app-password",
+		"mongodb-tools-password",
 		"mongodb-keyfile",
 		"owndock-bootstrap-token",
 		"owndock-mongodb-uri",
@@ -65,7 +66,11 @@ func TestPrepareCommunitySecrets(t *testing.T) {
 		parsed.Query().Get("authSource") != "owndock" {
 		t.Fatal("generated MongoDB URI does not match the generated credentials and Replica Set")
 	}
-	if values["owndock-mongodb-tools.yaml"] != fmt.Sprintf("uri: %q", values["owndock-mongodb-uri"]) {
+	toolsURI := fmt.Sprintf(
+		"mongodb://owndock-tools:%s@mongodb:27017/?replicaSet=rs0&authSource=admin",
+		values["mongodb-tools-password"],
+	)
+	if values["owndock-mongodb-tools.yaml"] != fmt.Sprintf("uri: %q", toolsURI) {
 		t.Fatal("Database Tools config does not contain the generated application URI")
 	}
 

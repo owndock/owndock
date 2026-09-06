@@ -38,7 +38,7 @@ install -d -m 0700 /srv/owndock/secrets
 sh deploy/prepare-community-secrets.sh /srv/owndock/secrets
 ```
 
-脚本使用 OpenSSL 生成 MongoDB 内部认证 keyfile、独立的 root/应用密码、一次性 bootstrap token、应用连接 URI 和 Database Tools 配置。Server 与备份工具只使用 `owndock` 数据库的 `readWrite` 用户，不持有 MongoDB root 凭据。所有文件都是 `0400`，脚本发现任何同名文件都会停止，不会轮换或覆盖现有安装的身份。
+脚本使用 OpenSSL 生成 MongoDB 内部认证 keyfile、相互独立的 root/应用/备份恢复密码、一次性 bootstrap token、应用连接 URI 和 Database Tools 配置。Server 只使用 `owndock` 数据库的 `readWrite` 用户；备份恢复使用不具备 root 权限且不会挂载到 Server 的 `backup`/`restore` 操作身份。所有文件都是 `0400`，脚本发现任何同名文件都会停止，不会轮换或覆盖现有安装的身份。
 
 把下面的非秘密路径和已验签镜像引用放入管理员 Shell 或权限为 `0600` 的 Compose env 文件：
 
@@ -49,6 +49,7 @@ export OWNDOCK_MONGODB_KEYFILE_PATH='/srv/owndock/secrets/mongodb-keyfile'
 export OWNDOCK_MONGODB_ROOT_USERNAME_PATH='/srv/owndock/secrets/mongodb-root-username'
 export OWNDOCK_MONGODB_ROOT_PASSWORD_PATH='/srv/owndock/secrets/mongodb-root-password'
 export OWNDOCK_MONGODB_APP_PASSWORD_PATH='/srv/owndock/secrets/mongodb-app-password'
+export OWNDOCK_MONGODB_TOOLS_PASSWORD_PATH='/srv/owndock/secrets/mongodb-tools-password'
 export OWNDOCK_BOOTSTRAP_TOKEN_PATH='/srv/owndock/secrets/owndock-bootstrap-token'
 export OWNDOCK_MONGODB_URI_PATH='/srv/owndock/secrets/owndock-mongodb-uri'
 export OWNDOCK_MONGODB_TOOLS_CONFIG_PATH='/srv/owndock/secrets/owndock-mongodb-tools.yaml'

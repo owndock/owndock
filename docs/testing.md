@@ -33,7 +33,7 @@ CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、Mon
 make test-release-candidate
 ```
 
-它在上述基础上组合真实本机 Docker、Agent 进程轮换/双 Host 隔离和 Terminal 专项竞态测试。它与客户等价环境的人工阻断项见[社区版发布候选门禁](release-readiness.md)。
+它在上述基础上组合社区版 Compose 启动/Bootstrap/持久化重启/停写备份/空卷恢复、真实本机 Docker、Agent 进程轮换/双 Host 隔离和 Terminal 专项竞态测试。它与客户等价环境的人工阻断项见[社区版发布候选门禁](release-readiness.md)。
 
 ## 私有 Sigstore keyless 门禁
 

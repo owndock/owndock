@@ -15,6 +15,7 @@ make test-release-candidate
 - 格式、依赖完整性、`go vet`、全量单元测试、OpenAPI 严格校验和全部进程构建；
 - 全仓竞态测试；
 - MongoDB 8.3.7 单节点 Replica Set 的 migration、事务、权限、状态机和持久化集成测试；
+- 社区版 Compose 首次启动、最小权限数据库身份、Bootstrap、Server 重启、停写备份和空卷恢复；
 - 真实本机 Docker Engine 的 direct 与 Agent 执行回归；
 - Agent 包格式、Release manifest、真实进程控制流、证书轮换恢复和双 Host 身份隔离；
 - Terminal、Agent protocol、Gateway 与观测链路的专项竞态门禁。
@@ -44,7 +45,7 @@ sequenceDiagram
     CI->>CI: 校验 Tag、commit 和干净 checkout
     CI->>T: make test-release-candidate
     T->>T: check + race + Mongo Replica Set
-    T->>T: Docker + Agent + Terminal 门禁
+    T->>T: Community lifecycle + Docker + Agent + Terminal 门禁
     alt 任一门禁失败
         T-->>CI: non-zero exit
         CI-->>M: 发布停止，无制品
@@ -66,7 +67,7 @@ sequenceDiagram
 - 远程 mTLS Docker Engine 的网络分区、延迟旧命令和入口流量验证；
 - Chrome/Firefox/Safari 的登录、权限即时撤销、Terminal WSS、IME、resize、慢消费者与断网 E2E；
 - 客户选择的 Registry、私有 CA、代理、KMS 和隔离网络兼容矩阵；
-- MongoDB Primary 切换、备份恢复和升级演练；
+- 客户等价存储上的 MongoDB Primary 切换、加密备份异地取回和版本升级演练；
 - 首个受保护 Tag 的公开下载、在线/离线验签和安装验证。
 
 这些结果应绑定精确 Tag、commit、运行环境和时间，并在发布评审中逐项确认。缺少结果时只能发布 pre-release，不能标记为 production-ready。
