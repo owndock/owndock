@@ -121,15 +121,18 @@ test-terminal-security:
 # external KMS/Registry matrices remain explicit system acceptance gates.
 test-community-deployment:
 	go test ./deploy -count=1
-	sh -n deploy/prepare-community-secrets.sh deploy/mongodb/init-replica-set.sh
+	sh -n deploy/prepare-community-secrets.sh deploy/backup-community.sh \
+		deploy/restore-community.sh deploy/mongodb/init-replica-set.sh
 	@command -v docker >/dev/null 2>&1 || (echo "docker CLI is required to validate the community Compose file" >&2; exit 2)
 	@docker compose version >/dev/null 2>&1 || (echo "docker compose is required to validate the community Compose file" >&2; exit 2)
 	@OWNDOCK_SERVER_IMAGE=ghcr.io/owndock/owndock@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
 		OWNDOCK_MONGODB_KEYFILE_PATH=/dev/null \
 		OWNDOCK_MONGODB_ROOT_USERNAME_PATH=/dev/null \
 		OWNDOCK_MONGODB_ROOT_PASSWORD_PATH=/dev/null \
+		OWNDOCK_MONGODB_APP_PASSWORD_PATH=/dev/null \
 		OWNDOCK_BOOTSTRAP_TOKEN_PATH=/dev/null \
 		OWNDOCK_MONGODB_URI_PATH=/dev/null \
+		OWNDOCK_MONGODB_TOOLS_CONFIG_PATH=/dev/null \
 		docker compose -f deploy/community.compose.yaml config --quiet
 
 test-release-candidate: check test-community-deployment

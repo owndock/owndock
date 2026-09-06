@@ -3,8 +3,12 @@ set -eu
 
 username=$(tr -d '\r\n' </run/secrets/mongodb-root-username)
 password=$(tr -d '\r\n' </run/secrets/mongodb-root-password)
+app_password=$(tr -d '\r\n' </run/secrets/mongodb-app-password)
 test -n "$username"
 test -n "$password"
+test -n "$app_password"
+test "${#app_password}" -eq 64
+test -z "$(printf '%s' "$app_password" | tr -d '0-9a-f')"
 
 attempt=0
 while [ "$attempt" -lt 60 ]; do
@@ -40,10 +44,34 @@ while [ "$attempt" -lt 60 ]; do
     --authenticationDatabase admin \
     --eval 'quit(db.hello().isWritablePrimary ? 0 : 2)' \
     >/dev/null 2>&1; then
-    exit 0
+    break
   fi
   attempt=$((attempt + 1))
   sleep 1
 done
+test "$attempt" -lt 60
 
-exit 1
+if ! mongosh --quiet --host mongodb:27017 \
+  --username "$username" \
+  --password "$password" \
+  --authenticationDatabase admin \
+  --eval 'quit(db.getSiblingDB("owndock").getUser("owndock-app") ? 0 : 3)' \
+  >/dev/null 2>&1; then
+  printf '%s\n' \
+    'db = db.getSiblingDB("owndock");' \
+    'db.createUser({' \
+    '  user: "owndock-app",' \
+    "  pwd: \"$app_password\"," \
+    '  roles: [{role: "readWrite", db: "owndock"}]' \
+    '});' | mongosh --quiet --host mongodb:27017 \
+      --username "$username" \
+      --password "$password" \
+      --authenticationDatabase admin >/dev/null
+fi
+
+mongosh --quiet --host mongodb:27017 \
+  --username owndock-app \
+  --password "$app_password" \
+  --authenticationDatabase owndock \
+  --eval 'quit(db.getSiblingDB("owndock").runCommand({ping: 1}).ok === 1 ? 0 : 2)' \
+  >/dev/null

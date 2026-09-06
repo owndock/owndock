@@ -39,7 +39,7 @@ COMMUNITY_SHA256SUMS.sigstore.json
 
 `CONTAINER_IMAGES.txt` 另外列出 Server、Build Worker、Build Egress Gateway、Evidence Worker 和 Vulnerability DB Updater 的五个 `image@sha256:digest`。每个 digest 都有同一 Release 工作流身份产生的 keyless 镜像签名；该文本清单本身也有独立 bundle。镜像先按 digest 推送，全部构建成功后才提升 SemVer tag；工作流只允许同一 digest 的幂等恢复，拒绝把已有版本 tag 改指其他内容。
 
-`owndock-community_0.1.0.tar.gz` 是可复现的单节点 Compose 安装包。`COMMUNITY_SHA256SUMS` 同时固定该安装包和 `CONTAINER_IMAGES.txt`，并由独立 Sigstore bundle 保护，避免攻击者替换安装配置后仍引用合法镜像。
+`owndock-community_0.1.0.tar.gz` 是可复现的单节点 Compose 安装包，包含 Secret 初始化以及保守的空库恢复/停写备份工具。`COMMUNITY_SHA256SUMS` 同时固定该安装包和 `CONTAINER_IMAGES.txt`，并由独立 Sigstore bundle 保护，避免攻击者替换安装配置后仍引用合法镜像。
 
 ## 客户验签
 

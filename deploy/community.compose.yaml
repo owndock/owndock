@@ -40,7 +40,7 @@ services:
     secrets:
       - mongodb-root-username
       - mongodb-root-password
-      - owndock-mongodb-uri
+      - owndock-mongodb-tools-config
     networks:
       - data
     security_opt:
@@ -57,6 +57,7 @@ services:
     secrets:
       - mongodb-root-username
       - mongodb-root-password
+      - mongodb-app-password
     networks:
       - data
     security_opt:
@@ -101,7 +102,11 @@ secrets:
     file: ${OWNDOCK_MONGODB_ROOT_USERNAME_PATH:?set the absolute MongoDB root username file path}
   mongodb-root-password:
     file: ${OWNDOCK_MONGODB_ROOT_PASSWORD_PATH:?set the absolute MongoDB root password file path}
+  mongodb-app-password:
+    file: ${OWNDOCK_MONGODB_APP_PASSWORD_PATH:?set the absolute MongoDB application password file path}
   owndock-bootstrap-token:
     file: ${OWNDOCK_BOOTSTRAP_TOKEN_PATH:?set the absolute OwnDock bootstrap token file path}
   owndock-mongodb-uri:
     file: ${OWNDOCK_MONGODB_URI_PATH:?set the absolute OwnDock MongoDB URI file path}
+  owndock-mongodb-tools-config:
+    file: ${OWNDOCK_MONGODB_TOOLS_CONFIG_PATH:?set the absolute MongoDB Database Tools config path}

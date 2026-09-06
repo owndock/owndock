@@ -80,8 +80,13 @@ jobs:
           git archive --format=tar HEAD \
             deploy/community.compose.yaml \
             deploy/community.config.yaml \
+            deploy/backup-community.sh \
             deploy/mongodb/init-replica-set.sh \
             deploy/prepare-community-secrets.sh \
+            deploy/restore-community.sh \
+            docs/community-installation.md \
+            docs/ingress-protection.md \
+            docs/release-readiness.md \
             | gzip -n > "dist/owndock-community_${VERSION}.tar.gz"
       - name: Install fixed Cosign release
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2

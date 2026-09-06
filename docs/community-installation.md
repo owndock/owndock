@@ -38,7 +38,7 @@ install -d -m 0700 /srv/owndock/secrets
 sh deploy/prepare-community-secrets.sh /srv/owndock/secrets
 ```
 
-脚本使用 OpenSSL 生成 MongoDB 内部认证 keyfile、root 密码、一次性 bootstrap token 和应用连接 URI。所有文件都是 `0400`，脚本发现任何同名文件都会停止，不会轮换或覆盖现有安装的身份。
+脚本使用 OpenSSL 生成 MongoDB 内部认证 keyfile、独立的 root/应用密码、一次性 bootstrap token、应用连接 URI 和 Database Tools 配置。Server 与备份工具只使用 `owndock` 数据库的 `readWrite` 用户，不持有 MongoDB root 凭据。所有文件都是 `0400`，脚本发现任何同名文件都会停止，不会轮换或覆盖现有安装的身份。
 
 把下面的非秘密路径和已验签镜像引用放入管理员 Shell 或权限为 `0600` 的 Compose env 文件：
 
@@ -48,8 +48,10 @@ export OWNDOCK_HTTP_PORT='8000'
 export OWNDOCK_MONGODB_KEYFILE_PATH='/srv/owndock/secrets/mongodb-keyfile'
 export OWNDOCK_MONGODB_ROOT_USERNAME_PATH='/srv/owndock/secrets/mongodb-root-username'
 export OWNDOCK_MONGODB_ROOT_PASSWORD_PATH='/srv/owndock/secrets/mongodb-root-password'
+export OWNDOCK_MONGODB_APP_PASSWORD_PATH='/srv/owndock/secrets/mongodb-app-password'
 export OWNDOCK_BOOTSTRAP_TOKEN_PATH='/srv/owndock/secrets/owndock-bootstrap-token'
 export OWNDOCK_MONGODB_URI_PATH='/srv/owndock/secrets/owndock-mongodb-uri'
+export OWNDOCK_MONGODB_TOOLS_CONFIG_PATH='/srv/owndock/secrets/owndock-mongodb-tools.yaml'
 ```
 
 这些变量只包含路径和公开镜像引用，不包含密码、Token 或 URI 正文。不要把 Secret 内容放入命令行、`.env`、Git 或工单。
@@ -90,6 +92,7 @@ sequenceDiagram
     M->>M: 启动 auth + rs0
     I->>M: 幂等 rs.initiate
     M-->>I: Primary writable
+    I->>M: 建立并验证最小权限应用用户
     I-->>S: completed successfully
     S->>M: Ping + versioned migrations
     M-->>S: ready
@@ -103,7 +106,16 @@ sequenceDiagram
 
 ## 备份
 
-首发单节点基线采用保守的停写逻辑备份。先停止 Server，确认没有 Worker 写入，再从固定 MongoDB 容器执行 `mongodump --oplog --archive --gzip`。MongoDB Database Tools 的敏感 URI应通过权限受限的 `--config` 文件提供，不能放在进程参数中。备份文件必须加密、带 SHA-256 校验和，并复制到与当前主机故障域不同的位置。
+首发单节点基线采用保守的停写逻辑备份。先停止 Server，确认没有外部 Worker 写入，再执行仓库提供的备份命令：
+
+```bash
+docker compose -f deploy/community.compose.yaml stop server
+install -d -m 0700 /srv/owndock/backups
+sh deploy/backup-community.sh \
+  "/srv/owndock/backups/owndock-$(date -u +%Y%m%dT%H%M%SZ).archive.gz"
+```
+
+脚本拒绝覆盖已有文件、拒绝 Server 仍在运行或 MongoDB 未运行的状态，只导出 `owndock` 数据库，并生成权限为 `0600` 的 SHA-256 文件。由于应用已经停写，数据库级 dump 不使用与 `--db` 不兼容的 `--oplog`。敏感 URI 只从容器 Secret 中的 Database Tools `--config` 读取，不出现在宿主机进程参数中。archive 仍包含敏感业务数据，复制离开本机前必须使用团队批准的加密工具和独立密钥加密，再存放到不同故障域。
 
 至少记录：OwnDock 精确版本和 commit、MongoDB 版本、备份开始/结束时间、archive SHA-256、加密密钥标识和恢复演练结果。只复制 Docker volume 目录不构成支持的在线备份。
 
@@ -114,7 +126,17 @@ sequenceDiagram
 1. 使用同一 MongoDB major/FCV 创建空 Replica Set；
 2. 保留原备份，创建新的空数据 volume，禁止直接覆盖唯一副本；
 3. 停止 OwnDock Server 和所有 Worker；
-4. 使用权限受限的 Database Tools 配置执行 `mongorestore --archive --gzip --drop`；
+4. 校验、解密出权限为 `0600` 的临时 archive 和同名 `.sha256`，然后只对新建的空数据库执行：
+
+   ```bash
+   export OWNDOCK_RESTORE_CONFIRM=empty-owndock-database
+   sh deploy/restore-community.sh \
+     /srv/owndock/restore/input.archive.gz \
+     /srv/owndock/restore/input.archive.gz.sha256
+   unset OWNDOCK_RESTORE_CONFIRM
+   ```
+
+   脚本会再次校验 SHA-256，并在 Server 运行、MongoDB 停止、目标存在任何非系统 collection 或输入可被组/其他用户写入时拒绝恢复；它不使用 `--drop` 覆盖现有数据；
 5. 启动与备份相同版本的 Server，让 migration 检查现有 schema；
 6. 验证 `/readyz`、Owner 登录、Project/Release/Deployment、审计、Agent 身份和 Runtime Target；
 7. 再升级到目标版本并重复关键旅程；失败时丢弃恢复环境，不能反向修改原备份。
@@ -129,10 +151,10 @@ sequenceDiagram
     participant R as Restore Validation
 
     O->>S: 停止写入并确认无活跃 Worker
-    O->>B: mongodump --oplog --archive --gzip
+    O->>B: 停写后 mongodump --db owndock --archive --gzip
     O->>B: 加密、SHA-256、异故障域保存
     O->>M: 创建隔离的空 Replica Set
-    B->>M: mongorestore --drop
+    B->>M: 校验 checksum 后仅恢复到空数据库
     O->>S: 启动备份时相同版本
     S->>M: schema/migration 检查
     R->>S: ready、登录、资源、审计和 Agent 验证
