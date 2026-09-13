@@ -133,6 +133,60 @@ func TestOpenRejectsDisabledConfig(t *testing.T) {
 	}
 }
 
+func TestOpenDoesNotExposeCredentialsFromInvalidURI(t *testing.T) {
+	const (
+		environment = "OWNDOCK_TEST_MONGODB_INVALID_URI"
+		username    = "private-user"
+		password    = "private-password"
+	)
+	uri := "mongodb://" + username + ":" + password + "@localhost:invalid/owndock"
+	t.Setenv(environment, uri)
+
+	_, err := Open(context.Background(), testMongoConfig(environment, "100ms"))
+	if err == nil {
+		t.Fatal("Open() error = nil, want an error")
+	}
+	assertMongoErrorOmitsCredentials(t, err, uri, username, password)
+}
+
+func TestOpenDoesNotExposeCredentialsWhenServerIsUnavailable(t *testing.T) {
+	const (
+		environment = "OWNDOCK_TEST_MONGODB_UNAVAILABLE_URI"
+		username    = "private-user"
+		password    = "private-password"
+	)
+	uri := "mongodb://" + username + ":" + password + "@127.0.0.1:1/owndock?directConnection=true"
+	t.Setenv(environment, uri)
+
+	_, err := Open(context.Background(), testMongoConfig(environment, "100ms"))
+	if err == nil {
+		t.Fatal("Open() error = nil, want an error")
+	}
+	assertMongoErrorOmitsCredentials(t, err, uri, username, password)
+}
+
+func testMongoConfig(environment, connectTimeout string) config.Mongo {
+	return config.Mongo{
+		Enabled:          true,
+		URIEnv:           environment,
+		Database:         "owndock_test",
+		ConnectTimeout:   connectTimeout,
+		OperationTimeout: connectTimeout,
+		MaxIdleTime:      "1m",
+		MaxPoolSize:      1,
+	}
+}
+
+func assertMongoErrorOmitsCredentials(t *testing.T, err error, forbidden ...string) {
+	t.Helper()
+	message := err.Error()
+	for _, value := range forbidden {
+		if strings.Contains(message, value) {
+			t.Fatalf("Open() error exposes MongoDB credential %q: %v", value, err)
+		}
+	}
+}
+
 func TestMongoReplicaSetIntegration(t *testing.T) {
 	if os.Getenv("OWNDOCK_RUN_MONGO_INTEGRATION") != "1" {
 		t.Skip("set OWNDOCK_RUN_MONGO_INTEGRATION=1 to run the MongoDB integration test")

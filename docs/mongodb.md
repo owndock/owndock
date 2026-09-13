@@ -28,7 +28,7 @@ database:
     max_pool_size: 100
 ```
 
-连接串从 `uri_env` 指定的环境变量，或从 `uri_file` 指定的绝对路径二选一读取；同时配置或都不配置会拒绝启动。文件必须是最多 8 KiB 的普通文件，不能是符号链接或允许 group/world 写入，且只能包含一个非空行。连接串不写入配置模板、日志或版本库。Compose 基线使用文件型 Secret，并分离 root 初始化身份、仅可读写 `owndock` 数据库的应用身份，以及只挂载到 Mongo 容器的 `backup`/`restore` 操作身份；生产环境还需要 TLS，以及经过容量与故障转移验证的 Replica Set。
+连接串从 `uri_env` 指定的环境变量，或从 `uri_file` 指定的绝对路径二选一读取；同时配置或都不配置会拒绝启动。文件必须是最多 8 KiB 的普通文件，不能是符号链接或允许 group/world 写入，且只能包含一个非空行。连接串不写入配置模板、日志或版本库；回归测试还会分别制造连接串解析失败和目标不可达，确保向上传递的启动错误不包含完整 URI、用户名或密码。Compose 基线使用文件型 Secret，并分离 root 初始化身份、仅可读写 `owndock` 数据库的应用身份，以及只挂载到 Mongo 容器的 `backup`/`restore` 操作身份；生产环境还需要 TLS，以及经过容量与故障转移验证的 Replica Set。
 
 单节点安装、备份和恢复边界见[社区版单节点安装与恢复](community-installation.md)。
 
