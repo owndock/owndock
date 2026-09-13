@@ -244,6 +244,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if hello["setName"] != "rs0" {
 		t.Fatalf("replica set name = %v, want rs0", hello["setName"])
 	}
+	assertMongoFeatureCompatibilityVersion(t, ctx, client.Database().Client(), "8.3")
 
 	session, err := client.Database().Client().StartSession()
 	if err != nil {
@@ -1728,6 +1729,33 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	if err := client.Close(closeContext); err != nil {
 		t.Fatalf("second Close() error = %v", err)
+	}
+}
+
+func assertMongoFeatureCompatibilityVersion(
+	t *testing.T,
+	ctx context.Context,
+	client *drivermongo.Client,
+	want string,
+) {
+	t.Helper()
+	var result struct {
+		FeatureCompatibilityVersion struct {
+			Version string `bson:"version"`
+		} `bson:"featureCompatibilityVersion"`
+	}
+	if err := client.Database("admin").RunCommand(ctx, bson.D{
+		{Key: "getParameter", Value: 1},
+		{Key: "featureCompatibilityVersion", Value: 1},
+	}).Decode(&result); err != nil {
+		t.Fatalf("read MongoDB feature compatibility version: %v", err)
+	}
+	if result.FeatureCompatibilityVersion.Version != want {
+		t.Fatalf(
+			"MongoDB feature compatibility version = %q, want %q",
+			result.FeatureCompatibilityVersion.Version,
+			want,
+		)
 	}
 }
 

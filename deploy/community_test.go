@@ -86,6 +86,25 @@ func TestPrepareCommunitySecrets(t *testing.T) {
 	}
 }
 
+func TestCommunityMongoInitializationPinsFeatureCompatibilityVersion(t *testing.T) {
+	contents, err := os.ReadFile("mongodb/init-replica-set.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		`const expected = "8.3"`,
+		`setFeatureCompatibilityVersion: expected`,
+		`confirm: true`,
+		`featureCompatibilityVersion: 1`,
+		`current.featureCompatibilityVersion.version === expected`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("MongoDB initialization does not enforce %q", required)
+		}
+	}
+}
+
 func TestCommunityBackupAndRestoreSafety(t *testing.T) {
 	fixture := []byte("compressed-mongodb-archive-fixture")
 	directory := t.TempDir()

@@ -55,6 +55,28 @@ while [ "$attempt" -lt 60 ]; do
 done
 test "$attempt" -lt 60
 
+# Keep the storage feature set explicit instead of inheriting a value from an
+# existing data volume or a future image default. Changing this value is an
+# upgrade operation and must be reviewed together with the server image.
+mongosh --quiet --host mongodb:27017 \
+  --username "$username" \
+  --password "$password" \
+  --authenticationDatabase admin \
+  --eval '
+    const expected = "8.3";
+    const setResult = db.adminCommand({
+      setFeatureCompatibilityVersion: expected,
+      confirm: true
+    });
+    if (setResult.ok !== 1) quit(2);
+    const current = db.adminCommand({
+      getParameter: 1,
+      featureCompatibilityVersion: 1
+    });
+    quit(current.ok === 1 &&
+      current.featureCompatibilityVersion.version === expected ? 0 : 2);
+  ' >/dev/null
+
 if ! mongosh --quiet --host mongodb:27017 \
   --username "$username" \
   --password "$password" \
