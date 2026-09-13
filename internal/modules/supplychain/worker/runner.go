@@ -475,7 +475,7 @@ func (r *Runner) recordFailure(ctx context.Context, item biz.EvidenceJob,
 }
 
 func categorizeSBOMGeneration(err error) biz.EvidenceJobFailure {
-	if errors.Is(err, biz.ErrSBOMTooLarge) {
+	if errors.Is(err, biz.ErrSBOMTooLarge) || errors.Is(err, biz.ErrSBOMImageTooLarge) {
 		return biz.EvidenceJobFailureResourceLimit
 	}
 	return biz.EvidenceJobFailureGeneration

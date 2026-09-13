@@ -8,7 +8,7 @@ Artifact Evidence 是“这个镜像有哪些可验证材料”的安全目录�
 
 独立 `owndock-evidence-worker` 已完成 MongoDB 队列、固定 Syft 启动验版、标准 in-toto Statement v1/SLSA Provenance v1 生成、ORAS Publisher、健康端点和有界指标装配。固定 Syft 1.50.0 镜像已在非 root、只读、无 capabilities 和资源上限下读取真实 htpasswd Registry；SBOM 与 Provenance 随后由 ORAS 认证发布，并可通过 Referrer 查询和授权 API 下载。错误密码失败关闭，Registry 密码只在单次拉取、发布或下载操作中存在并清零；证据、OCI manifest/blob、错误和 Registry 日志均通过秘密哨兵检查。
 
-当前 Provenance 的 `verification_status` 是 `unverified`：它已经按 OCI digest 校验存储完整性和来源字段，但 Provenance 自身尚未形成受信任 Builder 的 DSSE 签名声明。镜像签名验证会单独写入不可变的 `EvidenceVerification` 摘要，不能用它反向把所有 SBOM 或 Provenance 自动标记为可信。漏洞报告、原子数据库更新、限时豁免和版本化 Deployment Policy 已实现，但真实超大镜像和客户生产环境矩阵仍待后续任务，因此不能据此宣称镜像已完成完整供应链验证，也不能宣称 SLSA Build L2/L3。
+当前 Provenance 的 `verification_status` 是 `unverified`：它已经按 OCI digest 校验存储完整性和来源字段，但 Provenance 自身尚未形成受信任 Builder 的 DSSE 签名声明。镜像签名验证会单独写入不可变的 `EvidenceVerification` 摘要，不能用它反向把所有 SBOM 或 Provenance 自动标记为可信。漏洞报告、原子数据库更新、限时漏洞豁免、版本化 Deployment Policy 和 Registry 镜像层超限前置拒绝已实现，但客户生产环境矩阵仍待后续任务，因此不能据此宣称镜像已完成完整供应链验证，也不能宣称 SLSA Build L2/L3。
 
 ## 签名信任策略
 
@@ -253,11 +253,33 @@ Registry 上传发生在 MongoDB 事务之前，因此失去租约的 Worker 最
 
 首版 SBOM 生成器固定为 Syft `1.50.0`，调用时显式指定 `cyclonedx-json@1.6`。Worker 启动时必须核对工具报告的精确版本，输出超过配置上限、格式版本漂移、JSON 损坏或组件缺少基本身份时均失败关闭。Provenance 由同一个隔离 Worker 根据事务内冻结的 Recipe 确定性生成，最大 4 MiB；生成和下载都会校验标准类型、subject、Commit、配置快照 digest、Builder 依赖和时间边界。这里固定的是可评审的工具和格式基线，不是承诺永远不升级；升级需要兼容测试、变更记录和新的不可变镜像 digest。
 
+Syft 1.50.0 的 `source.image.max-layer-size` 对直接 Registry source 不构成完整前置门禁，因此 OwnDock 不把安全性押在这个上游参数上。Evidence Worker 会先用与 ORAS 相同的 TLS、CA、代理和 Registry Credential 回读精确 subject manifest；单平台镜像检查全部 layer descriptor，多平台 index 最多展开 63 个子 manifest，并验证子 manifest 的 SHA-256、媒体类型和声明大小。任一层声明的压缩 blob 大小超过 `max_layer_bytes` 时，Job 在 Syft 启动前以稳定 `resource_limit` 失败；畸形、递归或超限 index 失败关闭。Syft 参数继续保留作纵深防御，容器内存和 tmpfs 上限仍是执行期硬资源边界。
+
+```mermaid
+sequenceDiagram
+    participant EW as Evidence Worker
+    participant R as OCI Registry
+    participant S as 固定版本 Syft
+    participant DB as MongoDB
+    EW->>R: 读取 repository@sha256:digest manifest
+    opt subject 是多平台 index
+        EW->>R: 有界读取每个子 manifest
+    end
+    EW->>EW: 校验 manifest digest/media type<br/>逐层比较声明压缩大小
+    alt 任一层超出 max_layer_bytes
+        EW->>DB: Job → failed(resource_limit)
+        Note over EW,S: Syft 不启动
+    else 全部在边界内
+        EW->>S: 扫描同一不可变 digest
+        S-->>EW: CycloneDX 1.6
+    end
+```
+
 OCI 发布和授权读取使用 ORAS Go `2.6.2`。Registry 密码只由外部凭据提供器在单次操作中解析，不进入 Job、Evidence、错误文本或日志；Publisher 只接受 digest subject，并复核文档内容 digest 与最终 OCI manifest digest。明文 HTTP 只允许显式配置的本机集成测试，远程 Registry 必须使用 TLS 1.3 或更高版本。
 
 ## 运行 Evidence Worker
 
-Evidence Worker 默认关闭。启用时配置 `runtime.evidence_worker.enabled: true`，并确保 MongoDB 已启用。`syft_executable` 必须是绝对路径，`syft_version` 只能是当前固定的 `1.50.0`；Worker 启动时会执行精确版本校验，版本不符就拒绝接单。`max_document_bytes` 默认 16 MiB，限制最终 SBOM 和 Server 下载；Provenance 另有 4 MiB 硬上限。`max_layer_bytes` 默认 256 MiB，限制 Syft 接受的单层镜像大小。两项都不能替代容器 512 MiB 临时目录和内存上限。若需要从宿主机采集指标，把容器使用的配置设为 `metrics_address: 0.0.0.0:9092`，Compose 仍只把端口绑定到宿主机回环地址。
+Evidence Worker 默认关闭。启用时配置 `runtime.evidence_worker.enabled: true`，并确保 MongoDB 已启用。`syft_executable` 必须是绝对路径，`syft_version` 只能是当前固定的 `1.50.0`；Worker 启动时会执行精确版本校验，版本不符就拒绝接单。`max_document_bytes` 默认 16 MiB，限制最终 SBOM 和 Server 下载；Provenance 另有 4 MiB 硬上限。`max_layer_bytes` 默认 256 MiB，限制 digest-bound manifest 中任一层声明的压缩 blob 大小，并在启动 Syft 前检查。两项都不能替代容器 512 MiB 临时目录和内存上限。若需要从宿主机采集指标，把容器使用的配置设为 `metrics_address: 0.0.0.0:9092`，Compose 仍只把端口绑定到宿主机回环地址。
 
 Registry Credential 仍只在 MongoDB 保存 `secret://production` 这样的引用。对应的执行环境变量是 `OWNDOCK_REGISTRY_PRODUCTION_PASSWORD`；别名中的连字符转换为下划线。Evidence Worker 用它完成私有镜像拉取和证据发布，Server 用它完成已授权的证据下载；两种进程都只在单次 Registry 操作中解析密码并随后清零，不会写入 Job、Evidence、响应或错误消息。部署时必须把同一别名的秘密安全注入需要下载能力的 Server 实例，不能通过 API 配置或回读密码。
 

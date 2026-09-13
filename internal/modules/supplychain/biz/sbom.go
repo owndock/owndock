@@ -18,10 +18,11 @@ const (
 )
 
 var (
-	ErrSBOMGeneration   = errors.New("SBOM generation failed")
-	ErrSBOMTooLarge     = errors.New("SBOM exceeds the configured size limit")
-	ErrInvalidSBOM      = errors.New("generated SBOM is invalid")
-	ErrGeneratorVersion = errors.New("SBOM generator version is not allowed")
+	ErrSBOMGeneration    = errors.New("SBOM generation failed")
+	ErrSBOMTooLarge      = errors.New("SBOM exceeds the configured size limit")
+	ErrSBOMImageTooLarge = errors.New("SBOM image layer exceeds the configured size limit")
+	ErrInvalidSBOM       = errors.New("generated SBOM is invalid")
+	ErrGeneratorVersion  = errors.New("SBOM generator version is not allowed")
 )
 
 type SBOMRequest struct {

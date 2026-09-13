@@ -25,6 +25,7 @@ type SyftOptions struct {
 	MaxOutputBytes     int64
 	MaxLayerBytes      int64
 	Credentials        biz.RegistryCredentialProvider
+	ImageGuard         SBOMImageGuard
 	RegistryCACertFile string
 	RegistryHTTPSProxy string
 }
@@ -35,6 +36,7 @@ type SyftGenerator struct {
 	maxOutputBytes     int64
 	maxLayerBytes      int64
 	credentials        biz.RegistryCredentialProvider
+	imageGuard         SBOMImageGuard
 	registryCACertFile string
 	registryHTTPSProxy string
 }
@@ -45,14 +47,14 @@ func NewSyftGenerator(options SyftOptions) (*SyftGenerator, error) {
 	if executable == "" || !filepath.IsAbs(executable) || version == "" ||
 		version != PinnedSyftVersion || options.MaxOutputBytes < 1024 ||
 		options.MaxOutputBytes > 64*1024*1024 || options.MaxLayerBytes < 1024*1024 ||
-		options.MaxLayerBytes > 4*1024*1024*1024 || options.Credentials == nil ||
+		options.MaxLayerBytes > 4*1024*1024*1024 || options.Credentials == nil || options.ImageGuard == nil ||
 		!validRegistryCACertFile(options.RegistryCACertFile) ||
 		!validRegistryHTTPSProxy(options.RegistryHTTPSProxy) {
 		return nil, biz.ErrGeneratorVersion
 	}
 	return &SyftGenerator{
 		executable: executable, expectedVersion: version, maxOutputBytes: options.MaxOutputBytes,
-		maxLayerBytes: options.MaxLayerBytes, credentials: options.Credentials,
+		maxLayerBytes: options.MaxLayerBytes, credentials: options.Credentials, imageGuard: options.ImageGuard,
 		registryCACertFile: options.RegistryCACertFile, registryHTTPSProxy: options.RegistryHTTPSProxy,
 	}, nil
 }
@@ -89,6 +91,9 @@ func (g *SyftGenerator) GenerateSBOM(ctx context.Context, request biz.SBOMReques
 		return biz.SBOMDocument{}, biz.ErrRegistryAuthentication
 	}
 	defer clear(credential.Password)
+	if err := g.imageGuard.ValidateSBOMImage(ctx, request, g.maxLayerBytes, credential); err != nil {
+		return biz.SBOMDocument{}, err
+	}
 	output := &boundedBuffer{maximum: g.maxOutputBytes}
 	command := exec.CommandContext(ctx, g.executable,
 		"scan", "registry:"+request.CanonicalSubject(), "-o", "cyclonedx-json@1.6")

@@ -104,10 +104,18 @@ func run(ctx context.Context, arguments []string) error {
 		return fmt.Errorf("snapshot Registry CA bundle: %w", err)
 	}
 	defer removeRegistryCASnapshot()
+	imageGuard, err := supplychaindata.NewOCIImageGuard(supplychaindata.OCIImageGuardOptions{
+		RegistryCABundle:   registryCABundle,
+		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
+	})
+	if err != nil {
+		return fmt.Errorf("create OCI image guard: %w", err)
+	}
 	generator, err := supplychaindata.NewSyftGenerator(supplychaindata.SyftOptions{
 		Executable: workerConfig.SyftExecutable, ExpectedVersion: workerConfig.SyftVersion,
 		MaxOutputBytes: workerConfig.MaxDocumentBytesValue(),
 		MaxLayerBytes:  workerConfig.MaxLayerBytesValue(), Credentials: credentialProvider,
+		ImageGuard:         imageGuard,
 		RegistryCACertFile: registryCACertFile,
 		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})

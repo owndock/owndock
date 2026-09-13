@@ -431,6 +431,10 @@ func TestRunnerRecordsBoundedGenerationAndRegistryFailures(t *testing.T) {
 			publisher: &sbomPublisherProbe{}, failure: biz.EvidenceJobFailureResourceLimit,
 		},
 		{
+			name: "oversized image layer", generator: &sbomGeneratorProbe{err: biz.ErrSBOMImageTooLarge},
+			publisher: &sbomPublisherProbe{}, failure: biz.EvidenceJobFailureResourceLimit,
+		},
+		{
 			name: "generation", generator: &sbomGeneratorProbe{err: biz.ErrSBOMGeneration},
 			publisher: &sbomPublisherProbe{}, failure: biz.EvidenceJobFailureGeneration,
 		},

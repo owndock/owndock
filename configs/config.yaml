@@ -103,6 +103,8 @@ runtime:
     vulnerability_freshness: 24h
     trusted_roots_directory: /etc/owndock/trusted-roots
     max_document_bytes: 16777216
+    # Maximum declared compressed size of any OCI image layer. Evidence Worker
+    # checks the digest-bound manifest before starting Syft.
     max_layer_bytes: 268435456
     metrics_address: 127.0.0.1:9092
   deployment_worker:

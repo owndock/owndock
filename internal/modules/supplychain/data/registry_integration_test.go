@@ -1,7 +1,9 @@
 package data
 
 import (
+	"archive/tar"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -104,6 +106,29 @@ func TestOCIReferrerClientWithRealRegistry(t *testing.T) {
 	)
 	if _, err := biz.NewCycloneDX16Document(syftOutput, 16*1024*1024); err != nil {
 		t.Fatalf("real pinned Syft returned an invalid CycloneDX 1.6 document: %v", err)
+	}
+	oversizedSubjectDigest := createRegistrySubjectWithLayer(
+		t, ctx, base, "team/oversized", "subject", 2*1024*1024,
+	)
+	imageGuard, err := NewOCIImageGuard(OCIImageGuardOptions{
+		AllowPlainHTTP: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := imageGuard.ValidateSBOMImage(ctx, biz.SBOMRequest{
+		ProjectID: "project-1", RegistryCredentialID: "registry-1",
+		RegistryRepository: strings.TrimPrefix(base, "http://") + "/team/api",
+		SubjectDigest:      subjectDigest, FormatVersion: biz.CycloneDXVersion16,
+	}, 1024*1024, biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}); err != nil {
+		t.Fatalf("valid Registry image guard error = %v", err)
+	}
+	if err := imageGuard.ValidateSBOMImage(ctx, biz.SBOMRequest{
+		ProjectID: "project-1", RegistryCredentialID: "registry-1",
+		RegistryRepository: strings.TrimPrefix(base, "http://") + "/team/oversized",
+		SubjectDigest:      oversizedSubjectDigest, FormatVersion: biz.CycloneDXVersion16,
+	}, 1024*1024, biz.RegistryCredential{AuthenticationMode: registryauth.ModeAnonymous}); !errors.Is(err, biz.ErrSBOMImageTooLarge) {
+		t.Fatalf("oversized Registry image guard error = %v", err)
 	}
 	document, err := biz.NewCycloneDX16Document(
 		[]byte(`{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"operating-system","name":"fixture"}]}`), 4096,
@@ -679,6 +704,57 @@ func createUnsignedRegistrySubject(t *testing.T, ctx context.Context, base, repo
 	manifest := []byte(fmt.Sprintf(
 		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":%q,"size":%d},"layers":[]}`,
 		configDigest, len(config)))
+	return putRegistryManifest(t, ctx, base, repository, tag, ociManifestMediaType, manifest, nil)
+}
+
+func createRegistrySubjectWithLayer(t *testing.T, ctx context.Context, base, repository, tag string,
+	payloadBytes int64) string {
+	t.Helper()
+	var layer bytes.Buffer
+	writer := tar.NewWriter(&layer)
+	if err := writer.WriteHeader(&tar.Header{
+		Name: "usr/share/owndock/oversized-fixture.bin", Mode: 0o644, Size: payloadBytes,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	block := bytes.Repeat([]byte("0123456789abcdef"), 4096)
+	for remaining := payloadBytes; remaining > 0; {
+		chunk := int64(len(block))
+		if chunk > remaining {
+			chunk = remaining
+		}
+		if _, err := writer.Write(block[:chunk]); err != nil {
+			t.Fatal(err)
+		}
+		remaining -= chunk
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	diffID := digestBytes(layer.Bytes())
+	var compressed bytes.Buffer
+	compressor, err := gzip.NewWriterLevel(&compressed, gzip.NoCompression)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := compressor.Write(layer.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := compressor.Close(); err != nil {
+		t.Fatal(err)
+	}
+	layerDigest := digestBytes(compressed.Bytes())
+	uploadRegistryBlob(t, ctx, base, repository, layerDigest, compressed.Bytes(), nil)
+	config := []byte(fmt.Sprintf(
+		`{"architecture":"amd64","os":"linux","rootfs":{"type":"layers","diff_ids":[%q]},"config":{}}`,
+		diffID,
+	))
+	configDigest := digestBytes(config)
+	uploadRegistryBlob(t, ctx, base, repository, configDigest, config, nil)
+	manifest := []byte(fmt.Sprintf(
+		`{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":%q,"size":%d},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar+gzip","digest":%q,"size":%d}]}`,
+		configDigest, len(config), layerDigest, compressed.Len(),
+	))
 	return putRegistryManifest(t, ctx, base, repository, tag, ociManifestMediaType, manifest, nil)
 }
 

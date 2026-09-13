@@ -17,6 +17,16 @@ type syftCredentialProviderStub struct {
 	err        error
 }
 
+type sbomImageGuardStub struct {
+	err error
+}
+
+func (s sbomImageGuardStub) ValidateSBOMImage(
+	context.Context, biz.SBOMRequest, int64, biz.RegistryCredential,
+) error {
+	return s.err
+}
+
 func (s syftCredentialProviderStub) ResolveRegistryCredential(
 	context.Context, string, string, string,
 ) (biz.RegistryCredential, error) {
@@ -76,6 +86,7 @@ printf '%s' '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"component
 	generator, err := NewSyftGenerator(SyftOptions{
 		Executable: executable, ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 4096,
 		MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(),
+		ImageGuard:         sbomImageGuardStub{},
 		RegistryHTTPSProxy: "http://proxy.internal:3128",
 	})
 	if err != nil {
@@ -107,6 +118,7 @@ printf '%s' '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"component
 		Credentials: syftCredentialProviderStub{credential: biz.RegistryCredential{
 			AuthenticationMode: registryauth.ModeAnonymous,
 		}},
+		ImageGuard: sbomImageGuardStub{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -133,7 +145,7 @@ func TestSyftGeneratorFailsClosedForVersionExecutionAndOutput(t *testing.T) {
 			generator, err := NewSyftGenerator(SyftOptions{
 				Executable: writeFakeSyft(t, test.script), ExpectedVersion: PinnedSyftVersion,
 				MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024,
-				Credentials: validSyftCredentialProvider(),
+				Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{},
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -152,13 +164,14 @@ func TestSyftGeneratorFailsClosedForVersionExecutionAndOutput(t *testing.T) {
 
 func TestNewSyftGeneratorRejectsFloatingOrUnsafeConfiguration(t *testing.T) {
 	for _, options := range []SyftOptions{
-		{Executable: "syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
-		{Executable: "/usr/bin/syft", ExpectedVersion: "latest", MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
-		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
-		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 65 * 1024 * 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
-		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 1, Credentials: validSyftCredentialProvider()},
-		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024},
-		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128"},
+		{Executable: "syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: "latest", MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 65 * 1024 * 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 1, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, ImageGuard: sbomImageGuardStub{}},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{}, RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128"},
 	} {
 		if _, err := NewSyftGenerator(options); !errors.Is(err, biz.ErrGeneratorVersion) {
 			t.Fatalf("NewSyftGenerator(%+v) error = %v", options, err)
@@ -168,7 +181,7 @@ func TestNewSyftGeneratorRejectsFloatingOrUnsafeConfiguration(t *testing.T) {
 	invalid.SubjectDigest = "latest"
 	generator, _ := NewSyftGenerator(SyftOptions{
 		Executable: writeFakeSyft(t, "exit 0"), ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024,
-		MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(),
+		MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), ImageGuard: sbomImageGuardStub{},
 	})
 	if _, err := generator.GenerateSBOM(t.Context(), invalid); !errors.Is(err, biz.ErrInvalidEvidenceJob) {
 		t.Fatalf("invalid request error = %v", err)
@@ -184,6 +197,7 @@ func TestSyftGeneratorFailsClosedWhenRegistryCredentialIsUnavailable(t *testing.
 			credential: biz.RegistryCredential{AuthenticationMode: registryauth.ModeBasic, Username: "publisher", Password: []byte(secretSentinel)},
 			err:        errors.New("upstream secret lookup failed"),
 		},
+		ImageGuard: sbomImageGuardStub{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -191,6 +205,28 @@ func TestSyftGeneratorFailsClosedWhenRegistryCredentialIsUnavailable(t *testing.
 	_, err = generator.GenerateSBOM(t.Context(), syftRequest())
 	if !errors.Is(err, biz.ErrRegistryAuthentication) || strings.Contains(err.Error(), secretSentinel) {
 		t.Fatalf("credential failure = %v", err)
+	}
+}
+
+func TestSyftGeneratorRejectsOversizedImageBeforeStartingSyft(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	credentials := &credentialCaptureProvider{username: "publisher", password: "registry-password"}
+	generator, err := NewSyftGenerator(SyftOptions{
+		Executable: writeFakeSyft(t, "touch '"+marker+"'"), ExpectedVersion: PinnedSyftVersion,
+		MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024,
+		Credentials: credentials, ImageGuard: sbomImageGuardStub{err: biz.ErrSBOMImageTooLarge},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generator.GenerateSBOM(t.Context(), syftRequest()); !errors.Is(err, biz.ErrSBOMImageTooLarge) {
+		t.Fatalf("oversized image error = %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Syft subprocess started before image guard: %v", err)
+	}
+	if !credentials.cleared() {
+		t.Fatal("Registry credential was not cleared after the image guard rejected the image")
 	}
 }
 
@@ -205,6 +241,7 @@ printf '%s' "$SYFT_REGISTRY_AUTH_PASSWORD" >&2
 	generator, err := NewSyftGenerator(SyftOptions{
 		Executable: executable, ExpectedVersion: PinnedSyftVersion,
 		MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: credentials,
+		ImageGuard: sbomImageGuardStub{},
 	})
 	if err != nil {
 		t.Fatal(err)
