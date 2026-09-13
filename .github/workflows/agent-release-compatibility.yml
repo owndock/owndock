@@ -26,6 +26,10 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.5
+          cache: true
       - name: Resolve adjacent published releases
         id: releases
         env:
@@ -45,24 +49,16 @@ jobs:
               echo "current tag is not a published release" >&2
               exit 2
             }
-          previous_tag=
-          found_current=false
-          while IFS= read -r candidate; do
-            if [[ "${candidate}" == "${current_tag}" ]]; then
-              found_current=true
-              continue
-            fi
-            if [[ "${found_current}" == true ]] && \
-               [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-              previous_tag=${candidate}
-              break
-            fi
-          done < <(gh release list --limit 100 --exclude-drafts --json tagName \
-            --jq '.[].tagName')
-          if [[ "${found_current}" != true ]]; then
+          tag_list=$(mktemp)
+          trap 'rm -f "${tag_list}"' EXIT
+          gh release list --limit 1000 --exclude-drafts --json tagName \
+            --jq '.[].tagName' > "${tag_list}"
+          if ! grep -Fxq "${current_tag}" "${tag_list}"; then
             echo "current tag is not present in the published release list" >&2
             exit 2
           fi
+          previous_tag=$(go run ./internal/tools/adjacentrelease \
+            -current "${current_tag}" < "${tag_list}")
           printf 'current_tag=%s\n' "${current_tag}" >> "${GITHUB_OUTPUT}"
           printf 'current_version=%s\n' "${current_tag#v}" >> "${GITHUB_OUTPUT}"
           if [[ -z "${previous_tag}" ]]; then
@@ -168,11 +164,6 @@ jobs:
             printf -- '- Lifecycle: previous install → current upgrade → previous rollback passed\n'
             printf -- '- Protocol: live mixed-version conformance remains a separate required gate\n'
           } >> "${GITHUB_STEP_SUMMARY}"
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        if: steps.releases.outputs.has_previous == 'true'
-        with:
-          go-version: 1.26.5
-          cache: true
       - name: Exercise adjacent live mTLS control streams
         if: steps.releases.outputs.has_previous == 'true'
         env:

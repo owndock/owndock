@@ -64,6 +64,16 @@ jobs:
         with:
           go-version: 1.26.5
           cache: true
+      - name: Reject non-monotonic release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release list --limit 1000 --exclude-drafts --json tagName \
+            --jq '.[].tagName' | \
+            go run ./internal/tools/adjacentrelease \
+              -current "${GITHUB_REF_NAME}" -require-newest >/dev/null
       - run: go mod download
       - name: Run repository-local release candidate gate
         run: make test-release-candidate
@@ -215,6 +225,10 @@ jobs:
       packages: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: 1.26.5
+          cache: true
       - name: Verify native Linux community environment
         shell: bash
         run: |
@@ -230,17 +244,14 @@ jobs:
         id: previous
         env:
           GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
           set -euo pipefail
-          previous_tag=
-          while IFS= read -r candidate; do
-            if [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
-              previous_tag=${candidate}
-              break
-            fi
-          done < <(gh release list --limit 100 --exclude-drafts --json tagName \
-            --jq '.[].tagName')
+          previous_tag=$(gh release list --limit 1000 --exclude-drafts --json tagName \
+            --jq '.[].tagName' | \
+            go run ./internal/tools/adjacentrelease \
+              -current "${CURRENT_TAG}" -require-newest)
           if [[ -z "${previous_tag}" ]]; then
             printf 'has_previous=false\n' >> "${GITHUB_OUTPUT}"
             printf '### Community pre-publish compatibility\n\n%s\n' \

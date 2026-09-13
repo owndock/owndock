@@ -30,7 +30,7 @@ make test-release-candidate
 
 工作流为每个 manifest digest 生成 SBOM、Provenance 和 Sigstore keyless 签名，并把五个不可变引用写入签名的 `CONTAINER_IMAGES.txt`。全部镜像构建成功后才提升精确 SemVer tag；重跑只接受 tag 已指向相同 digest 的情况，任何不同 digest 都拒绝覆盖。部署配置应使用清单中的 `image@sha256:digest`，不能仅依赖 tag。
 
-发布工作流在创建 Release 之前会选择上一条已发布的 SemVer Release。首个版本只建立基线；从第二个版本开始，它会下载并离线验证上一版安装包、容器清单与 Sigstore 身份，恢复当前候选构建产生且已经签名的 Server digest，再以两个精确镜像执行：
+发布工作流在耗时构建前先按 SemVer 优先级检查版本单调递增，拒绝低于或等于任何已发布版本的 Tag。它不会依赖 GitHub Release 的显示顺序，而是在最多 1,000 条有界记录中选择严格小于当前版本的最大 SemVer 作为上一版。首个版本只建立基线；从第二个版本开始，它会下载并离线验证上一版安装包、容器清单与 Sigstore 身份，恢复当前候选构建产生且已经签名的 Server digest，再以两个精确镜像执行：
 
 - 上一版启动、Bootstrap 和持久化重启；
 - 升级到当前版并验证版本、登录与数据保持；
