@@ -303,6 +303,20 @@ type RuntimeTargetRetirer interface {
 	) error
 }
 
+// RuntimeTargetDependency converges data and active access owned by another
+// module before target metadata can be deleted. pending=true keeps the durable
+// retirement record discoverable for a later worker poll.
+type RuntimeTargetDependency interface {
+	ConvergeRuntimeTarget(
+		context.Context,
+		string,
+		string,
+		string,
+		string,
+		string,
+	) (pending bool, err error)
+}
+
 type RuntimeTargetProber interface {
 	ProbeRuntimeTarget(
 		context.Context,

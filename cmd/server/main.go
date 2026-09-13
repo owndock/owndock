@@ -384,6 +384,10 @@ func run() error {
 			return fmt.Errorf("create product API: %w", err)
 		}
 		terminalStore := terminaldata.NewMongoRepository(mongoClient.Database())
+		runtimeTargetInventoryConvergence :=
+			runtimeinventorydata.NewRuntimeTargetConvergence(
+				mongoClient.Database(),
+			)
 		terminalUseCase, err := terminalbiz.NewUseCase(
 			terminalStore,
 			terminalStore,
@@ -706,6 +710,9 @@ func run() error {
 			controlPlaneUseCase.WithRuntimeTargetRetirement(
 				controlPlaneStore,
 				deploymentdata.NewRuntimeTargetRetirementAdapter(retirement),
+			).WithRuntimeTargetDependencies(
+				terminalUseCase,
+				runtimeTargetInventoryConvergence,
 			)
 			retirementLoop, retirementLoopErr :=
 				controlplaneworker.NewRuntimeTargetRetirementLoop(

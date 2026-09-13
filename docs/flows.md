@@ -226,6 +226,8 @@ sequenceDiagram
     participant API as Runtime Target API
     participant CP as Control Plane
     participant RW as Retirement Worker
+    participant TS as Terminal Sessions
+    participant RI as Runtime Inventory
     participant DQ as Deployment Repository
     participant W as Deployment Worker
     participant RG as Runtime Gateway
@@ -241,6 +243,10 @@ sequenceDiagram
     RG-->>W: candidate/旧执行已退出
     loop 有界轮询，可跨 Server 重启恢复
         RW->>DB: 按 started_at 扫描 retiring Target
+        RW->>TS: pending/open → closed(target_unavailable)
+        TS-->>RW: WSS 权威复核后关闭活动流
+        RW->>RI: 停止调度并分批删除 observation/current
+        RI-->>RW: 每批最多 256 个 observation
         RW->>DQ: 确认全部终态，按槽位解析稳定 Deployment
     end
     RW->>RG: RemoveRuntime(stable ID + sequence)
@@ -257,7 +263,7 @@ sequenceDiagram
     end
 ```
 
-任一步外部清理失败都会保留 `retiring` 状态并由后续轮询重试；它不会重新开放部署，也不会把普通 cancel 的租约 fence 绕过去。并发 Server 可以重复执行幂等外部清理，但只有一个元数据删除事务会提交最终审计。Agent 删除命令要求持久水位足以保护目标稳定容器，release 仍只接受精确当前水位。
+任一步外部清理失败都会保留 `retiring` 状态并由后续轮询重试；它不会重新开放部署，也不会把普通 cancel 的租约 fence 绕过去。容器终端的新建与连接会被 ready 门禁拒绝，已有票据立即失效，活动会话在权威存储中以 `target_unavailable` 关闭并留下原始删除 Actor/Request 审计；WSS 最迟在下一次复核时关闭流，运行资源清理同时提供最终执行隔离。Inventory 的 Begin/Complete 都复核 Target=ready，清理事务会停止全量/Event 调度并删除 observation、chunk、resource、current、head、counter 和 hint。并发 Server 可以重复执行幂等外部清理，但只有一个元数据删除事务会提交最终审计。Agent 删除命令要求持久水位足以保护目标稳定容器，release 仍只接受精确当前水位。
 
 ## 已实现：Managed Host 与 Runtime Target 绑定
 

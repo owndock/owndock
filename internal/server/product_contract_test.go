@@ -386,6 +386,24 @@ func (s *contractTerminalStore) GetSessionForConnect(
 	return item, nil
 }
 
+func (s *contractTerminalStore) ListActiveSessionsForRuntimeTarget(
+	_ context.Context,
+	organizationID, projectID, runtimeTargetID string,
+	limit int64,
+) ([]terminalbiz.TerminalSession, error) {
+	result := make([]terminalbiz.TerminalSession, 0, limit)
+	for _, item := range s.sessions {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID &&
+			item.RuntimeTargetID == runtimeTargetID && item.Active {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
 func (s *contractTerminalStore) CreateSession(_ context.Context, item terminalbiz.TerminalSession) (terminalbiz.TerminalSession, error) {
 	if existing, ok := s.sessions[item.ID]; ok && existing.Active {
 		return terminalbiz.TerminalSession{}, terminalbiz.ErrSessionSlotConflict

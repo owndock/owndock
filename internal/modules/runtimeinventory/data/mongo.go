@@ -19,6 +19,7 @@ const (
 )
 
 type MongoRepository struct {
+	targets      *mongo.Collection
 	observations *mongo.Collection
 	chunks       *mongo.Collection
 	resources    *mongo.Collection
@@ -30,6 +31,7 @@ type MongoRepository struct {
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
 	return &MongoRepository{
+		targets:      database.Collection("runtime_targets"),
 		observations: database.Collection("runtime_inventory_observations"),
 		chunks:       database.Collection("runtime_inventory_chunks"),
 		resources:    database.Collection("runtime_inventory_resources"),
@@ -91,6 +93,11 @@ func (r *MongoRepository) begin(
 	ctx context.Context,
 	observation biz.Observation,
 ) error {
+	if err := r.requireReadyTarget(
+		ctx, observation.RuntimeTargetID, observation.ManagedHostID,
+	); err != nil {
+		return err
+	}
 	var counter counterDocument
 	err := r.counters.FindOneAndUpdate(
 		ctx,
@@ -324,6 +331,11 @@ func (r *MongoRepository) complete(
 	if observation.RuntimeTargetID != runtimeTargetID {
 		return biz.ErrConflict
 	}
+	if err := r.requireReadyTarget(
+		ctx, observation.RuntimeTargetID, observation.ManagedHostID,
+	); err != nil {
+		return err
+	}
 	if observation.Status == biz.ObservationComplete {
 		var existing headDocument
 		err := r.heads.FindOne(ctx, bson.D{
@@ -430,6 +442,24 @@ func (r *MongoRepository) complete(
 		); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+func (r *MongoRepository) requireReadyTarget(
+	ctx context.Context,
+	runtimeTargetID, managedHostID string,
+) error {
+	err := r.targets.FindOne(ctx, bson.D{
+		{Key: "_id", Value: runtimeTargetID},
+		{Key: "managed_host_id", Value: managedHostID},
+		{Key: "status", Value: "ready"},
+	}, options.FindOne().SetProjection(bson.D{{Key: "_id", Value: 1}})).Err()
+	if err == mongo.ErrNoDocuments {
+		return biz.ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("verify runtime inventory target admission: %w", err)
 	}
 	return nil
 }

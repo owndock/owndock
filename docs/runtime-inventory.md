@@ -83,6 +83,8 @@ sequenceDiagram
 
 租约 token 每次领取都会递增。完成调度时必须同时匹配 Target、owner 和 token，因此旧 Server 在租约过期后迟到的完成请求不能覆盖新 Server 的调度结果。`lease_duration` 必须大于单次 `operation_timeout`，正常任务不会在执行中被第二个实例接管；进程崩溃后则可在租约到期后恢复。
 
+Runtime Target 进入 `retiring` 后，新的 observation `Begin` 和已有 observation `Complete` 都会再次检查 Target 必须为 `ready`，因此已领取租约的迟到 Worker 不能在退役清理后重新切换 current head。退役 Worker 先删除全量/Event 调度与 hint，再按事务每次清理最多 256 个 observation 及其 chunk，并删除 resource、current、head 和 counter；超过一批时保留 Target 退役记录供下一轮继续。该数据完全可重建，不转存为历史审计。
+
 direct 模式在每次操作开始时才把 `secret://alias` 解析成 `OWNDOCK_RUNTIME_<ALIAS>_CA_PEM`、`_CERT_PEM` 和 `_KEY_PEM`。这些字节只用于创建本次 TLS Client，之后会被清零，不写入 Target、observation、MongoDB 或日志。Agent 模式不解析运行时 TLS 凭据，直接使用 Agent mTLS 连接注册表中的 Host 身份。
 
 默认配置是 2 个全量采集并发任务、每 5 分钟成功同步一次、失败 30 秒后重试，单次操作最多 1 分钟，租约 2 分钟。Event 使用独立的 4 个并发任务，每次最多等待 Docker 2 秒，成功后最早 1 秒再次轮询；这样短时订阅不会占用全量采集的 Worker。`max_chunk_bytes` 同时兼容 direct 和 Agent，因此当前配置上限为 48 KiB。未部署 Agent Server 时，Agent 类型目标会安全失败并进入重试，不会退回 direct 连接。两组 Worker 分别以 `runtime_inventory` 和 `runtime_inventory_events` 暴露固定低基数轮询指标；领取目标后创建独立操作 Span，详见 [Worker 可观测性与告警](worker-observability.md)。

@@ -81,6 +81,23 @@ type runtimeTargetRetirerProbe struct {
 	onCall func()
 }
 
+type runtimeTargetDependencyProbe struct {
+	pending bool
+	calls   int
+}
+
+func (p *runtimeTargetDependencyProbe) ConvergeRuntimeTarget(
+	context.Context,
+	string,
+	string,
+	string,
+	string,
+	string,
+) (bool, error) {
+	p.calls++
+	return p.pending, nil
+}
+
 func (p *runtimeTargetRetirerProbe) RetireRuntimeTarget(
 	context.Context,
 	RuntimeTarget,
@@ -225,6 +242,39 @@ func TestContinueRuntimeTargetRetirementToleratesConcurrentCompletion(t *testing
 	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 1)
 	if err != nil || processed != 1 {
 		t.Fatalf("continuation = %d/%v", processed, err)
+	}
+}
+
+func TestRuntimeTargetRetirementWaitsForModuleDependencies(t *testing.T) {
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		targets: []RuntimeTarget{{
+			ID: "target-1", ProjectID: "project-1",
+			Status: RuntimeTargetStatusReady,
+		}},
+	}
+	dependency := &runtimeTargetDependencyProbe{pending: true}
+	useCase := NewUseCase(
+		store, store, store, store, transaction.Passthrough{},
+		&fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	).WithRuntimeTargetRetirement(
+		store, &runtimeTargetRetirerProbe{},
+	).WithRuntimeTargetDependencies(dependency)
+	principal := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleOwner,
+	}
+	completed, err := useCase.DeleteRuntimeTarget(
+		t.Context(), principal, "project-1", "target-1", "request-1",
+	)
+	if err != nil || completed || len(store.targets) != 1 || dependency.calls != 1 {
+		t.Fatalf("pending dependency delete = %t/%v, targets=%d calls=%d", completed, err, len(store.targets), dependency.calls)
+	}
+	dependency.pending = false
+	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 1)
+	if err != nil || processed != 1 || len(store.targets) != 0 || dependency.calls != 2 {
+		t.Fatalf("completed dependency delete = %d/%v, targets=%d calls=%d", processed, err, len(store.targets), dependency.calls)
 	}
 }
 

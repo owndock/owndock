@@ -1682,6 +1682,7 @@ func verifyRuntimeInventoryViewsIntegration(
 	for collection, filter := range map[string]bson.D{
 		"projects":                       {{Key: "organization_id", Value: organizationID}},
 		"managed_hosts":                  {{Key: "organization_id", Value: organizationID}},
+		"runtime_targets":                {{Key: "_id", Value: targetID}},
 		"deployments":                    {{Key: "organization_id", Value: organizationID}},
 		"runtime_inventory_observations": {{Key: "organization_id", Value: organizationID}},
 		"runtime_inventory_resources":    {{Key: "organization_id", Value: organizationID}},
@@ -1705,6 +1706,15 @@ func verifyRuntimeInventoryViewsIntegration(
 		{Key: "organization_id", Value: organizationID},
 	}); err != nil {
 		t.Fatalf("seed inventory view host: %v", err)
+	}
+	if _, err := database.Collection("runtime_targets").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: targetID},
+		{Key: "project_id", Value: projectID},
+		{Key: "managed_host_id", Value: hostID},
+		{Key: "status", Value: controlplanebiz.RuntimeTargetStatusReady},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed inventory view target: %v", err)
 	}
 	if _, err := database.Collection("deployments").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: deploymentID},
@@ -1928,6 +1938,88 @@ func verifyRuntimeInventoryViewsIntegration(
 		recovered.Items[0].Presence != runtimeinventorybiz.PresencePresent ||
 		!recovered.Items[0].FirstSeenAt.Equal(projectPage.Items[0].FirstSeenAt) {
 		t.Fatalf("recovered project inventory = %+v/%v", recovered, err)
+	}
+	late, err := runtimeinventorybiz.NewObservation(
+		"inventory-view-late-observation", organizationID, hostID, targetID,
+		0, 0, startedAt.Add(7*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Begin(ctx, late); err != nil {
+		t.Fatalf("begin late inventory observation: %v", err)
+	}
+	if _, err := database.Collection("runtime_targets").UpdateOne(
+		ctx,
+		bson.D{{Key: "_id", Value: targetID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "retiring"}}}},
+	); err != nil {
+		t.Fatalf("retire inventory target fixture: %v", err)
+	}
+	if err := repository.Complete(
+		ctx, late.ID, targetID, startedAt.Add(8*time.Second),
+	); !errors.Is(err, runtimeinventorybiz.ErrNotFound) {
+		t.Fatalf("retiring target accepted inventory completion: %v", err)
+	}
+	rejected, err := runtimeinventorybiz.NewObservation(
+		"inventory-view-rejected-observation", organizationID, hostID, targetID,
+		0, 0, startedAt.Add(9*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.Begin(ctx, rejected); !errors.Is(
+		err, runtimeinventorybiz.ErrNotFound,
+	) {
+		t.Fatalf("retiring target accepted inventory observation: %v", err)
+	}
+	cleanupBatchFixtures := make([]any, 257)
+	for index := range cleanupBatchFixtures {
+		cleanupBatchFixtures[index] = bson.D{
+			{Key: "_id", Value: fmt.Sprintf("inventory-cleanup-%03d", index)},
+			{Key: "organization_id", Value: organizationID},
+			{Key: "managed_host_id", Value: hostID},
+			{Key: "runtime_target_id", Value: targetID},
+			{Key: "started_at", Value: startedAt.Add(time.Duration(index) * time.Millisecond)},
+		}
+	}
+	if _, err := database.Collection("runtime_inventory_observations").InsertMany(
+		ctx, cleanupBatchFixtures,
+	); err != nil {
+		t.Fatalf("seed bounded inventory cleanup: %v", err)
+	}
+	convergence := runtimeinventorydata.NewRuntimeTargetConvergence(database)
+	pending, err := convergence.ConvergeRuntimeTarget(
+		ctx, organizationID, projectID, targetID, "owner-1", "request-1",
+	)
+	if err != nil || !pending {
+		t.Fatalf("first inventory convergence = %t/%v", pending, err)
+	}
+	pending, err = convergence.ConvergeRuntimeTarget(
+		ctx, organizationID, projectID, targetID, "owner-1", "request-1",
+	)
+	if err != nil || pending {
+		t.Fatalf("completed inventory convergence = %t/%v", pending, err)
+	}
+	for _, collection := range []string{
+		"runtime_inventory_observations", "runtime_inventory_chunks",
+		"runtime_inventory_resources", "runtime_inventory_current",
+		"runtime_inventory_heads", "runtime_inventory_counters",
+		"runtime_inventory_schedule", "runtime_inventory_event_hints",
+	} {
+		filter := bson.D{{Key: "runtime_target_id", Value: targetID}}
+		switch collection {
+		case "runtime_inventory_chunks":
+			filter = bson.D{{Key: "observation_id", Value: bson.D{{
+				Key: "$in", Value: bson.A{observation.ID, empty.ID, recovery.ID},
+			}}}}
+		case "runtime_inventory_schedule":
+			filter = bson.D{{Key: "_id", Value: targetID}}
+		}
+		count, countErr := database.Collection(collection).CountDocuments(ctx, filter)
+		if countErr != nil || count != 0 {
+			t.Fatalf("converged %s count = %d/%v", collection, count, countErr)
+		}
 	}
 }
 
@@ -3623,6 +3715,20 @@ func verifyRuntimeInventoryIntegration(
 	database *drivermongo.Database,
 ) {
 	t.Helper()
+	if _, err := database.Collection("runtime_targets").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "inventory-target"},
+		{Key: "project_id", Value: "inventory-project"},
+		{Key: "managed_host_id", Value: "inventory-host"},
+		{Key: "status", Value: controlplanebiz.RuntimeTargetStatusReady},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed runtime inventory target: %v", err)
+	}
+	defer func() {
+		_, _ = database.Collection("runtime_targets").DeleteOne(
+			context.Background(), bson.D{{Key: "_id", Value: "inventory-target"}},
+		)
+	}()
 	repository := runtimeinventorydata.NewMongoRepository(database)
 	startedAt := time.Now().UTC().Add(-time.Minute)
 	first, err := runtimeinventorybiz.NewObservation(
@@ -4529,6 +4635,7 @@ func assertTerminalIndexes(t *testing.T, ctx context.Context, database *drivermo
 			"idx_terminal_actor_created":                 false,
 			"idx_terminal_expiry_reconciliation":         false,
 			"idx_terminal_authentication_session_active": false,
+			"idx_terminal_runtime_target_active":         false,
 		},
 	} {
 		cursor, err := database.Collection(collection).Indexes().List(ctx)
@@ -4637,6 +4744,12 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	}
 	if _, err := repository.CreateSession(ctx, second); err != nil {
 		t.Fatalf("reuse released terminal slot: %v", err)
+	}
+	activeForTarget, err := repository.ListActiveSessionsForRuntimeTarget(
+		ctx, second.OrganizationID, second.ProjectID, second.RuntimeTargetID, 10,
+	)
+	if err != nil || len(activeForTarget) != 1 || activeForTarget[0].ID != second.ID {
+		t.Fatalf("active terminal sessions for target = %+v/%v", activeForTarget, err)
 	}
 	stored, err := repository.GetSession(ctx, first.OrganizationID, first.ID)
 	if err != nil || stored.Active || stored.TicketHash != "" || stored.CloseReason != terminalbiz.CloseReasonUserRequested {

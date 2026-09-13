@@ -25,6 +25,9 @@ type SessionRepository interface {
 	CreateSession(context.Context, TerminalSession) (TerminalSession, error)
 	SaveSession(context.Context, TerminalSession, uint64) (TerminalSession, error)
 	ConsumeTicket(context.Context, string, string, string, time.Time) (TerminalSession, error)
+	ListActiveSessionsForRuntimeTarget(
+		context.Context, string, string, string, int64,
+	) ([]TerminalSession, error)
 }
 
 type PrincipalResolver interface {
@@ -165,6 +168,77 @@ type UseCase struct {
 	tickets      TicketTokens
 	newID        func() (string, error)
 	now          func() time.Time
+}
+
+const runtimeTargetConvergenceBatchSize int64 = 64
+
+// ConvergeRuntimeTarget closes every matching session in authoritative storage.
+// Connected transports observe the terminal state during periodic review and
+// close their streams. Direct closure prevents an abandoned open row from
+// blocking target retirement after an abrupt Server exit.
+func (u *UseCase) ConvergeRuntimeTarget(
+	ctx context.Context,
+	organizationID, projectID, runtimeTargetID, actorID, requestID string,
+) (bool, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	projectID = strings.TrimSpace(projectID)
+	runtimeTargetID = strings.TrimSpace(runtimeTargetID)
+	actorID = strings.TrimSpace(actorID)
+	if organizationID == "" || projectID == "" || runtimeTargetID == "" ||
+		actorID == "" {
+		return false, ErrTerminalUnavailable
+	}
+	sessions, err := u.sessions.ListActiveSessionsForRuntimeTarget(
+		ctx, organizationID, projectID, runtimeTargetID,
+		runtimeTargetConvergenceBatchSize,
+	)
+	if err != nil {
+		return false, err
+	}
+	pending := int64(len(sessions)) == runtimeTargetConvergenceBatchSize
+	for _, session := range sessions {
+		updated, updateErr := session.Close(
+			CloseReasonTargetUnavailable, "", u.now().UTC(),
+		)
+		if updateErr != nil {
+			return false, updateErr
+		}
+		if updated.Version == session.Version {
+			continue
+		}
+		auditID, auditErr := u.newID()
+		if auditErr != nil {
+			return false, auditErr
+		}
+		now := u.now().UTC()
+		transactionErr := u.transaction.WithinTransaction(
+			ctx,
+			func(transactionContext context.Context) error {
+				_, saveErr := u.sessions.SaveSession(
+					transactionContext, updated, session.Version,
+				)
+				if saveErr != nil {
+					return saveErr
+				}
+				return u.audit.Record(transactionContext, sharedaudit.Event{
+					ID: auditID, OrganizationID: organizationID,
+					ProjectID: projectID, ActorID: actorID,
+					Action:       "terminal_session.close_for_runtime_target_retirement",
+					ResourceType: "terminal_session", ResourceID: session.ID,
+					RequestID: requestID, CreatedAt: now,
+				})
+			},
+		)
+		if errors.Is(transactionErr, ErrSessionConflict) ||
+			errors.Is(transactionErr, ErrSessionNotFound) {
+			pending = true
+			continue
+		}
+		if transactionErr != nil {
+			return false, transactionErr
+		}
+	}
+	return pending, nil
 }
 
 func (u *UseCase) WithContainerGateway(gateway ContainerGateway) *UseCase {

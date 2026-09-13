@@ -118,6 +118,41 @@ func (r *MongoRepository) GetSessionForConnect(
 	return session, nil
 }
 
+func (r *MongoRepository) ListActiveSessionsForRuntimeTarget(
+	ctx context.Context,
+	organizationID, projectID, runtimeTargetID string,
+	limit int64,
+) ([]biz.TerminalSession, error) {
+	cursor, err := r.sessions.Find(
+		ctx,
+		bson.D{
+			{Key: "organization_id", Value: organizationID},
+			{Key: "project_id", Value: projectID},
+			{Key: "runtime_target_id", Value: runtimeTargetID},
+			{Key: "active", Value: true},
+		},
+		options.Find().SetSort(bson.D{
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find active Runtime Target terminal sessions: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []sessionDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode active Runtime Target terminal sessions: %w", err)
+	}
+	result := make([]biz.TerminalSession, len(documents))
+	for index, document := range documents {
+		result[index] = document.domain()
+		if err := validateStoredSession(result[index]); err != nil {
+			return nil, fmt.Errorf("decode active Runtime Target terminal session: %w", err)
+		}
+	}
+	return result, nil
+}
+
 func (r *MongoRepository) CreateSession(ctx context.Context, session biz.TerminalSession) (biz.TerminalSession, error) {
 	if err := session.Validate(); err != nil || session.UserConcurrencySlot < 1 || session.TargetConcurrencySlot < 1 {
 		return biz.TerminalSession{}, biz.ErrInvalidSession

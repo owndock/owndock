@@ -170,6 +170,8 @@ stateDiagram-v2
 
 终止 API 是幂等的。pending 会话终止时立即清除票据并释放并发槽位；open 会话先进入 closing，后续 Gateway 完成 PTY/exec 回收后进入终态。
 
+Runtime Target 删除使用同一状态机收敛容器终端：Target 一进入 `retiring` 就拒绝新的会话与连接；后台任务按 Target 有界扫描活动会话，把 pending/open 会话在权威存储中直接关闭为 `target_unavailable`。这样即使持有流的 Server 突然退出，也不会留下永久 `closing` 行阻塞退役；仍在线的 WSS 最迟在下一次复核时观察终态并关闭流，随后运行资源清理提供最终执行隔离。每个发生转换的会话都记录原始 Target 删除 Actor 与 Request ID。主机终端只绑定 Managed Host，不会因某个 Project Runtime Target 删除而终止。
+
 ## 数据与审计边界
 
 MongoDB 保存会话目标引用、操作者、连接方式、来源 IP、User-Agent、请求 ID、时间、状态、安全错误码和结束原因。数据库只保存票据 SHA-256 摘要。

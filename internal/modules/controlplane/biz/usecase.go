@@ -35,25 +35,35 @@ type ManagedHostLookup interface {
 }
 
 type UseCase struct {
-	projects         ProjectRepository
-	members          ProjectMemberRepository
-	applications     ApplicationRepository
-	releases         ReleaseRepository
-	artifactReleases ArtifactReleaseRepository
-	targets          RuntimeTargetRepository
-	targetProbes     RuntimeTargetProbeRepository
-	targetProber     RuntimeTargetProber
-	targetLifecycle  RuntimeTargetLifecycleRepository
-	targetRetirer    RuntimeTargetRetirer
-	managedHosts     ManagedHostLookup
-	registries       RegistryCredentialRepository
-	environments     EnvironmentRepository
-	templates        TemplateCatalog
-	transaction      transaction.Manager
-	audit            sharedaudit.Recorder
-	auditReader      sharedaudit.Reader
-	newID            IDGenerator
-	now              Clock
+	projects           ProjectRepository
+	members            ProjectMemberRepository
+	applications       ApplicationRepository
+	releases           ReleaseRepository
+	artifactReleases   ArtifactReleaseRepository
+	targets            RuntimeTargetRepository
+	targetProbes       RuntimeTargetProbeRepository
+	targetProber       RuntimeTargetProber
+	targetLifecycle    RuntimeTargetLifecycleRepository
+	targetRetirer      RuntimeTargetRetirer
+	targetDependencies []RuntimeTargetDependency
+	managedHosts       ManagedHostLookup
+	registries         RegistryCredentialRepository
+	environments       EnvironmentRepository
+	templates          TemplateCatalog
+	transaction        transaction.Manager
+	audit              sharedaudit.Recorder
+	auditReader        sharedaudit.Reader
+	newID              IDGenerator
+	now                Clock
+}
+
+func (u *UseCase) WithRuntimeTargetDependencies(
+	dependencies ...RuntimeTargetDependency,
+) *UseCase {
+	u.targetDependencies = append(
+		u.targetDependencies[:0], dependencies...,
+	)
+	return u
 }
 
 func (u *UseCase) WithRuntimeTargetRetirement(
@@ -898,6 +908,20 @@ func (u *UseCase) continueRuntimeTargetRetirement(
 	principal := security.Principal{
 		UserID: retirement.ActorID, OrganizationID: retirement.OrganizationID,
 	}
+	dependenciesPending := false
+	for _, dependency := range u.targetDependencies {
+		if dependency == nil {
+			return false, ErrRuntimeTargetRetirementUnavailable
+		}
+		pending, err := dependency.ConvergeRuntimeTarget(
+			ctx, retirement.OrganizationID, target.ProjectID, target.ID,
+			retirement.ActorID, retirement.RequestID,
+		)
+		if err != nil {
+			return false, err
+		}
+		dependenciesPending = dependenciesPending || pending
+	}
 	if err := u.targetRetirer.RetireRuntimeTarget(
 		ctx, target, principal, retirement.RequestID,
 	); err != nil {
@@ -905,6 +929,9 @@ func (u *UseCase) continueRuntimeTargetRetirement(
 			return false, nil
 		}
 		return false, err
+	}
+	if dependenciesPending {
+		return false, nil
 	}
 	deleteAuditID, err := u.newID()
 	if err != nil {

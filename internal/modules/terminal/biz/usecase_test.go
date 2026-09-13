@@ -48,6 +48,98 @@ func TestUseCaseCreatesAuditsAndTerminatesContainerSession(t *testing.T) {
 	}
 }
 
+func TestConvergeRuntimeTargetClosesTicketsAndDrainsConnectedSessions(t *testing.T) {
+	useCase, sessions, audits := newTestUseCase(t)
+	principal := terminalPrincipal(security.RoleMaintainer, "maintainer-1")
+	useCase.WithPrincipalResolver(&terminalPrincipalResolverStub{principal: principal})
+	pending, err := useCase.CreateContainerSession(
+		t.Context(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-pending",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connected, err := useCase.CreateContainerSession(
+		t.Context(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-connected",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open, err := sessions.items[connected.Session.ID].MarkOpen(time.Unix(101, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions.items[open.ID] = open
+
+	waiting, err := useCase.ConvergeRuntimeTarget(
+		t.Context(), "organization-1", "project-1", "target-1",
+		"owner-1", "target-delete-request",
+	)
+	if err != nil || waiting {
+		t.Fatalf("first convergence = %t/%v", waiting, err)
+	}
+	closedTicket := sessions.items[pending.Session.ID]
+	closingStream := sessions.items[connected.Session.ID]
+	if closedTicket.Status != StatusClosed || closedTicket.Active ||
+		closedTicket.TicketHash != "" ||
+		closedTicket.CloseReason != CloseReasonTargetUnavailable ||
+		closingStream.Status != StatusClosed || closingStream.Active ||
+		closingStream.CloseReason != CloseReasonTargetUnavailable {
+		t.Fatalf("pending = %+v, connected = %+v", closedTicket, closingStream)
+	}
+	if len(audits.events) != 4 ||
+		audits.events[2].Action != "terminal_session.close_for_runtime_target_retirement" ||
+		audits.events[3].Action != "terminal_session.close_for_runtime_target_retirement" {
+		t.Fatalf("audit events = %+v", audits.events)
+	}
+	review, err := useCase.ReviewConnectedSession(t.Context(), open)
+	if err != nil || !review.Terminate ||
+		review.Reason != CloseReasonTargetUnavailable {
+		t.Fatalf("connected stream review = %+v/%v", review, err)
+	}
+	waiting, err = useCase.ConvergeRuntimeTarget(
+		t.Context(), "organization-1", "project-1", "target-1",
+		"owner-1", "target-delete-request",
+	)
+	if err != nil || waiting {
+		t.Fatalf("completed convergence = %t/%v", waiting, err)
+	}
+}
+
+func TestConvergeRuntimeTargetHandlesRepositoryFailuresAndConflicts(t *testing.T) {
+	useCase, sessions, _ := newTestUseCase(t)
+	if _, err := useCase.ConvergeRuntimeTarget(
+		t.Context(), "", "", "", "", "",
+	); !errors.Is(err, ErrTerminalUnavailable) {
+		t.Fatalf("invalid scope error = %v", err)
+	}
+	probe := errors.New("list failed")
+	sessions.listErr = probe
+	if _, err := useCase.ConvergeRuntimeTarget(
+		t.Context(), "organization-1", "project-1", "target-1",
+		"owner-1", "request-1",
+	); !errors.Is(err, probe) {
+		t.Fatalf("list failure = %v", err)
+	}
+	sessions.listErr = nil
+	principal := terminalPrincipal(security.RoleMaintainer, "maintainer-1")
+	if _, err := useCase.CreateContainerSession(
+		t.Context(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-create",
+	); err != nil {
+		t.Fatal(err)
+	}
+	sessions.saveErr = ErrSessionConflict
+	pending, err := useCase.ConvergeRuntimeTarget(
+		t.Context(), "organization-1", "project-1", "target-1",
+		"owner-1", "request-1",
+	)
+	if err != nil || !pending {
+		t.Fatalf("conflict convergence = %t/%v", pending, err)
+	}
+}
+
 func TestUseCaseEnforcesDefaultRoleAndDistributedConcurrencyPolicy(t *testing.T) {
 	useCase, _, _ := newTestUseCase(t)
 	developer := terminalPrincipal(security.RoleDeveloper, "developer-1")
@@ -347,7 +439,11 @@ func (terminalPolicyStore) SavePolicy(_ context.Context, policy AccessPolicy, _ 
 	return policy, nil
 }
 
-type terminalSessionStore struct{ items map[string]TerminalSession }
+type terminalSessionStore struct {
+	items   map[string]TerminalSession
+	listErr error
+	saveErr error
+}
 
 func (s *terminalSessionStore) GetSession(_ context.Context, organizationID, sessionID string) (TerminalSession, error) {
 	item, ok := s.items[sessionID]
@@ -363,6 +459,26 @@ func (s *terminalSessionStore) GetSessionForConnect(_ context.Context, sessionID
 	}
 	return item, nil
 }
+func (s *terminalSessionStore) ListActiveSessionsForRuntimeTarget(
+	_ context.Context,
+	organizationID, projectID, runtimeTargetID string,
+	limit int64,
+) ([]TerminalSession, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	result := make([]TerminalSession, 0, limit)
+	for _, item := range s.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID &&
+			item.RuntimeTargetID == runtimeTargetID && item.Active {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
 func (s *terminalSessionStore) CreateSession(_ context.Context, candidate TerminalSession) (TerminalSession, error) {
 	for _, item := range s.items {
 		if !item.Active || item.OrganizationID != candidate.OrganizationID {
@@ -377,6 +493,9 @@ func (s *terminalSessionStore) CreateSession(_ context.Context, candidate Termin
 	return candidate, nil
 }
 func (s *terminalSessionStore) SaveSession(_ context.Context, item TerminalSession, expectedVersion uint64) (TerminalSession, error) {
+	if s.saveErr != nil {
+		return TerminalSession{}, s.saveErr
+	}
 	current, ok := s.items[item.ID]
 	if !ok {
 		return TerminalSession{}, ErrSessionNotFound
