@@ -281,6 +281,7 @@ jobs:
             --pattern "owndock-community_${PREVIOUS_VERSION}.tar.gz" \
             --pattern COMMUNITY_SHA256SUMS \
             --pattern COMMUNITY_SHA256SUMS.sigstore.json \
+            --pattern 'COMMUNITY_COMPATIBILITY_*.txt' \
             --pattern CONTAINER_IMAGES.txt \
             --pattern CONTAINER_IMAGES.sigstore.json
       - name: Verify previous release identity and resolve Server image
@@ -314,13 +315,11 @@ jobs:
           fi
           printf 'reference=%s\n' "${references[0]}" >> "${GITHUB_OUTPUT}"
       - name: Restore current immutable Server digest
-        if: steps.previous.outputs.has_previous == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: container-digest-owndock-${{ github.sha }}
           path: compatibility/current-digest
       - name: Resolve current Server image
-        if: steps.previous.outputs.has_previous == 'true'
         id: current-image
         shell: bash
         run: |
@@ -371,6 +370,43 @@ jobs:
             printf -- '- Candidate: `%s`\n' "${GITHUB_REF_NAME}"
             printf -- '- Signed adjacent upgrade, rollback, and recovery passed\n'
           } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Create community compatibility evidence
+        env:
+          CURRENT_IMAGE: ${{ steps.current-image.outputs.reference }}
+          CURRENT_VERSION: ${{ needs.validate.outputs.version }}
+          HAS_PREVIOUS: ${{ steps.previous.outputs.has_previous }}
+          PREVIOUS_IMAGE: ${{ steps.previous-image.outputs.reference }}
+          PREVIOUS_TAG: ${{ steps.previous.outputs.tag }}
+          PREVIOUS_VERSION: ${{ steps.previous.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p compatibility-report
+          report="compatibility-report/COMMUNITY_COMPATIBILITY_${{ matrix.goarch }}.txt"
+          {
+            printf 'schema=owndock-community-compatibility-v1\n'
+            printf 'result=%s\n' "$(if [[ "${HAS_PREVIOUS}" == true ]]; then printf passed; else printf baseline; fi)"
+            printf 'current_tag=%s\n' "${GITHUB_REF_NAME}"
+            printf 'current_version=%s\n' "${CURRENT_VERSION}"
+            printf 'current_commit=%s\n' "${GITHUB_SHA}"
+            printf 'architecture=%s\n' '${{ matrix.goarch }}'
+            printf 'machine=%s\n' "$(uname -m)"
+            printf 'kernel=%s\n' "$(uname -r)"
+            printf 'docker_engine=%s\n' "$(docker info --format '{{.ServerVersion}}')"
+            printf 'previous_tag=%s\n' "${PREVIOUS_TAG}"
+            printf 'previous_version=%s\n' "${PREVIOUS_VERSION}"
+            printf 'previous_image=%s\n' "${PREVIOUS_IMAGE}"
+            printf 'current_image=%s\n' "${CURRENT_IMAGE}"
+          } > "${report}"
+          test ! -L "${report}"
+          test -s "${report}"
+      - name: Preserve community compatibility evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: community-compatibility-${{ github.sha }}-${{ matrix.goarch }}
+          path: compatibility-report/
+          if-no-files-found: error
+          retention-days: 1
 
   publish:
     if: github.repository == 'owndock/owndock'
@@ -393,6 +429,12 @@ jobs:
         with:
           pattern: container-digest-*-${{ github.sha }}
           path: container-digests
+          merge-multiple: true
+      - name: Restore community compatibility evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: community-compatibility-${{ github.sha }}-*
+          path: dist
           merge-multiple: true
       - name: Login to GitHub Container Registry
         uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
@@ -454,9 +496,13 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             --offline
           cd dist
+          test -s COMMUNITY_COMPATIBILITY_amd64.txt
+          test -s COMMUNITY_COMPATIBILITY_arm64.txt
           sha256sum \
             "owndock-community_${{ needs.validate.outputs.version }}.tar.gz" \
-            CONTAINER_IMAGES.txt > COMMUNITY_SHA256SUMS
+            CONTAINER_IMAGES.txt \
+            COMMUNITY_COMPATIBILITY_amd64.txt \
+            COMMUNITY_COMPATIBILITY_arm64.txt > COMMUNITY_SHA256SUMS
           cd ..
           cosign sign-blob --yes \
             --bundle dist/COMMUNITY_SHA256SUMS.sigstore.json \
@@ -496,6 +542,8 @@ jobs:
             "dist/owndock-community_${VERSION}.tar.gz" \
             dist/COMMUNITY_SHA256SUMS \
             dist/COMMUNITY_SHA256SUMS.sigstore.json \
+            dist/COMMUNITY_COMPATIBILITY_amd64.txt \
+            dist/COMMUNITY_COMPATIBILITY_arm64.txt \
             dist/verify-owndock-agent-release
       - name: Dispatch adjacent release compatibility matrices
         env:

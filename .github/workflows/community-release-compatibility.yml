@@ -116,12 +116,14 @@ jobs:
             --pattern "owndock-community_${CURRENT_VERSION}.tar.gz" \
             --pattern COMMUNITY_SHA256SUMS \
             --pattern COMMUNITY_SHA256SUMS.sigstore.json \
+            --pattern 'COMMUNITY_COMPATIBILITY_*.txt' \
             --pattern CONTAINER_IMAGES.txt \
             --pattern CONTAINER_IMAGES.sigstore.json
           gh release download "${PREVIOUS_TAG}" --dir compatibility/previous \
             --pattern "owndock-community_${PREVIOUS_VERSION}.tar.gz" \
             --pattern COMMUNITY_SHA256SUMS \
             --pattern COMMUNITY_SHA256SUMS.sigstore.json \
+            --pattern 'COMMUNITY_COMPATIBILITY_*.txt' \
             --pattern CONTAINER_IMAGES.txt \
             --pattern CONTAINER_IMAGES.sigstore.json
       - name: Verify release identities, bundles, and immutable Server images

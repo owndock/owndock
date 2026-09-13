@@ -13,8 +13,10 @@
 - `COMMUNITY_SHA256SUMS.sigstore.json`；
 - `CONTAINER_IMAGES.txt`；
 - `CONTAINER_IMAGES.sigstore.json`；
+- `COMMUNITY_COMPATIBILITY_amd64.txt`；
+- `COMMUNITY_COMPATIBILITY_arm64.txt`；
 
-先使用精确 Tag 的 Release 工作流身份离线验证 `COMMUNITY_SHA256SUMS.sigstore.json`，再校验安装包与 `CONTAINER_IMAGES.txt` 的 SHA-256。下面的 `<tag>` 必须替换为正在安装的完整 Tag，例如 `v0.1.0`：
+先使用精确 Tag 的 Release 工作流身份离线验证 `COMMUNITY_SHA256SUMS.sigstore.json`，再校验安装包、`CONTAINER_IMAGES.txt` 和两份原生架构兼容报告的 SHA-256。兼容报告记录精确前后版本、Server digest、commit、内核和 Docker Engine；`result=baseline` 表示首个版本不存在可比较的上一版，不能解释为相邻升级已经验证。下面的 `<tag>` 必须替换为正在安装的完整 Tag，例如 `v0.1.0`：
 
 ```bash
 cosign verify-blob COMMUNITY_SHA256SUMS \
