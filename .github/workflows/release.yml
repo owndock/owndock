@@ -200,6 +200,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
+      actions: write
       contents: write
       packages: write
       id-token: write
@@ -318,3 +319,15 @@ jobs:
             dist/COMMUNITY_SHA256SUMS \
             dist/COMMUNITY_SHA256SUMS.sigstore.json \
             dist/verify-owndock-agent-release
+      - name: Dispatch adjacent release compatibility matrices
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh workflow run agent-release-compatibility.yml \
+            --ref "${GITHUB_REF_NAME}" \
+            --field current_tag="${GITHUB_REF_NAME}"
+          gh workflow run community-release-compatibility.yml \
+            --ref "${GITHUB_REF_NAME}" \
+            --field current_tag="${GITHUB_REF_NAME}"
