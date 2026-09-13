@@ -66,6 +66,7 @@ type TerminalWSS struct {
 	now            func() time.Time
 	reviewInterval time.Duration
 	reviewTimeout  time.Duration
+	writeTimeout   time.Duration
 }
 
 func NewTerminalWSS(
@@ -76,6 +77,7 @@ func NewTerminalWSS(
 		connector: connector, now: time.Now,
 		reviewInterval: terminalReviewInterval,
 		reviewTimeout:  terminalReviewTimeout,
+		writeTimeout:   terminalWriteTimeout,
 	}
 	if len(observers) > 0 {
 		service.observer = observers[0]
@@ -147,7 +149,7 @@ func (s *TerminalWSS) ServeHTTP(w http.ResponseWriter, r *http.Request, sessionI
 	ready, _ := terminalprotocol.EncodeControl(terminalprotocol.Control{
 		Version: terminalprotocol.Version, Type: terminalprotocol.TypeReady, Sequence: 1,
 	}, terminalprotocol.DirectionServerToClient)
-	writeContext, cancelWrite := context.WithTimeout(streamContext, terminalWriteTimeout)
+	writeContext, cancelWrite := context.WithTimeout(streamContext, s.writeTimeoutDuration())
 	err = connection.Write(writeContext, websocket.MessageText, ready)
 	cancelWrite()
 	if err != nil {
@@ -331,7 +333,7 @@ func (s *TerminalWSS) writePermissionRevoked(
 	if err != nil {
 		return err
 	}
-	writeContext, cancel := context.WithTimeout(ctx, terminalWriteTimeout)
+	writeContext, cancel := context.WithTimeout(ctx, s.writeTimeoutDuration())
 	defer cancel()
 	return connection.Write(writeContext, websocket.MessageText, payload)
 }
@@ -423,7 +425,7 @@ func (s *TerminalWSS) readClient(
 					Version: terminalprotocol.Version, Type: terminalprotocol.TypePong,
 					Sequence: serverSequence.Add(1),
 				}, terminalprotocol.DirectionServerToClient)
-				writeContext, cancel := context.WithTimeout(ctx, terminalWriteTimeout)
+				writeContext, cancel := context.WithTimeout(ctx, s.writeTimeoutDuration())
 				err := connection.Write(writeContext, websocket.MessageText, pong)
 				cancel()
 				if err != nil {
@@ -449,7 +451,7 @@ func (s *TerminalWSS) writeOutput(
 		read, err := stream.Read(buffer)
 		if read > 0 {
 			signalTerminalActivity(activity)
-			writeContext, cancel := context.WithTimeout(ctx, terminalWriteTimeout)
+			writeContext, cancel := context.WithTimeout(ctx, s.writeTimeoutDuration())
 			writeErr := connection.Write(writeContext, websocket.MessageBinary, buffer[:read])
 			cancel()
 			if writeErr != nil {
@@ -460,6 +462,13 @@ func (s *TerminalWSS) writeOutput(
 			return terminalBridgeResult{err: err}
 		}
 	}
+}
+
+func (s *TerminalWSS) writeTimeoutDuration() time.Duration {
+	if s.writeTimeout <= 0 {
+		return terminalWriteTimeout
+	}
+	return s.writeTimeout
 }
 
 func (s *TerminalWSS) closeSession(

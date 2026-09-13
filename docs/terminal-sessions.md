@@ -77,7 +77,7 @@ sequenceDiagram
 
 浏览器原生 WebSocket 不能设置普通 REST `Authorization` Header。OwnDock 不把 Bearer Token 放进 URL 或 WebSocket 子协议，而是在创建 TerminalSession 时只保存当前登录会话 ID。连接时，一次性 Cookie 证明本次终端凭据的持有权，Server 再确认所绑定的登录会话没有退出或被撤销，并实时复核角色、策略和目标。随后 MongoDB 原子消费票据；同一票据过期或重放都会失败。
 
-WSS 固定使用 `owndock.terminal.v1` 子协议。文本控制消息承载 `OPEN/READY/RESIZE/PING/PONG/CLOSE/ERROR`，二进制消息按方向承载 stdin 或 TTY stdout。控制消息最大 4 KiB，单个数据消息最大 32 KiB，输入最多 200 条/秒，输出逐条写入并受写超时约束，不建立无界队列。首条消息必须是带初始窗口尺寸的 `OPEN`，后续控制序号必须连续递增。
+WSS 固定使用 `owndock.terminal.v1` 子协议。文本控制消息承载 `OPEN/READY/RESIZE/PING/PONG/CLOSE/ERROR`，二进制消息按方向承载 stdin 或 TTY stdout。控制消息最大 4 KiB，单个数据消息最大 32 KiB，输入最多 200 条/秒，输出逐条写入并受写超时约束，不建立无界队列。慢读导致写截止、终端后端输入阻塞、浏览器硬断线都会关闭整条 Stream 并只持久化稳定原因；idle/max timer 不会被阻塞 I/O 绕过。首条消息必须是带初始窗口尺寸的 `OPEN`，后续控制序号必须连续递增。
 
 客户端消息超过大小上限时以 WebSocket `1009` 和 `terminal_message_too_large` 关闭；速率超限或控制序号/方向违规时以 `1008` 和 `terminal_rate_limit_exceeded` / `terminal_protocol_violation` 关闭。这些稳定码可供前端显示通俗说明，底层解析错误和用户输入不会写入关闭原因或数据库。
 

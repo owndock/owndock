@@ -21,7 +21,7 @@ import (
 
 type wssConnectorStub struct {
 	mu               sync.Mutex
-	stream           *wssStreamStub
+	stream           biz.TerminalStream
 	connected        int
 	closed           int
 	sessionID        string
@@ -122,6 +122,34 @@ type wssStreamStub struct {
 	output  *io.PipeWriter
 	closed  sync.Once
 	resize  chan biz.TerminalSize
+}
+
+type blockingInputWSSStream struct {
+	*wssStreamStub
+	blocked chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func newBlockingInputWSSStream() *blockingInputWSSStream {
+	return &blockingInputWSSStream{
+		wssStreamStub: newWSSStreamStub(), blocked: make(chan struct{}), release: make(chan struct{}),
+	}
+}
+
+func (s *blockingInputWSSStream) Write([]byte) (int, error) {
+	s.once.Do(func() { close(s.blocked) })
+	<-s.release
+	return 0, io.ErrClosedPipe
+}
+
+func (s *blockingInputWSSStream) Close() error {
+	select {
+	case <-s.release:
+	default:
+		close(s.release)
+	}
+	return s.wssStreamStub.Close()
 }
 
 func newWSSStreamStub() *wssStreamStub {
@@ -697,6 +725,165 @@ func TestContainerWSSRejectsInvalidControlSequenceWithStableCode(t *testing.T) {
 	if connector.safeCode != "terminal_protocol_violation" {
 		t.Fatalf("safe code = %q", connector.safeCode)
 	}
+}
+
+func TestContainerWSSClosesSlowOutputConsumerWithinWriteDeadline(t *testing.T) {
+	stream := newWSSStreamStub()
+	closeDone := make(chan struct{})
+	connector := &wssConnectorStub{stream: stream, closeDone: closeDone}
+	handler := NewTerminalWSS(connector)
+	handler.writeTimeout = 25 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	connection := dialOpenTerminalWSS(t, ctx, handler, "terminal-session-1")
+
+	producerDone := make(chan struct{})
+	go func() {
+		defer close(producerDone)
+		payload := bytes.Repeat([]byte("x"), terminalprotocol.MaximumDataMessageBytes)
+		for {
+			if _, err := stream.output.Write(payload); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case <-producerDone:
+		// The server closed the stream after its bounded WebSocket write expired.
+	case <-ctx.Done():
+		t.Fatal("slow terminal output consumer did not trigger bounded shutdown")
+	}
+	_ = connection.CloseNow()
+	select {
+	case <-closeDone:
+	case <-ctx.Done():
+		t.Fatal("slow consumer session close was not persisted")
+	}
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	if connector.reason != biz.CloseReasonConnectionFailed ||
+		connector.safeCode != "terminal_connection_failed" || connector.closed != 1 {
+		t.Fatalf("slow consumer close = %s/%q (%d)",
+			connector.reason, connector.safeCode, connector.closed)
+	}
+}
+
+func TestTerminalWSSWriteTimeoutFallsBackToBoundedDefault(t *testing.T) {
+	handler := NewTerminalWSS(&wssConnectorStub{})
+	handler.writeTimeout = 0
+	if timeout := handler.writeTimeoutDuration(); timeout != terminalWriteTimeout {
+		t.Fatalf("write timeout = %v, want %v", timeout, terminalWriteTimeout)
+	}
+}
+
+func TestContainerWSSMaximumDurationInterruptsBlockedTerminalInput(t *testing.T) {
+	stream := newBlockingInputWSSStream()
+	closeDone := make(chan struct{})
+	now := time.Now().UTC()
+	connector := &wssConnectorStub{
+		stream: stream, closeDone: closeDone,
+		connectedSession: biz.TerminalSession{
+			ID: "terminal-session-1", OrganizationID: "organization-1", ProjectID: "project-1",
+			Kind: biz.KindContainer, ActorID: "user-1", ManagedHostID: "host-1",
+			RuntimeTargetID: "target-1", DeploymentID: "deployment-1",
+			RunningInstanceID: "deployment-1:1", InstanceGeneration: 1,
+			Status: biz.StatusOpen, ConnectionMode: runtimeaccess.ModeDirectDocker,
+			CreatedAt: now.Add(-time.Minute), ConnectedAt: now, LastActivityAt: now,
+			IdleDeadline: now.Add(time.Minute), MaximumDeadline: now.Add(75 * time.Millisecond),
+		},
+	}
+	handler := NewTerminalWSS(connector)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connection := dialOpenTerminalWSS(t, ctx, handler, "terminal-session-1")
+	if err := connection.Write(ctx, websocket.MessageBinary, []byte("blocked-input")); err != nil {
+		t.Fatalf("write blocked input fixture: %v", err)
+	}
+	select {
+	case <-stream.blocked:
+	case <-ctx.Done():
+		t.Fatal("terminal input did not reach the blocking stream")
+	}
+	if _, _, err := connection.Read(ctx); websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+		t.Fatalf("maximum-duration close error = %v", err)
+	}
+	select {
+	case <-closeDone:
+	case <-ctx.Done():
+		t.Fatal("maximum-duration close was not persisted")
+	}
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	if connector.reason != biz.CloseReasonMaximumDuration || connector.safeCode != "" || connector.closed != 1 {
+		t.Fatalf("blocked input close = %s/%q (%d)",
+			connector.reason, connector.safeCode, connector.closed)
+	}
+}
+
+func TestContainerWSSPersistsAbruptBrowserDisconnectWithoutPayload(t *testing.T) {
+	stream := newWSSStreamStub()
+	closeDone := make(chan struct{})
+	connector := &wssConnectorStub{stream: stream, closeDone: closeDone}
+	handler := NewTerminalWSS(connector)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connection := dialOpenTerminalWSS(t, ctx, handler, "terminal-session-1")
+	if err := connection.CloseNow(); err != nil {
+		t.Fatalf("abrupt browser disconnect: %v", err)
+	}
+	select {
+	case <-closeDone:
+	case <-ctx.Done():
+		t.Fatal("abrupt browser disconnect was not persisted")
+	}
+	connector.mu.Lock()
+	defer connector.mu.Unlock()
+	if connector.reason != biz.CloseReasonConnectionFailed ||
+		connector.safeCode != "terminal_connection_failed" || connector.closed != 1 {
+		t.Fatalf("abrupt disconnect close = %s/%q (%d)",
+			connector.reason, connector.safeCode, connector.closed)
+	}
+}
+
+func dialOpenTerminalWSS(
+	t *testing.T,
+	ctx context.Context,
+	handler *TerminalWSS,
+	sessionID string,
+) *websocket.Conn {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r, sessionID)
+	}))
+	t.Cleanup(server.Close)
+	connection, _, err := websocket.Dial(
+		ctx,
+		"ws"+strings.TrimPrefix(server.URL, "http"),
+		&websocket.DialOptions{
+			Subprotocols: []string{terminalSubprotocol},
+			HTTPHeader: http.Header{
+				"Origin": []string{server.URL},
+				"Cookie": []string{ticketCookieName + "=one-time-ticket"},
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("dial terminal WSS: %v", err)
+	}
+	t.Cleanup(func() { _ = connection.CloseNow() })
+	writeControl(t, ctx, connection, terminalprotocol.Control{
+		Version: terminalprotocol.Version, Type: terminalprotocol.TypeOpen,
+		Sequence: 1, Columns: 120, Rows: 30,
+	})
+	messageType, payload, err := connection.Read(ctx)
+	if err != nil || messageType != websocket.MessageText {
+		t.Fatalf("read ready type=%v payload=%q error=%v", messageType, payload, err)
+	}
+	ready, err := terminalprotocol.DecodeControl(payload, terminalprotocol.DirectionServerToClient)
+	if err != nil || ready.Type != terminalprotocol.TypeReady {
+		t.Fatalf("ready = %+v, error=%v", ready, err)
+	}
+	return connection
 }
 
 func writeControl(

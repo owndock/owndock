@@ -24,8 +24,28 @@ make test-terminal-security
 | SSH 中间人或错误凭据连接到其他主机 | 只用固定公钥认证并强制 SHA-256 Host Key；没有跳过校验开关 | 固定用户/客户端公钥握手、Host Key 正反向与 PEM 清零测试 |
 | 主机 Shell 结束后遗留子进程 | 独立 PTY/进程组，TERM 后关闭控制 PTY，短宽限后 KILL | 本机真实 Shell + 长时子进程回收测试 |
 | 畸形帧、超大输入或消息洪峰耗尽内存 | 严格方向/字段/序号，4 KiB 控制帧、32 KiB 数据帧、200 输入消息/秒和有界队列；只持久化稳定违规码 | 浏览器协议、Agent 协议、超大 payload 不落流和错误字段泄漏测试 |
-| Agent 断线、慢消费者或复用错 Host | 每会话序号与有界队列；断线关闭且不恢复旧 PTY；Registry 按固定 Host 路由 | Gateway、Registry 和竞态测试 |
+| Agent 断线、慢消费者或复用错 Host | 每会话序号与有界队列；WSS 输出写入有截止时间；断线关闭且不恢复旧 PTY；Registry 按固定 Host 路由 | WSS 慢读、阻塞输入、浏览器硬断线、Gateway、Registry 和竞态测试 |
 | 终端内容进入日志、Trace、指标或 MongoDB | 普通可观测接口只接收固定 kind/mode/reason；持久化只写会话元数据和安全错误码 | 指标不受信标签归一化与泄漏断言 |
+
+## 背压与故障如何收敛
+
+```mermaid
+sequenceDiagram
+    participant T as PTY / Container Stream
+    participant W as OwnDock WSS
+    participant B as 浏览器
+    participant M as TerminalSession Store
+
+    T-->>W: 持续输出有界 32 KiB frame
+    B--xW: 停止读取或网络硬断开
+    W->>W: 单次 WebSocket write 截止
+    W->>T: Close，解除阻塞的 read/write
+    W->>M: 只保存 connection_failed + 安全错误码
+    Note over W,M: 不保存 stdin/stdout 或底层错误
+    B->>W: 重新进入时必须创建新 Session
+```
+
+自动化门禁还把终端后端的 stdin 写入故意永久阻塞，并把 Session 最大时限缩短到测试窗口；最大时限到达后 WSS 必须先关闭 Stream 解除 goroutine，再持久化 `maximum_duration`。这证明终端 I/O 卡住不能绕过 idle/max 生命周期边界。
 
 ## 指标
 
@@ -52,7 +72,7 @@ Server `/metrics` 暴露以下低基数指标：
 
 以下项目仍阻断 Terminal 的生产就绪声明：
 
-- 两台真实 Agent 主机上的断线、网络分区、Agent 重启、容器退出和慢消费者故障注入；
+- 仓内 WSS 已覆盖慢输出消费者、阻塞终端输入和浏览器硬断线；仍需两台真实 Agent 主机上的网络分区、Agent 重启、容器退出和跨主机背压故障注入；
 - 真实浏览器的 Cookie、反向代理、关闭码、后台标签页、网络切换和 CSP 矩阵；
 - 多 Server 实例对管理员终止、登录撤销、角色与策略变更的最大发现延迟验收；
 - 主机 PTY/direct SSH 已具备固定身份、最小环境、PTY 进程组回收、公钥认证和 SHA-256 Host Key 固定的本地/协议测试；仍需真实远程 Linux/SSH 的进程树、断网、服务重启、Host Key 轮换和秘密哨兵系统门禁；
