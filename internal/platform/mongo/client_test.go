@@ -376,6 +376,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	assertRuntimeInventoryViewIndexes(t, ctx, client.Database())
 	assertBuildLogIndexes(t, ctx, client.Database())
+	assertBuildRetirementIndex(t, ctx, client.Database())
 	assertAutomaticDeploymentIndex(t, ctx, client.Database())
 	assertUserInvitationIndexes(t, ctx, client.Database())
 	assertProjectMemberIndexes(t, ctx, client.Database())
@@ -392,6 +393,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	verifyIngressRateLimitIntegration(t, ctx, client.Database())
 	verifyTerminalPersistenceIntegration(t, ctx, client.Database())
 	verifyBuildWorkerSIGKILLRecovery(t, ctx, uri, client)
+	verifyBuildRetirementQueryIntegration(t, ctx, client.Database())
 	verifyBuildSourceRepositoryIntegration(t, ctx, client)
 	verifyArtifactEvidenceIntegration(t, ctx, client.Database())
 	verifyArtifactEvidenceFenceIntegration(t, ctx, client.Database())
@@ -4639,6 +4641,112 @@ func assertBuildLogIndexes(
 		if len(expected) != 0 {
 			t.Fatalf("missing %s indexes: %v", collection, expected)
 		}
+	}
+}
+
+func assertBuildRetirementIndex(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	type indexDocument struct {
+		Name string `bson:"name"`
+		Key  bson.D `bson:"key"`
+	}
+	cursor, err := database.Collection("builds").Indexes().List(ctx)
+	if err != nil {
+		t.Fatalf("list Build indexes: %v", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []indexDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatalf("decode Build indexes: %v", err)
+	}
+	want := []string{
+		"organization_id", "project_id", "application_id", "status", "created_at", "_id",
+	}
+	for _, document := range documents {
+		if document.Name != "idx_build_application_retirement" {
+			continue
+		}
+		if len(document.Key) != len(want) {
+			t.Fatalf("Build retirement index keys = %v", document.Key)
+		}
+		for index, element := range document.Key {
+			if element.Key != want[index] {
+				t.Fatalf("Build retirement index keys = %v, want %v", document.Key, want)
+			}
+		}
+		return
+	}
+	t.Fatal("missing Build retirement index")
+}
+
+func verifyBuildRetirementQueryIntegration(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+) {
+	t.Helper()
+	repository := builddata.NewMongoRepository(database)
+	now := time.Now().UTC()
+	configuration, err := buildbiz.NewBuildConfiguration(
+		"retirement-configuration", "retirement-project", "retirement-application",
+		"Retirement Build", "retirement-source", "Dockerfile", ".",
+		[]string{"refs/heads/main"}, "retirement-registry",
+		"registry.example.com/team/retirement", buildbiz.BuildPlatformLinuxAMD64,
+		buildbiz.BuildResources{}, 60, 1, false, "retirement-owner", now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision, err := buildbiz.NewSourceRevision(
+		"retirement-source", "refs/heads/main", strings.Repeat("a", 40),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeBuild := func(id, organizationID, applicationID string, createdAt time.Time) buildbiz.Build {
+		config := configuration
+		config.ApplicationID = applicationID
+		item, buildErr := buildbiz.NewBuild(
+			id, organizationID, "retirement-project", applicationID, config, revision,
+			buildbiz.BuildTriggerSourceManual, "", id+"-request", "retirement-owner", createdAt,
+		)
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		return item
+	}
+	queued := makeBuild("retirement-build-queued", "retirement-organization", "retirement-application", now)
+	canceling := makeBuild("retirement-build-canceling", "retirement-organization", "retirement-application", now.Add(time.Second))
+	if err := canceling.Cancel(now.Add(2 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	otherApplication := makeBuild("retirement-build-other-app", "retirement-organization", "retirement-other-app", now)
+	otherOrganization := makeBuild("retirement-build-other-org", "retirement-other-org", "retirement-application", now)
+	for _, item := range []buildbiz.Build{queued, canceling, otherApplication, otherOrganization} {
+		if _, err := repository.CreateBuild(ctx, item); err != nil {
+			t.Fatalf("seed Build retirement query: %v", err)
+		}
+	}
+	defer func() {
+		_, _ = database.Collection("builds").DeleteMany(
+			context.Background(), bson.D{{Key: "project_id", Value: "retirement-project"}},
+		)
+	}()
+	limited, err := repository.ListActiveBuildsForApplication(
+		ctx, "retirement-organization", "retirement-project", "retirement-application", 1,
+	)
+	if err != nil || len(limited) != 1 || limited[0].ID != queued.ID {
+		t.Fatalf("limited active Builds = %+v/%v", limited, err)
+	}
+	items, err := repository.ListActiveBuildsForApplication(
+		ctx, "retirement-organization", "retirement-project", "retirement-application", 10,
+	)
+	if err != nil || len(items) != 2 || items[0].ID != queued.ID || items[1].ID != canceling.ID {
+		t.Fatalf("active Application Builds = %+v/%v", items, err)
 	}
 }
 

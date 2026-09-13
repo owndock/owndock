@@ -534,6 +534,12 @@ func run() error {
 			WithArtifactReleases(buildRepository, builddata.NewArtifactReleaseAdapter(controlPlaneUseCase).
 				WithAutomaticDeployments(deploymentUseCase)).
 			WithBuildLogs(buildRepository)
+		buildRetirement, err := buildbiz.NewProductResourceRetirement(
+			buildRepository, mongoClient, auditStore, id.New, time.Now, 100,
+		)
+		if err != nil {
+			return fmt.Errorf("create build retirement dependency: %w", err)
+		}
 		if err := productAPI.WithBuild(
 			buildservice.NewHTTP(buildUseCase).
 				WithWebhookMaxBodyBytes(cfg.Product.BuildWebhookMaxBodyBytesValue()),
@@ -719,7 +725,7 @@ func run() error {
 				terminalUseCase,
 				runtimeTargetInventoryConvergence,
 			).WithProductResourceRetirement(controlPlaneStore, retirementAdapter).
-				WithProductResourceDependencies(terminalUseCase)
+				WithProductResourceDependencies(buildRetirement, terminalUseCase)
 			retirementLoop, retirementLoopErr :=
 				controlplaneworker.NewRuntimeTargetRetirementLoop(
 					controlPlaneUseCase, 16, pollInterval, operationTimeout,

@@ -63,7 +63,26 @@ func Default() []Migration {
 		{Version: 47, Name: "index_runtime_target_terminal_convergence", Up: indexRuntimeTargetTerminalConvergence},
 		{Version: 48, Name: "add_product_resource_retirements", Up: addProductResourceRetirements},
 		{Version: 49, Name: "index_product_resource_terminal_convergence", Up: indexProductResourceTerminalConvergence},
+		{Version: 50, Name: "index_application_build_retirement", Up: indexApplicationBuildRetirement},
 	}
+}
+
+func indexApplicationBuildRetirement(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("builds").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{
+			{Key: "organization_id", Value: 1},
+			{Key: "project_id", Value: 1},
+			{Key: "application_id", Value: 1},
+			{Key: "status", Value: 1},
+			{Key: "created_at", Value: 1},
+			{Key: "_id", Value: 1},
+		},
+		Options: options.Index().SetName("idx_build_application_retirement"),
+	})
+	if err != nil {
+		return fmt.Errorf("create application build retirement index: %w", err)
+	}
+	return nil
 }
 
 func indexProductResourceTerminalConvergence(ctx context.Context, database *mongo.Database) error {

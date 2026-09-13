@@ -378,6 +378,42 @@ func (r *MongoRepository) ListBuilds(
 	return items, nil
 }
 
+func (r *MongoRepository) ListActiveBuildsForApplication(
+	ctx context.Context,
+	organizationID, projectID, applicationID string,
+	limit int64,
+) ([]biz.Build, error) {
+	cursor, err := r.builds.Find(
+		ctx,
+		bson.D{
+			{Key: "organization_id", Value: organizationID},
+			{Key: "project_id", Value: projectID},
+			{Key: "application_id", Value: applicationID},
+			{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
+				biz.BuildStatusQueued, biz.BuildStatusCheckingOut,
+				biz.BuildStatusBuilding, biz.BuildStatusPushing,
+				biz.BuildStatusCanceling,
+			}}}},
+		},
+		options.Find().SetSort(bson.D{
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find active application builds: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []buildDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode active application builds: %w", err)
+	}
+	items := make([]biz.Build, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain()
+	}
+	return items, nil
+}
+
 func (r *MongoRepository) CreateBuild(
 	ctx context.Context,
 	item biz.Build,
