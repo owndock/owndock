@@ -7,6 +7,11 @@ server:
 
 product:
   enabled: true
+  vulnerability_rescan_enabled: false
+  vulnerability_rescan_poll_interval: 5m
+  vulnerability_rescan_retry_interval: 6h
+  vulnerability_rescan_operation_timeout: 30s
+  vulnerability_rescan_candidate_limit: 100
 
 runtime:
   deployment_worker:

@@ -71,8 +71,8 @@ func TestEvidenceLoopValidatesConfigurationAndBoundsResults(t *testing.T) {
 		{err: context.Canceled, want: "canceled"},
 		{err: biz.ErrUnavailable, want: "error"},
 	} {
-		if got := evidenceLoopResult(test.err); got != test.want {
-			t.Errorf("evidenceLoopResult(%v) = %q, want %q", test.err, got, test.want)
+		if got := loopResult(test.err); got != test.want {
+			t.Errorf("loopResult(%v) = %q, want %q", test.err, got, test.want)
 		}
 	}
 }

@@ -23,7 +23,7 @@ type signatureJobCreatorStub struct {
 
 func (s *signatureJobCreatorStub) CreateEvidenceJob(_ context.Context, item EvidenceJob) (EvidenceJob, error) {
 	if s.duplicate {
-		return EvidenceJob{}, ErrDuplicate
+		return s.job, ErrDuplicate
 	}
 	s.job, s.duplicate = item, true
 	return item, nil

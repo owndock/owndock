@@ -2383,6 +2383,7 @@ func assertArtifactEvidenceJobIndexes(
 	}
 	for _, name := range []string{
 		"idx_artifact_evidence_job_queue", "uniq_artifact_evidence_job_idempotency",
+		"uniq_active_vulnerability_scan",
 	} {
 		if !names[name] {
 			t.Errorf("artifact evidence job index %q is missing: %#v", name, names)
@@ -2430,7 +2431,8 @@ func assertVulnerabilityObservationIndexes(t *testing.T, ctx context.Context, da
 		names[name] = true
 	}
 	for _, name := range []string{"uniq_vulnerability_observation_latest",
-		"idx_vulnerability_observation_policy", "idx_vulnerability_observation_evidence"} {
+		"idx_vulnerability_observation_policy", "idx_vulnerability_observation_evidence",
+		"idx_vulnerability_observation_rescan"} {
 		if !names[name] {
 			t.Errorf("vulnerability observation index %q is missing: %#v", name, names)
 		}
@@ -2806,6 +2808,128 @@ func verifyVulnerabilityObservationIntegration(t *testing.T, ctx context.Context
 	latest, err := repository.GetLatestVulnerabilityObservation(ctx, job.ProjectID, job.ArtifactID)
 	if err != nil || latest.Counts.High != 1 || latest.DescriptorDigest != evidence.DescriptorDigest {
 		t.Fatalf("latest vulnerability observation = %+v/%v", latest, err)
+	}
+	rescanNow := time.Now().UTC().Truncate(time.Millisecond)
+	expiredAt := rescanNow.Add(-time.Hour)
+	if _, err := database.Collection("vulnerability_observations").UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: observation.ID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "fresh_until", Value: expiredAt}}}},
+	); err != nil {
+		t.Fatalf("expire vulnerability observation: %v", err)
+	}
+	page, err := repository.ListDueVulnerabilityObservations(
+		ctx, rescanNow, expiredAt.Add(-time.Second), "cursor-before-observation", 10,
+	)
+	if err != nil || len(page) != 1 || page[0].ID != observation.ID {
+		t.Fatalf("vulnerability rescan page after earlier cursor = %+v/%v", page, err)
+	}
+	page, err = repository.ListDueVulnerabilityObservations(ctx, rescanNow, expiredAt, observation.ID, 10)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("vulnerability rescan page after exact cursor = %+v/%v", page, err)
+	}
+	buildRepository := builddata.NewMongoRepository(database)
+	artifact, err := buildbiz.NewExternalArtifact(buildbiz.ExternalArtifactInput{
+		ID: job.ArtifactID, OrganizationID: job.OrganizationID, ProjectID: job.ProjectID,
+		ApplicationID:        "vulnerability-integration-application",
+		RegistryCredentialID: job.RegistryCredentialID,
+		ImageDigest:          job.RegistryRepository + "@" + job.SubjectDigest,
+		TargetPlatform:       buildbiz.BuildPlatformLinuxAMD64,
+		Producer:             "integration-delivery/v1", RegistrationKey: "vulnerability-integration-delivery",
+		ReleaseRuntimeSpec: runtimespec.Spec{Ports: []runtimespec.Port{{Name: "http", ContainerPort: 8080}}},
+		CreatedAt:          rescanNow,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := buildRepository.CreateArtifact(ctx, artifact); err != nil {
+		t.Fatalf("persist vulnerability rescan Artifact: %v", err)
+	}
+	currentTime := rescanNow
+	newScheduler := func() *supplychainbiz.VulnerabilityRescanScheduler {
+		scheduler, schedulerErr := supplychainbiz.NewVulnerabilityRescanScheduler(
+			repository, supplychaindata.NewArtifactLookupAdapter(buildRepository), repository,
+			func() time.Time { return currentTime }, 6*time.Hour, 10,
+		)
+		if schedulerErr != nil {
+			t.Fatal(schedulerErr)
+		}
+		return scheduler
+	}
+	firstScheduler, secondScheduler := newScheduler(), newScheduler()
+	errorsFound := make(chan error, 2)
+	var schedulers sync.WaitGroup
+	for _, scheduler := range []*supplychainbiz.VulnerabilityRescanScheduler{firstScheduler, secondScheduler} {
+		schedulers.Add(1)
+		go func() {
+			defer schedulers.Done()
+			errorsFound <- scheduler.RunOnce(ctx)
+		}()
+	}
+	schedulers.Wait()
+	close(errorsFound)
+	for schedulerErr := range errorsFound {
+		if schedulerErr != nil {
+			t.Fatalf("run concurrent vulnerability rescan scheduler: %v", schedulerErr)
+		}
+	}
+	rescanFilter := bson.D{
+		{Key: "artifact_id", Value: job.ArtifactID},
+		{Key: "kind", Value: supplychainbiz.EvidenceKindVulnerabilityReport},
+		{Key: "_id", Value: bson.D{{Key: "$regex", Value: "^vulnerability-rescan-"}}},
+	}
+	assertJobCounts := func(wantTotal, wantActive int64) {
+		t.Helper()
+		total, countErr := database.Collection("artifact_evidence_jobs").CountDocuments(ctx, rescanFilter)
+		if countErr != nil {
+			t.Fatal(countErr)
+		}
+		activeFilter := append(append(bson.D{}, rescanFilter...), bson.E{Key: "active", Value: true})
+		active, countErr := database.Collection("artifact_evidence_jobs").CountDocuments(ctx, activeFilter)
+		if countErr != nil || total != wantTotal || active != wantActive {
+			t.Fatalf("vulnerability rescan jobs = total %d active %d, want %d/%d: %v",
+				total, active, wantTotal, wantActive, countErr)
+		}
+	}
+	assertJobCounts(1, 1)
+	rescanJob, found, err := repository.ClaimNextEvidenceJob(ctx, supplychainbiz.EvidenceClaim{
+		WorkerID: "vulnerability-rescan-worker", Now: rescanNow.Add(time.Second),
+		ExpiresAt: rescanNow.Add(time.Minute),
+		Kinds:     []supplychainbiz.EvidenceKind{supplychainbiz.EvidenceKindVulnerabilityReport},
+	})
+	if err != nil || !found || !strings.HasPrefix(rescanJob.ID, "vulnerability-rescan-") {
+		t.Fatalf("claim vulnerability rescan job = %+v/%t/%v", rescanJob, found, err)
+	}
+	if err := rescanJob.Transition(supplychainbiz.EvidenceJobGenerating, rescanNow.Add(2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	rescanJob, err = repository.SaveClaimedEvidenceJob(ctx, rescanJob, rescanJob.Version,
+		"vulnerability-rescan-worker", rescanJob.Lease.Generation, rescanNow.Add(2*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rescanGeneration := rescanJob.Lease.Generation
+	if err := rescanJob.Fail(supplychainbiz.EvidenceJobFailureGeneration, rescanNow.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.SaveClaimedEvidenceJob(ctx, rescanJob, rescanJob.Version,
+		"vulnerability-rescan-worker", rescanGeneration, rescanNow.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertJobCounts(1, 0)
+	if err := newScheduler().RunOnce(ctx); err != nil {
+		t.Fatalf("repeat vulnerability rescan retry bucket: %v", err)
+	}
+	assertJobCounts(1, 0)
+	currentTime = currentTime.Add(6 * time.Hour)
+	if err := newScheduler().RunOnce(ctx); err != nil {
+		t.Fatalf("schedule next vulnerability rescan retry bucket: %v", err)
+	}
+	assertJobCounts(2, 1)
+	remaining, err := repository.ListDueVulnerabilityObservations(
+		ctx, currentTime, rescanNow.Add(-time.Hour), observation.ID, 10,
+	)
+	if err != nil || len(remaining) != 0 {
+		t.Fatalf("vulnerability rescan cursor tail = %+v/%v", remaining, err)
 	}
 }
 

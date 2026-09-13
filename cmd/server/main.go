@@ -38,6 +38,7 @@ import (
 	supplychainbiz "github.com/owndock/owndock/internal/modules/supplychain/biz"
 	supplychaindata "github.com/owndock/owndock/internal/modules/supplychain/data"
 	supplychainservice "github.com/owndock/owndock/internal/modules/supplychain/service"
+	supplychainworker "github.com/owndock/owndock/internal/modules/supplychain/worker"
 	terminalbiz "github.com/owndock/owndock/internal/modules/terminal/biz"
 	terminaldata "github.com/owndock/owndock/internal/modules/terminal/data"
 	terminalservice "github.com/owndock/owndock/internal/modules/terminal/service"
@@ -116,6 +117,7 @@ func run() error {
 	var productResourceRetirementWorkerServer *lifecycle.Server
 	var inventoryWorkerServer *lifecycle.Server
 	var inventoryEventWorkerServer *lifecycle.Server
+	var vulnerabilityRescanWorkerServer *lifecycle.Server
 	var agentControlServer *server.AgentServer
 	cleanup := func(ctx context.Context) error {
 		var mongoErr error
@@ -638,6 +640,48 @@ func run() error {
 		); err != nil {
 			return fmt.Errorf("mount supply-chain API: %w", err)
 		}
+		if cfg.Product.VulnerabilityRescanEnabled {
+			pollInterval, durationErr := cfg.Product.VulnerabilityRescanPollIntervalDuration()
+			if durationErr != nil {
+				return durationErr
+			}
+			retryInterval, durationErr := cfg.Product.VulnerabilityRescanRetryIntervalDuration()
+			if durationErr != nil {
+				return durationErr
+			}
+			operationTimeout, durationErr := cfg.Product.VulnerabilityRescanOperationTimeoutDuration()
+			if durationErr != nil {
+				return durationErr
+			}
+			scheduler, schedulerErr := supplychainbiz.NewVulnerabilityRescanScheduler(
+				supplyChainRepository,
+				supplychaindata.NewArtifactLookupAdapter(buildRepository),
+				supplyChainRepository,
+				time.Now,
+				retryInterval,
+				cfg.Product.VulnerabilityRescanCandidateLimitValue(),
+			)
+			if schedulerErr != nil {
+				return fmt.Errorf("create vulnerability rescan scheduler: %w", schedulerErr)
+			}
+			rescanLoop, loopErr := supplychainworker.NewLoop(
+				scheduler, pollInterval, operationTimeout,
+				func(workerErr error) {
+					_ = logger.Log(
+						log.LevelError,
+						"component", "vulnerability_rescan_worker",
+						"error", workerErr,
+					)
+				},
+			)
+			if loopErr != nil {
+				return fmt.Errorf("create vulnerability rescan worker loop: %w", loopErr)
+			}
+			rescanLoop.WithObservability(func(result string, duration time.Duration) {
+				metrics.RecordWorkerPoll("vulnerability_rescan", result, duration)
+			})
+			vulnerabilityRescanWorkerServer = lifecycle.NewServer(rescanLoop)
+		}
 		if cfg.Runtime.DeploymentWorker.Enabled {
 			pollInterval, err := cfg.Runtime.DeploymentWorker.PollIntervalDuration()
 			if err != nil {
@@ -1013,6 +1057,9 @@ func run() error {
 	}
 	if inventoryEventWorkerServer != nil {
 		managedServers = append(managedServers, inventoryEventWorkerServer)
+	}
+	if vulnerabilityRescanWorkerServer != nil {
+		managedServers = append(managedServers, vulnerabilityRescanWorkerServer)
 	}
 	if agentControlServer != nil {
 		managedServers = append(managedServers, agentControlServer)

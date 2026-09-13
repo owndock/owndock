@@ -177,7 +177,7 @@ func (j EvidenceJob) Validate() error {
 				j.Signing.TrustPolicyID == j.Signature.PolicyID && j.Signature.Mode == SignatureTrustPublicKey) ||
 		j.Kind != EvidenceKindSignature && j.Signature.Empty() && j.SignatureOperation == "" && j.Signing.Empty()
 	vulnerabilityValid := j.Kind != EvidenceKindVulnerabilityReport ||
-		j.FormatVersion == TrivyReportFormatVersion && j.Producer == "trivy/0.74.0"
+		j.FormatVersion == TrivyReportFormatVersion && j.Producer == "trivy/"+PinnedTrivyVersion
 	commonValid := validID(j.ID) && validID(j.OrganizationID) && validID(j.ProjectID) &&
 		validID(j.ArtifactID) && validDigest(j.SubjectDigest) && validRepository(j.RegistryRepository) &&
 		validID(j.RegistryCredentialID) &&

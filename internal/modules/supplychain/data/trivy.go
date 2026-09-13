@@ -15,7 +15,7 @@ import (
 	"github.com/owndock/owndock/internal/shared/registryauth"
 )
 
-const PinnedTrivyVersion = "0.74.0"
+const PinnedTrivyVersion = biz.PinnedTrivyVersion
 
 type TrivyOptions struct {
 	Executable         string

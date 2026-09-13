@@ -102,6 +102,13 @@ const (
 	maximumSecretFileBytes       = 8 * 1024
 )
 
+const (
+	defaultVulnerabilityPoll       = 5 * time.Minute
+	defaultVulnerabilityRetry      = 6 * time.Hour
+	defaultVulnerabilityOperation  = 30 * time.Second
+	defaultVulnerabilityCandidates = 100
+)
+
 // Config is the process configuration root. Keep transport and infrastructure
 // configuration here; domain rules belong to their owning module.
 type Config struct {
@@ -151,16 +158,21 @@ type Tracing struct {
 }
 
 type Product struct {
-	Enabled                  bool   `json:"enabled"`
-	SourceProbeTimeout       string `json:"source_probe_timeout"`
-	SourceGitCACertFile      string `json:"source_git_ca_cert_file"`
-	SourceGitHTTPSProxy      string `json:"source_git_https_proxy"`
-	RegistryCACertFile       string `json:"registry_ca_cert_file"`
-	BuildTriggerRateLimit    int    `json:"build_trigger_rate_limit"`
-	BuildTriggerRateWindow   string `json:"build_trigger_rate_window"`
-	BuildWebhookRateLimit    int    `json:"build_webhook_rate_limit"`
-	BuildWebhookRateWindow   string `json:"build_webhook_rate_window"`
-	BuildWebhookMaxBodyBytes int64  `json:"build_webhook_max_body_bytes"`
+	Enabled                             bool   `json:"enabled"`
+	SourceProbeTimeout                  string `json:"source_probe_timeout"`
+	SourceGitCACertFile                 string `json:"source_git_ca_cert_file"`
+	SourceGitHTTPSProxy                 string `json:"source_git_https_proxy"`
+	RegistryCACertFile                  string `json:"registry_ca_cert_file"`
+	BuildTriggerRateLimit               int    `json:"build_trigger_rate_limit"`
+	BuildTriggerRateWindow              string `json:"build_trigger_rate_window"`
+	BuildWebhookRateLimit               int    `json:"build_webhook_rate_limit"`
+	BuildWebhookRateWindow              string `json:"build_webhook_rate_window"`
+	BuildWebhookMaxBodyBytes            int64  `json:"build_webhook_max_body_bytes"`
+	VulnerabilityRescanEnabled          bool   `json:"vulnerability_rescan_enabled"`
+	VulnerabilityRescanPollInterval     string `json:"vulnerability_rescan_poll_interval"`
+	VulnerabilityRescanRetryInterval    string `json:"vulnerability_rescan_retry_interval"`
+	VulnerabilityRescanOperationTimeout string `json:"vulnerability_rescan_operation_timeout"`
+	VulnerabilityRescanCandidateLimit   int    `json:"vulnerability_rescan_candidate_limit"`
 }
 
 type Runtime struct {
@@ -320,12 +332,16 @@ func Load(path string) (Config, error) {
 			Tracing: Tracing{SampleRatio: defaultTraceSampleRatio},
 		},
 		Product: Product{
-			SourceProbeTimeout:       defaultSourceProbeTimeout.String(),
-			BuildTriggerRateLimit:    defaultBuildTriggerLimit,
-			BuildTriggerRateWindow:   defaultBuildTriggerWindow.String(),
-			BuildWebhookRateLimit:    defaultBuildWebhookLimit,
-			BuildWebhookRateWindow:   defaultBuildWebhookWindow.String(),
-			BuildWebhookMaxBodyBytes: defaultBuildWebhookMaxBody,
+			SourceProbeTimeout:                  defaultSourceProbeTimeout.String(),
+			BuildTriggerRateLimit:               defaultBuildTriggerLimit,
+			BuildTriggerRateWindow:              defaultBuildTriggerWindow.String(),
+			BuildWebhookRateLimit:               defaultBuildWebhookLimit,
+			BuildWebhookRateWindow:              defaultBuildWebhookWindow.String(),
+			BuildWebhookMaxBodyBytes:            defaultBuildWebhookMaxBody,
+			VulnerabilityRescanPollInterval:     defaultVulnerabilityPoll.String(),
+			VulnerabilityRescanRetryInterval:    defaultVulnerabilityRetry.String(),
+			VulnerabilityRescanOperationTimeout: defaultVulnerabilityOperation.String(),
+			VulnerabilityRescanCandidateLimit:   defaultVulnerabilityCandidates,
 		},
 		Database: Database{
 			Mongo: Mongo{
@@ -518,6 +534,9 @@ func isLoopbackOriginHost(host string) bool {
 }
 
 func (p Product) Validate() error {
+	if p.VulnerabilityRescanEnabled && !p.Enabled {
+		return fmt.Errorf("vulnerability_rescan_enabled requires product.enabled")
+	}
 	timeout, err := p.SourceProbeTimeoutDuration()
 	if err != nil {
 		return fmt.Errorf("source_probe_timeout: %w", err)
@@ -559,6 +578,30 @@ func (p Product) Validate() error {
 	}
 	if value := p.BuildWebhookMaxBodyBytesValue(); value < 1024 || value > 5*1024*1024 {
 		return fmt.Errorf("build_webhook_max_body_bytes must be between 1024 and 5242880")
+	}
+	rescanPoll, err := p.VulnerabilityRescanPollIntervalDuration()
+	if err != nil {
+		return fmt.Errorf("vulnerability_rescan_poll_interval: %w", err)
+	}
+	if rescanPoll < 10*time.Second || rescanPoll > time.Hour {
+		return fmt.Errorf("vulnerability_rescan_poll_interval must be between 10s and 1h")
+	}
+	rescanRetry, err := p.VulnerabilityRescanRetryIntervalDuration()
+	if err != nil {
+		return fmt.Errorf("vulnerability_rescan_retry_interval: %w", err)
+	}
+	if rescanRetry < time.Hour || rescanRetry > 7*24*time.Hour {
+		return fmt.Errorf("vulnerability_rescan_retry_interval must be between 1h and 168h")
+	}
+	rescanOperation, err := p.VulnerabilityRescanOperationTimeoutDuration()
+	if err != nil {
+		return fmt.Errorf("vulnerability_rescan_operation_timeout: %w", err)
+	}
+	if rescanOperation < time.Second || rescanOperation > 5*time.Minute {
+		return fmt.Errorf("vulnerability_rescan_operation_timeout must be between 1s and 5m")
+	}
+	if value := p.VulnerabilityRescanCandidateLimitValue(); value < 1 || value > 1000 {
+		return fmt.Errorf("vulnerability_rescan_candidate_limit must be between 1 and 1000")
 	}
 	return nil
 }
@@ -611,6 +654,25 @@ func (p Product) BuildWebhookRateLimitValue() int {
 		return defaultBuildWebhookLimit
 	}
 	return p.BuildWebhookRateLimit
+}
+
+func (p Product) VulnerabilityRescanPollIntervalDuration() (time.Duration, error) {
+	return parseDuration(p.VulnerabilityRescanPollInterval, defaultVulnerabilityPoll)
+}
+
+func (p Product) VulnerabilityRescanRetryIntervalDuration() (time.Duration, error) {
+	return parseDuration(p.VulnerabilityRescanRetryInterval, defaultVulnerabilityRetry)
+}
+
+func (p Product) VulnerabilityRescanOperationTimeoutDuration() (time.Duration, error) {
+	return parseDuration(p.VulnerabilityRescanOperationTimeout, defaultVulnerabilityOperation)
+}
+
+func (p Product) VulnerabilityRescanCandidateLimitValue() int {
+	if p.VulnerabilityRescanCandidateLimit == 0 {
+		return defaultVulnerabilityCandidates
+	}
+	return p.VulnerabilityRescanCandidateLimit
 }
 
 func (a Agent) Validate(productEnabled, mongoEnabled, agentPKIEnabled bool) error {

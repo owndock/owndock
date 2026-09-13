@@ -65,7 +65,62 @@ func Default() []Migration {
 		{Version: 49, Name: "index_product_resource_terminal_convergence", Up: indexProductResourceTerminalConvergence},
 		{Version: 50, Name: "index_application_build_retirement", Up: indexApplicationBuildRetirement},
 		{Version: 51, Name: "index_application_artifact_release_retirement", Up: indexApplicationArtifactReleaseRetirement},
+		{Version: 52, Name: "schedule_vulnerability_rescans", Up: scheduleVulnerabilityRescans},
 	}
+}
+
+func scheduleVulnerabilityRescans(ctx context.Context, database *mongo.Database) error {
+	jobs := database.Collection("artifact_evidence_jobs")
+	if _, err := jobs.UpdateMany(ctx,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{"succeeded", "failed"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "active", Value: false}}}},
+	); err != nil {
+		return fmt.Errorf("mark terminal Evidence Jobs inactive: %w", err)
+	}
+	if _, err := jobs.UpdateMany(ctx,
+		bson.D{{Key: "status", Value: bson.D{{Key: "$nin", Value: bson.A{"succeeded", "failed"}}}}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "active", Value: true}}}},
+	); err != nil {
+		return fmt.Errorf("mark active Evidence Jobs: %w", err)
+	}
+	duplicates, err := jobs.Aggregate(ctx, mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{
+			{Key: "kind", Value: "vulnerability_report"}, {Key: "active", Value: true},
+		}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: "$artifact_id"}, {Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+		}}},
+		{{Key: "$match", Value: bson.D{{Key: "count", Value: bson.D{{Key: "$gt", Value: 1}}}}}},
+		{{Key: "$limit", Value: 1}},
+	})
+	if err != nil {
+		return fmt.Errorf("find concurrent active vulnerability scans: %w", err)
+	}
+	defer duplicates.Close(ctx)
+	if duplicates.Next(ctx) {
+		return fmt.Errorf("cannot serialize active vulnerability scans: existing duplicate for one Artifact")
+	}
+	if err := duplicates.Err(); err != nil {
+		return fmt.Errorf("read concurrent active vulnerability scans: %w", err)
+	}
+	_, err = jobs.Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys: bson.D{{Key: "artifact_id", Value: 1}, {Key: "kind", Value: 1}},
+		Options: options.Index().SetName("uniq_active_vulnerability_scan").SetUnique(true).
+			SetPartialFilterExpression(bson.D{
+				{Key: "kind", Value: "vulnerability_report"}, {Key: "active", Value: true},
+			}),
+	})
+	if err != nil {
+		return fmt.Errorf("create active vulnerability scan index: %w", err)
+	}
+	_, err = database.Collection("vulnerability_observations").Indexes().CreateOne(ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "scanner", Value: 1}, {Key: "fresh_until", Value: 1}, {Key: "_id", Value: 1}},
+		Options: options.Index().SetName("idx_vulnerability_observation_rescan"),
+	})
+	if err != nil {
+		return fmt.Errorf("create vulnerability rescan candidate index: %w", err)
+	}
+	return nil
 }
 
 func indexApplicationArtifactReleaseRetirement(ctx context.Context, database *mongo.Database) error {

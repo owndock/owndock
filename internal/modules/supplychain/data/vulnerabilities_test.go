@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -27,6 +28,28 @@ func vulnerabilityObservationFixture(t *testing.T) biz.VulnerabilityObservation 
 		t.Fatal(err)
 	}
 	return item
+}
+
+func TestListDueVulnerabilityObservationsRejectsInvalidBounds(t *testing.T) {
+	repository := &MongoRepository{}
+	now := time.Now().UTC()
+	for _, test := range []struct {
+		now       time.Time
+		afterTime time.Time
+		afterID   string
+		limit     int
+	}{
+		{limit: 1},
+		{now: now, limit: 0},
+		{now: now, afterTime: now.Add(-time.Hour), limit: 1},
+		{now: now, afterID: "observation-1", limit: 1},
+	} {
+		if _, err := repository.ListDueVulnerabilityObservations(
+			context.Background(), test.now, test.afterTime, test.afterID, test.limit,
+		); !errors.Is(err, biz.ErrInvalidVulnerabilityReport) {
+			t.Fatalf("invalid rescan cursor %+v error = %v", test, err)
+		}
+	}
 }
 
 func TestVulnerabilityObservationBSONRoundTripRejectsCorruption(t *testing.T) {

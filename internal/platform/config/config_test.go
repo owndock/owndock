@@ -132,6 +132,13 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if cfg.Product.Enabled {
 		t.Fatal("product API must be disabled by default")
 	}
+	if cfg.Product.VulnerabilityRescanEnabled ||
+		cfg.Product.VulnerabilityRescanPollInterval != defaultVulnerabilityPoll.String() ||
+		cfg.Product.VulnerabilityRescanRetryInterval != defaultVulnerabilityRetry.String() ||
+		cfg.Product.VulnerabilityRescanOperationTimeout != defaultVulnerabilityOperation.String() ||
+		cfg.Product.VulnerabilityRescanCandidateLimitValue() != defaultVulnerabilityCandidates {
+		t.Fatalf("vulnerability rescan defaults = %+v", cfg.Product)
+	}
 	if len(cfg.Server.HTTP.CORSAllowedOrigins) != 0 {
 		t.Fatalf("CORS allowed origins = %v, want none", cfg.Server.HTTP.CORSAllowedOrigins)
 	}
@@ -232,6 +239,39 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 		cfg.Database.Mongo.Database != defaultMongoDatabase ||
 		cfg.Database.Mongo.MaxPoolSize != defaultMongoMaxPoolSize {
 		t.Fatalf("MongoDB defaults = %+v", cfg.Database.Mongo)
+	}
+}
+
+func TestProductValidatesVulnerabilityRescanConfiguration(t *testing.T) {
+	product := Product{
+		Enabled: true, SourceProbeTimeout: "10s",
+		BuildTriggerRateLimit: 60, BuildTriggerRateWindow: "1m",
+		BuildWebhookRateLimit: 120, BuildWebhookRateWindow: "1m",
+		BuildWebhookMaxBodyBytes:   1024 * 1024,
+		VulnerabilityRescanEnabled: true, VulnerabilityRescanPollInterval: "5m",
+		VulnerabilityRescanRetryInterval: "6h", VulnerabilityRescanOperationTimeout: "30s",
+		VulnerabilityRescanCandidateLimit: 100,
+	}
+	if err := product.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Product){
+		"product disabled":    func(item *Product) { item.Enabled = false },
+		"poll too short":      func(item *Product) { item.VulnerabilityRescanPollInterval = "9s" },
+		"invalid poll":        func(item *Product) { item.VulnerabilityRescanPollInterval = "often" },
+		"retry too short":     func(item *Product) { item.VulnerabilityRescanRetryInterval = "59m" },
+		"invalid retry":       func(item *Product) { item.VulnerabilityRescanRetryInterval = "later" },
+		"operation too long":  func(item *Product) { item.VulnerabilityRescanOperationTimeout = "6m" },
+		"invalid operation":   func(item *Product) { item.VulnerabilityRescanOperationTimeout = "soon" },
+		"too many candidates": func(item *Product) { item.VulnerabilityRescanCandidateLimit = 1001 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalid := product
+			mutate(&invalid)
+			if err := invalid.Validate(); err == nil {
+				t.Fatal("invalid vulnerability rescan configuration accepted")
+			}
+		})
 	}
 }
 

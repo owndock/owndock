@@ -92,6 +92,66 @@ func (r *MongoRepository) GetLatestVulnerabilityObservation(ctx context.Context,
 	return item, nil
 }
 
+func (r *MongoRepository) ListDueVulnerabilityObservations(
+	ctx context.Context,
+	now time.Time,
+	afterFreshUntil time.Time,
+	afterID string,
+	limit int,
+) ([]biz.VulnerabilityObservation, error) {
+	if now.IsZero() || limit < 1 || limit > biz.MaximumVulnerabilityRescanCandidates {
+		return nil, biz.ErrInvalidVulnerabilityReport
+	}
+	filter := bson.D{
+		{Key: "scanner", Value: "trivy"},
+		{Key: "fresh_until", Value: bson.D{{Key: "$lte", Value: now.UTC()}}},
+	}
+	if !afterFreshUntil.IsZero() || afterID != "" {
+		if afterFreshUntil.IsZero() || afterID == "" {
+			return nil, biz.ErrInvalidVulnerabilityReport
+		}
+		filter = append(filter, bson.E{Key: "$or", Value: bson.A{
+			bson.D{{Key: "fresh_until", Value: bson.D{{Key: "$gt", Value: afterFreshUntil.UTC()}}}},
+			bson.D{{Key: "fresh_until", Value: afterFreshUntil.UTC()},
+				{Key: "_id", Value: bson.D{{Key: "$gt", Value: afterID}}}},
+		}})
+	}
+	cursor, err := r.vulnerabilityObservations.Find(ctx, filter,
+		options.Find().SetSort(bson.D{{Key: "fresh_until", Value: 1}, {Key: "_id", Value: 1}}).
+			SetLimit(int64(limit)))
+	if err != nil {
+		return nil, fmt.Errorf("find due vulnerability observations: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []vulnerabilityObservationDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode due vulnerability observations: %w", err)
+	}
+	items := make([]biz.VulnerabilityObservation, len(documents))
+	for index := range documents {
+		items[index], err = documents[index].domain()
+		if err != nil {
+			return nil, fmt.Errorf("decode due vulnerability observation: %w", err)
+		}
+	}
+	return items, nil
+}
+
+func (r *MongoRepository) HasActiveVulnerabilityScan(
+	ctx context.Context,
+	artifactID string,
+) (bool, error) {
+	count, err := r.jobs.CountDocuments(ctx, bson.D{
+		{Key: "artifact_id", Value: artifactID},
+		{Key: "kind", Value: biz.EvidenceKindVulnerabilityReport},
+		{Key: "active", Value: true},
+	}, options.Count().SetLimit(1))
+	if err != nil {
+		return false, fmt.Errorf("find active vulnerability scan: %w", err)
+	}
+	return count > 0, nil
+}
+
 func (r *MongoRepository) PublishClaimedVulnerabilityObservation(ctx context.Context,
 	item biz.EvidenceJob, evidence biz.Evidence, observation biz.VulnerabilityObservation,
 	expectedVersion uint64, workerID string, generation uint64, now time.Time,
@@ -143,3 +203,4 @@ func (r *MongoRepository) PublishClaimedVulnerabilityObservation(ctx context.Con
 
 var _ biz.VulnerabilityObservationPublisherRepository = (*MongoRepository)(nil)
 var _ biz.VulnerabilityObservationRepository = (*MongoRepository)(nil)
+var _ biz.VulnerabilityRescanRepository = (*MongoRepository)(nil)

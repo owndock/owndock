@@ -19,6 +19,20 @@ func (r *MongoRepository) CreateEvidenceJob(ctx context.Context, item biz.Eviden
 		return biz.EvidenceJob{}, biz.ErrInvalidEvidenceJob
 	}
 	if _, err := r.jobs.InsertOne(ctx, evidenceJobDocumentFromDomain(item)); mongo.IsDuplicateKeyError(err) {
+		var duplicate evidenceJobDocument
+		findErr := r.jobs.FindOne(ctx, bson.D{{Key: "organization_id", Value: item.OrganizationID},
+			{Key: "project_id", Value: item.ProjectID}, {Key: "$or", Value: bson.A{
+				bson.D{{Key: "idempotency_key", Value: item.IdempotencyKey}},
+				bson.D{{Key: "artifact_id", Value: item.ArtifactID}, {Key: "kind", Value: item.Kind},
+					{Key: "active", Value: true}},
+			}}}).Decode(&duplicate)
+		if findErr == nil {
+			existing, decodeErr := duplicate.domain()
+			if decodeErr != nil {
+				return biz.EvidenceJob{}, decodeErr
+			}
+			return existing, biz.ErrDuplicate
+		}
 		return biz.EvidenceJob{}, biz.ErrDuplicate
 	} else if err != nil {
 		return biz.EvidenceJob{}, fmt.Errorf("insert evidence job: %w", err)
@@ -212,6 +226,7 @@ type evidenceJobDocument struct {
 	Signing              signatureSigningSnapshotDocument `bson:"signing,omitempty"`
 	IdempotencyKey       string                           `bson:"idempotency_key"`
 	Status               biz.EvidenceJobStatus            `bson:"status"`
+	Active               bool                             `bson:"active"`
 	Failure              biz.EvidenceJobFailure           `bson:"failure,omitempty"`
 	Version              uint64                           `bson:"version"`
 	Lease                evidenceLeaseDocument            `bson:"lease,omitempty"`
@@ -338,7 +353,7 @@ func evidenceJobDocumentFromDomain(item biz.EvidenceJob) evidenceJobDocument {
 		Signature:          signatureTrustSnapshotDocumentFromDomain(item.Signature),
 		SignatureOperation: item.SignatureOperation,
 		Signing:            signatureSigningSnapshotDocumentFromDomain(item.Signing),
-		IdempotencyKey:     item.IdempotencyKey, Status: item.Status,
+		IdempotencyKey:     item.IdempotencyKey, Status: item.Status, Active: !item.Terminal(),
 		Failure: item.Failure, Version: item.Version,
 		Lease: evidenceLeaseDocument{
 			Owner: item.Lease.Owner, ExpiresAt: item.Lease.ExpiresAt, Generation: item.Lease.Generation,

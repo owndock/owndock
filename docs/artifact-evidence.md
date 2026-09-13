@@ -281,7 +281,7 @@ docker compose -f deploy/evidence-worker.compose.yaml up -d
 
 ## 后续阶段
 
-签名公钥与 Vault Transit KMS 闭环、固定 Trivy 漏洞扫描、原子数据库更新、限时漏洞豁免和版本化 Deployment Policy 已经落地；策略会在创建 Deployment 前读取并完整校验证据正文，把实际策略版本、证据 digest、签名验证、漏洞观察值和命中豁免冻结为不可变快照。keyless 私有根真实 bundle 门禁已接入专用 CI 并等待首次远程结果；后续供应链阶段继续补齐其他 KMS provider、客户网络矩阵和持续重扫。生产环境一旦启用强制策略，证据缺失、过期或无法验证必须失败关闭。详见 [Deployment Policy](deployment-policies.md)。
+签名公钥与 Vault Transit KMS 闭环、固定 Trivy 漏洞扫描、原子数据库更新、限时漏洞豁免、可选持续重扫和版本化 Deployment Policy 已经落地；策略会在创建 Deployment 前读取并完整校验证据正文，把实际策略版本、证据 digest、签名验证、漏洞观察值和命中豁免冻结为不可变快照。keyless 私有根真实 bundle 门禁已接入专用 CI 并等待首次远程结果；后续供应链阶段继续补齐其他 KMS provider 和客户网络矩阵。生产环境一旦启用强制策略，证据缺失、过期或无法验证必须失败关闭。详见 [Deployment Policy](deployment-policies.md)。
 
 ## 漏洞扫描与重扫
 
@@ -321,4 +321,44 @@ GET /api/v1/projects/{project_id}/artifacts/{artifact_id}/vulnerability-observat
 Authorization: Bearer <session-token>
 ```
 
-Developer、Maintainer 和 Owner 可以手动重扫；同一幂等键只代表同一次尝试，需要新扫描时必须换新键。Viewer 可读摘要和下载报告，不能发起扫描。`stale=true` 表示已达到配置的扫描年龄上限，或漏洞库已达到它声明的下次更新时间；这不等于“没有漏洞”。社区核心支持构建后自动扫描、手动重扫和 Project 级基础豁免；持续定时重扫、集中风险看板和通知属于后续商业治理能力。误报豁免必须精确限定单个漏洞 ID、Project/Artifact 范围、理由、批准人和到期时间，不接受永久或全局“忽略全部”，详见[漏洞豁免](vulnerability-waivers.md)。
+Developer、Maintainer 和 Owner 可以手动重扫；同一幂等键只代表同一次尝试，需要新扫描时必须换新键。Viewer 可读摘要和下载报告，不能发起扫描。`stale=true` 表示已达到配置的扫描年龄上限，或漏洞库已达到它声明的下次更新时间；这不等于“没有漏洞”。
+
+基础持续重扫也是社区安全能力，但默认关闭。开启后由 Server 只调度 Job，不执行 Trivy；实际扫描仍由独立 Evidence Worker 完成。配置示例：
+
+```yaml
+product:
+  vulnerability_rescan_enabled: true
+  vulnerability_rescan_poll_interval: 5m
+  vulnerability_rescan_retry_interval: 6h
+  vulnerability_rescan_operation_timeout: 30s
+  vulnerability_rescan_candidate_limit: 100
+```
+
+`poll_interval` 是发现过期 Observation 的频率，`retry_interval` 是失败任务可再次入队的时间桶，不是扫描结果有效期。成功扫描会写入新的 `fresh_until`，在它到期前不会重复调度。候选按 `(fresh_until, id)` 使用有界游标轮转，单次最多 1000 条；多个 Server 副本可以同时运行，MongoDB migration v52 的 partial unique index 保证同一 Artifact 最多只有一个活动漏洞任务。手动请求若撞上活动任务，会复用该任务 ID。
+
+```mermaid
+sequenceDiagram
+    participant S1 as Server A Scheduler
+    participant S2 as Server B Scheduler
+    participant DB as MongoDB
+    participant EW as Evidence Worker
+
+    par 并发轮询
+        S1->>DB: 查询过期 Observation（有界游标）
+    and
+        S2->>DB: 查询过期 Observation（有界游标）
+    end
+    S1->>DB: 创建确定性重试时间桶 Job
+    S2->>DB: 创建同 Artifact Job
+    DB-->>S1: 创建或返回已有活动 Job
+    DB-->>S2: partial unique 冲突，返回已有 Job
+    EW->>DB: claim + lease/generation fence
+    alt 扫描成功
+        EW->>DB: 完成 Job 并推进 fresh_until
+    else 扫描失败
+        EW->>DB: Job 终态 active=false
+        Note over S1,DB: 下一 retry_interval 时间桶可重新入队
+    end
+```
+
+社区核心支持构建后自动扫描、手动及持续重扫和 Project 级基础豁免。集中风险看板、跨 Project 通知、Organization 级策略继承和合规报表属于商业治理能力。误报豁免必须精确限定单个漏洞 ID、Project/Artifact 范围、理由、批准人和到期时间，不接受永久或全局“忽略全部”，详见[漏洞豁免](vulnerability-waivers.md)。

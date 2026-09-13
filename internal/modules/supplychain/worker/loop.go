@@ -8,8 +8,12 @@ import (
 
 type ErrorHandler func(error)
 
+type OnceRunner interface {
+	RunOnce(context.Context) error
+}
+
 type Loop struct {
-	runner           *Runner
+	runner           OnceRunner
 	pollInterval     time.Duration
 	operationTimeout time.Duration
 	onError          ErrorHandler
@@ -17,12 +21,12 @@ type Loop struct {
 }
 
 func NewLoop(
-	runner *Runner,
+	runner OnceRunner,
 	pollInterval, operationTimeout time.Duration,
 	onError ErrorHandler,
 ) (*Loop, error) {
 	if runner == nil || pollInterval <= 0 || operationTimeout <= 0 {
-		return nil, errors.New("evidence worker loop configuration is invalid")
+		return nil, errors.New("supply-chain worker loop configuration is invalid")
 	}
 	return &Loop{
 		runner: runner, pollInterval: pollInterval,
@@ -48,7 +52,7 @@ func (l *Loop) Run(ctx context.Context) error {
 			err := l.runner.RunOnce(operationContext)
 			cancel()
 			if l.observePoll != nil {
-				l.observePoll(evidenceLoopResult(err), time.Since(startedAt))
+				l.observePoll(loopResult(err), time.Since(startedAt))
 			}
 			if err != nil && !errors.Is(err, context.Canceled) && l.onError != nil {
 				l.onError(err)
@@ -58,7 +62,7 @@ func (l *Loop) Run(ctx context.Context) error {
 	}
 }
 
-func evidenceLoopResult(err error) string {
+func loopResult(err error) string {
 	switch {
 	case err == nil:
 		return "success"

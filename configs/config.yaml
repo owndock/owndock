@@ -41,6 +41,13 @@ product:
   build_webhook_rate_limit: 120
   build_webhook_rate_window: 1m
   build_webhook_max_body_bytes: 1048576
+  # Opt-in continuous rescans enqueue pinned Trivy jobs for stale Artifact
+  # observations. Multiple Server replicas are serialized by MongoDB.
+  vulnerability_rescan_enabled: false
+  vulnerability_rescan_poll_interval: 5m
+  vulnerability_rescan_retry_interval: 6h
+  vulnerability_rescan_operation_timeout: 30s
+  vulnerability_rescan_candidate_limit: 100
 
 runtime:
   build_worker:
