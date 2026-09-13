@@ -1,0 +1,108 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    printf '%s\n' "OwnDock community release verification failed: $1" >&2
+    exit 1
+}
+
+[ "$#" -eq 2 ] || fail "usage: verify-community-release VERSION ARTIFACT_DIRECTORY"
+version=$1
+directory=$2
+printf '%s\n' "$version" |
+    grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' ||
+    fail "version must be SemVer without a v prefix"
+[ -d "$directory" ] && [ ! -L "$directory" ] || fail "artifact directory is unsafe"
+
+archive="owndock-community_${version}.tar.gz"
+required_files="
+$archive
+COMMUNITY_SHA256SUMS
+COMMUNITY_SHA256SUMS.sigstore.json
+CONTAINER_IMAGES.txt
+CONTAINER_IMAGES.sigstore.json
+COMMUNITY_COMPATIBILITY_amd64.txt
+COMMUNITY_COMPATIBILITY_arm64.txt
+verify-community-release
+"
+for name in $required_files; do
+    path=$directory/$name
+    [ -f "$path" ] && [ ! -L "$path" ] && [ -r "$path" ] ||
+        fail "required artifact $name is missing or unsafe"
+done
+
+cosign_binary=${OWNDOCK_COSIGN_BINARY:-cosign}
+command -v "$cosign_binary" >/dev/null 2>&1 || fail "cosign is required"
+identity="https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v${version}"
+"$cosign_binary" verify-blob "$directory/COMMUNITY_SHA256SUMS" \
+    --bundle "$directory/COMMUNITY_SHA256SUMS.sigstore.json" \
+    --certificate-identity "$identity" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --offline >/dev/null ||
+    fail "community checksum signature or release identity is invalid"
+"$cosign_binary" verify-blob "$directory/CONTAINER_IMAGES.txt" \
+    --bundle "$directory/CONTAINER_IMAGES.sigstore.json" \
+    --certificate-identity "$identity" \
+    --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+    --offline >/dev/null ||
+    fail "container manifest signature or release identity is invalid"
+
+awk -v archive="$archive" '
+BEGIN {
+    allowed[archive] = 1
+    allowed["CONTAINER_IMAGES.txt"] = 1
+    allowed["COMMUNITY_COMPATIBILITY_amd64.txt"] = 1
+    allowed["COMMUNITY_COMPATIBILITY_arm64.txt"] = 1
+    allowed["verify-community-release"] = 1
+}
+{
+    if (NF != 2 || length($1) != 64 || $1 !~ /^[0-9a-f]+$/ ||
+        !($2 in allowed) || seen[$2]++) exit 1
+}
+END {
+    if (NR != 5) exit 1
+    for (name in allowed) if (!seen[name]) exit 1
+}
+' "$directory/COMMUNITY_SHA256SUMS" ||
+    fail "community checksum manifest is not the exact supported file set"
+
+(cd "$directory" && sha256sum --check --strict COMMUNITY_SHA256SUMS >/dev/null) ||
+    fail "community artifact checksum is invalid"
+
+awk '
+BEGIN {
+    allowed["ghcr.io/owndock/owndock"] = 1
+    allowed["ghcr.io/owndock/owndock-build-worker"] = 1
+    allowed["ghcr.io/owndock/owndock-build-egress-gateway"] = 1
+    allowed["ghcr.io/owndock/owndock-evidence-worker"] = 1
+    allowed["ghcr.io/owndock/owndock-vulnerability-db-updater"] = 1
+}
+{
+    if (NF != 1) exit 1
+    separator = index($1, "@sha256:")
+    if (!separator) exit 1
+    image = substr($1, 1, separator - 1)
+    digest = substr($1, separator + 8)
+    if (!(image in allowed) || seen[image]++ ||
+        length(digest) != 64 || digest !~ /^[0-9a-f]+$/) exit 1
+}
+END {
+    if (NR != 5) exit 1
+    for (image in allowed) if (!seen[image]) exit 1
+}
+' "$directory/CONTAINER_IMAGES.txt" ||
+    fail "container manifest is not the exact supported immutable image set"
+
+for architecture in amd64 arm64; do
+    report=$directory/COMMUNITY_COMPATIBILITY_${architecture}.txt
+    grep -qx 'schema=owndock-community-compatibility-v1' "$report" ||
+        fail "$architecture compatibility report schema is invalid"
+    grep -qx "current_version=$version" "$report" ||
+        fail "$architecture compatibility report version is invalid"
+    grep -qx "architecture=$architecture" "$report" ||
+        fail "$architecture compatibility report architecture is invalid"
+    grep -Eq '^result=(baseline|passed)$' "$report" ||
+        fail "$architecture compatibility report result is invalid"
+done
+
+printf '%s\n' "OwnDock community release v${version} verified"

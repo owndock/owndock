@@ -15,6 +15,7 @@
 - `CONTAINER_IMAGES.sigstore.json`；
 - `COMMUNITY_COMPATIBILITY_amd64.txt`；
 - `COMMUNITY_COMPATIBILITY_arm64.txt`；
+- `verify-community-release`；
 
 先使用精确 Tag 的 Release 工作流身份离线验证 `COMMUNITY_SHA256SUMS.sigstore.json`，再校验安装包、`CONTAINER_IMAGES.txt` 和两份原生架构兼容报告的 SHA-256。兼容报告记录精确前后版本、Server digest、commit、内核和 Docker Engine；`result=baseline` 表示首个版本不存在可比较的上一版，不能解释为相邻升级已经验证。下面的 `<tag>` 必须替换为正在安装的完整 Tag，例如 `v0.1.0`：
 
@@ -26,8 +27,11 @@ cosign verify-blob COMMUNITY_SHA256SUMS \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --offline
 sha256sum --check COMMUNITY_SHA256SUMS
+./verify-community-release "${tag#v}" .
 tar -xzf "owndock-community_${tag#v}.tar.gz"
 ```
+
+必须先用独立安装且受信任的 Cosign 验证校验和，再由 `sha256sum` 验证下载的脚本自身，之后才能执行 `verify-community-release`。验证器会再次离线校验两个 Sigstore bundle，并拒绝缺项、额外 checksum 项、可变镜像引用、未知镜像仓库、重复镜像、版本或架构不匹配的兼容报告。
 
 解包后，继续按[社区版发布候选门禁](release-readiness.md)验证容器清单和目标镜像签名，再从清单复制 `ghcr.io/owndock/owndock@sha256:...`。不要把 SemVer tag 或 `latest` 写入实际部署配置。
 

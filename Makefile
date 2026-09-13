@@ -174,6 +174,7 @@ test-agent-package:
 test-agent-release:
 	go test ./packaging/release ./internal/tools/releasemanifest -count=1
 	sh -n packaging/release/verify-agent-release
+	sh -n packaging/release/verify-community-release
 
 test-agent-systemd:
 	@test "$$(uname -s)" = "Linux" || (echo "test-agent-systemd requires Linux" && exit 2)

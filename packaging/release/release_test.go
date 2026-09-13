@@ -124,6 +124,91 @@ func TestVerifierRejectsUnsafeChecksumManifest(t *testing.T) {
 	}
 }
 
+func TestCommunityVerifierBindsReportsImagesAndReleaseIdentity(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release verifier is a POSIX script")
+	}
+	directory := t.TempDir()
+	version := "1.2.3"
+	files := map[string]string{
+		"owndock-community_1.2.3.tar.gz":    "community archive",
+		"CONTAINER_IMAGES.txt":              communityImageManifest(),
+		"COMMUNITY_COMPATIBILITY_amd64.txt": communityReport(version, "amd64"),
+		"COMMUNITY_COMPATIBILITY_arm64.txt": communityReport(version, "arm64"),
+		"verify-community-release": readFile(
+			t, filepath.Join(repositoryRoot(t), "packaging/release/verify-community-release"),
+		),
+	}
+	for name, value := range files {
+		mode := os.FileMode(0o644)
+		if name == "verify-community-release" {
+			mode = 0o755
+		}
+		writeFile(t, filepath.Join(directory, name), value, mode)
+	}
+	var checksums strings.Builder
+	for _, name := range []string{
+		"owndock-community_1.2.3.tar.gz",
+		"CONTAINER_IMAGES.txt",
+		"COMMUNITY_COMPATIBILITY_amd64.txt",
+		"COMMUNITY_COMPATIBILITY_arm64.txt",
+		"verify-community-release",
+	} {
+		digest := sha256.Sum256([]byte(files[name]))
+		checksums.WriteString(hex.EncodeToString(digest[:]) + "  " + name + "\n")
+	}
+	writeFile(t, filepath.Join(directory, "COMMUNITY_SHA256SUMS"), checksums.String(), 0o644)
+	writeFile(t, filepath.Join(directory, "COMMUNITY_SHA256SUMS.sigstore.json"), "bundle", 0o644)
+	writeFile(t, filepath.Join(directory, "CONTAINER_IMAGES.sigstore.json"), "bundle", 0o644)
+	argumentLog := filepath.Join(directory, "cosign-arguments")
+	cosign := filepath.Join(directory, "cosign")
+	writeFile(t, cosign, "#!/bin/sh\nprintf '%s\\n' \"$@\" >>\"$OWNDOCK_TEST_ARGUMENT_LOG\"\n", 0o755)
+
+	run := func() ([]byte, error) {
+		command := exec.Command("sh", filepath.Join(directory, "verify-community-release"), version, directory)
+		command.Env = append(os.Environ(),
+			"OWNDOCK_COSIGN_BINARY="+cosign,
+			"OWNDOCK_TEST_ARGUMENT_LOG="+argumentLog,
+		)
+		return command.CombinedOutput()
+	}
+	if output, err := run(); err != nil {
+		t.Fatalf("verify community release: %v: %s", err, output)
+	}
+	arguments := readFile(t, argumentLog)
+	if strings.Count(arguments, "verify-blob\n") != 2 ||
+		!strings.Contains(arguments,
+			"--certificate-identity\nhttps://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/v1.2.3\n") {
+		t.Fatalf("unexpected Cosign arguments:\n%s", arguments)
+	}
+
+	writeFile(t, filepath.Join(directory, "COMMUNITY_COMPATIBILITY_arm64.txt"),
+		communityReport(version, "amd64"), 0o644)
+	if output, err := run(); err == nil {
+		t.Fatalf("tampered compatibility report passed: %s", output)
+	}
+}
+
+func communityImageManifest() string {
+	images := []string{
+		"ghcr.io/owndock/owndock",
+		"ghcr.io/owndock/owndock-build-worker",
+		"ghcr.io/owndock/owndock-build-egress-gateway",
+		"ghcr.io/owndock/owndock-evidence-worker",
+		"ghcr.io/owndock/owndock-vulnerability-db-updater",
+	}
+	var value strings.Builder
+	for index, image := range images {
+		value.WriteString(image + "@sha256:" + strings.Repeat(string(rune('a'+index)), 64) + "\n")
+	}
+	return value.String()
+}
+
+func communityReport(version, architecture string) string {
+	return "schema=owndock-community-compatibility-v1\n" +
+		"result=passed\ncurrent_version=" + version + "\narchitecture=" + architecture + "\n"
+}
+
 func runVerifier(
 	t *testing.T,
 	version, archive, checksums, bundle, cosign, argumentLog string,
