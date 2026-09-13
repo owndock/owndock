@@ -92,10 +92,10 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 
 Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取消部署，Maintainer 还可执行回滚，Viewer 仅可读取部署记录。创建、重试或回滚前都要求所选 Runtime Target 已处于 `ready`；否则返回 `409 runtime_target_not_ready`，不会先创建一个注定无法执行的排队任务。direct Target 通过受约束的 mTLS Docker Ping 探测，agent Target 通过当前已认证 Host 连接上的类型化 `runtime.probe` 探测；两种模式都只有显式探测成功后才进入 `ready`。
 
-## 已接受但尚未实现
+## 已接受但待完成或待验收
 
 - Source Repository 自建 CA/代理兼容矩阵；
-- Docker Runtime Inventory 的持续 Event 双主机/容量/秘密泄漏安全验收；
+- Docker Runtime Inventory 的双主机、Primary 切换、客户资源峰值和 Web E2E；
 - Agent 自动安装和证书安全轮换的真实发行/故障验收；
 - 多主机部署选址系统验收；
 - Terminal 真实远程 Linux/SSH、多主机故障和浏览器安全 E2E；

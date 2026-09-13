@@ -51,9 +51,9 @@ Docker Runtime Inventory 是 OwnDock 对纳管 Docker Engine 当前资源的安�
 - 未完成 observation 的两小时回收、被替换 generation 的七天回收和 TTL 索引；
 - Replica Set 集成测试覆盖未完成批次不可见、重复分块、当前视图切换、空视图、旧批次 fence，以及两个 Server 同时领取时只能有一个成功。
 
-尚未实现：
+尚未形成系统验收证据：
 
-- 大主机容量、恶意 Labels/Driver options、秘密泄漏、双主机断线和事件洪峰系统测试。
+- 两台独立 Agent 主机断线、真实 MongoDB Primary 切换、客户等价资源峰值和 Web E2E；仓库内的 10,000 资源分块、1,202 条 current 分页、4,096 Event 洪峰及恶意字段秘密哨兵门禁已经通过。
 
 因此当前代码已具备受权限保护的资源浏览 API；周期采集仍默认关闭，系统级容量、安全与故障验收完成前仍按 pre-release 能力管理。
 
