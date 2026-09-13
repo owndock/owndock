@@ -285,7 +285,8 @@ jobs:
             --pattern COMMUNITY_SHA256SUMS.sigstore.json \
             --pattern 'COMMUNITY_COMPATIBILITY_*.txt' \
             --pattern CONTAINER_IMAGES.txt \
-            --pattern CONTAINER_IMAGES.sigstore.json
+            --pattern CONTAINER_IMAGES.sigstore.json \
+            --pattern verify-community-release
       - name: Verify previous release identity and resolve Server image
         if: steps.previous.outputs.has_previous == 'true'
         id: previous-image
