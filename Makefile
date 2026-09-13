@@ -157,6 +157,13 @@ test-community-deployment:
 		OWNDOCK_CONFIG_FILE=/dev/null \
 		OWNDOCK_TRIVY_DATABASE_ROOT=/dev/null \
 		docker compose -f deploy/vulnerability-db-updater.compose.yaml config --quiet
+	@OWNDOCK_EGRESS_GATEWAY_IMAGE=ghcr.io/owndock/owndock-egress-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+		OWNDOCK_VULNERABILITY_DB_UPDATER_IMAGE=ghcr.io/owndock/owndock-vulnerability-db-updater@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+		OWNDOCK_CONFIG_FILE=/dev/null \
+		OWNDOCK_TRIVY_DATABASE_ROOT=/dev/null \
+		OWNDOCK_TRIVY_DB_CA_CERT_FILE_HOST=/dev/null \
+		docker compose -f deploy/vulnerability-db-updater.compose.yaml \
+		-f deploy/vulnerability-db-private-ca.override.yaml config --quiet
 
 test-community-integration:
 	docker build \

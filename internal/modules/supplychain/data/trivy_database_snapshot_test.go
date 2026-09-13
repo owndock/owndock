@@ -79,6 +79,7 @@ func TestTrivyDatabaseSnapshotManagerPublishesVerifiedAtomicCurrentLink(t *testi
 func TestTrivyDatabaseSnapshotManagerPassesOnlyExplicitProxy(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", "http://ambient.invalid:8080")
 	t.Setenv("NO_PROXY", "*")
+	t.Setenv("SSL_CERT_FILE", "/tmp/ambient-ca.pem")
 	script := strings.Replace(validTrivyDatabaseUpdaterScript("database-v1"),
 		`if [ "$1" = "image" ]; then`, `if [ "$1" = "image" ]; then
   [ "$HTTP_PROXY" = "http://172.31.242.2:3128" ]
@@ -86,11 +87,12 @@ func TestTrivyDatabaseSnapshotManagerPassesOnlyExplicitProxy(t *testing.T) {
   [ "$http_proxy" = "$HTTP_PROXY" ]
   [ "$https_proxy" = "$HTTP_PROXY" ]
   [ -z "$NO_PROXY" ]
-  [ -z "$no_proxy" ]`, 1)
+  [ -z "$no_proxy" ]
+  [ "$SSL_CERT_FILE" = "/tmp/private-ca.pem" ]`, 1)
 	manager, err := NewTrivyDatabaseSnapshotManager(TrivyDatabaseSnapshotOptions{
 		Executable: writeFakeTrivy(t, script), ExpectedVersion: PinnedTrivyVersion,
 		RootDirectory: filepath.Join(t.TempDir(), "trivy-db"),
-		HTTPSProxy:    "http://172.31.242.2:3128", RetainSnapshots: 3,
+		HTTPSProxy:    "http://172.31.242.2:3128", CACertFile: "/tmp/private-ca.pem", RetainSnapshots: 3,
 		MinimumRetention: 72 * time.Hour,
 		Now:              func() time.Time { return time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC) },
 	})
@@ -195,6 +197,11 @@ func TestTrivyDatabaseSnapshotConfigurationFailsClosed(t *testing.T) {
 			item.HTTPSProxy = "http://user:secret@proxy.internal:3128"
 			return item
 		}(),
+		func() TrivyDatabaseSnapshotOptions {
+			item := valid
+			item.CACertFile = "relative.pem"
+			return item
+		}(),
 	}
 	for _, item := range invalid {
 		if _, err := NewTrivyDatabaseSnapshotManager(item); !errors.Is(err, ErrTrivyDatabaseUpdate) {
@@ -203,21 +210,25 @@ func TestTrivyDatabaseSnapshotConfigurationFailsClosed(t *testing.T) {
 	}
 }
 
-func TestTrivyDatabaseUpdateEnvironmentUsesOnlyExplicitProxy(t *testing.T) {
+func TestTrivyDatabaseUpdateEnvironmentUsesOnlyExplicitTransport(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "http://ambient.invalid:8080")
 	t.Setenv("HTTPS_PROXY", "http://ambient.invalid:8080")
 	t.Setenv("NO_PROXY", "*")
-	withoutProxy := trivyDatabaseUpdateEnvironment("/tmp/cache", "")
+	t.Setenv("SSL_CERT_FILE", "/tmp/ambient-ca.pem")
+	withoutProxy := trivyDatabaseUpdateEnvironment("/tmp/cache", "", "")
 	for _, value := range withoutProxy {
-		if strings.Contains(value, "PROXY=") || strings.Contains(value, "proxy=") {
-			t.Fatalf("ambient proxy leaked into updater: %v", withoutProxy)
+		if strings.Contains(value, "PROXY=") || strings.Contains(value, "proxy=") ||
+			strings.HasPrefix(value, "SSL_CERT_") {
+			t.Fatalf("ambient transport environment leaked into updater: %v", withoutProxy)
 		}
 	}
-	withProxy := trivyDatabaseUpdateEnvironment("/tmp/cache", "http://172.31.242.2:3128")
+	withProxy := trivyDatabaseUpdateEnvironment(
+		"/tmp/cache", "http://172.31.242.2:3128", "/tmp/private-ca.pem",
+	)
 	for _, expected := range []string{
 		"HTTP_PROXY=http://172.31.242.2:3128", "HTTPS_PROXY=http://172.31.242.2:3128",
 		"http_proxy=http://172.31.242.2:3128", "https_proxy=http://172.31.242.2:3128",
-		"NO_PROXY=", "no_proxy=",
+		"NO_PROXY=", "no_proxy=", "SSL_CERT_FILE=/tmp/private-ca.pem",
 	} {
 		if !slices.Contains(withProxy, expected) {
 			t.Fatalf("explicit updater environment %v does not contain %q", withProxy, expected)

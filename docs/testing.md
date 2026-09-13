@@ -53,4 +53,4 @@ Registry 传输测试使用自签名 TLS Registry 和真实 HTTP CONNECT 隧道�
 
 `make test-vulnerability-integration` 会从固定 digest 的 Trivy 多架构镜像提取扫描器，通过正式 Snapshot Manager 下载真实 DB 并原子发布 `current`，再启动固定版本的私有 Distribution Registry。门禁验证精确镜像 digest 扫描、报告主题绑定、OCI Referrer 发布和完整内容回读；同一测试还在非 root、只读根、无 capabilities、PID/CPU/内存/tmpfs 上限下使用只读 DB 完成离线扫描，并用 16 MiB+1 的真实子进程输出验证硬截断和凭据清零。
 
-Updater 镜像另已在相同的非 root、只读根、无 capabilities 和有限资源约束下下载并发布真实 DB。Updater 不继承宿主代理、`NO_PROXY` 或证书环境变量，只把经过规范校验的 `-https-proxy` 同时注入大小写代理变量并清空 bypass list；生产 Compose 通过独立 Vulnerability DB Boundary 和网关 scope 阻断 raw TCP。真实 DB 下载量较大，因此不进入普通 `make check`，而由定时/手动的双架构 `test-build-security` 执行。首次 GitHub Actions 双架构结果尚未获取；客户防火墙/DNS、私有 CA 镜像源和文件系统矩阵仍待补齐，因此不能据此宣称漏洞治理已全部生产就绪。
+Updater 镜像另已在相同的非 root、只读根、无 capabilities 和有限资源约束下下载并发布真实 DB。Updater 不继承宿主代理、`NO_PROXY` 或通用证书环境变量，只把经过规范校验的 `-https-proxy` 同时注入大小写代理变量并清空 bypass list。私有 DB Registry CA 单元门禁验证专用配置输入、纯 X.509/普通文件/大小约束、原始路径隔离、私有快照传递和退出清理；生产 Compose 通过独立 Vulnerability DB Boundary 和网关 scope 阻断 raw TCP。真实 DB 下载量较大，因此不进入普通 `make check`，而由定时/手动的双架构 `test-build-security` 执行。首次 GitHub Actions 双架构结果尚未获取；真实自签名 DB OCI 源、客户防火墙/DNS 和文件系统矩阵仍待补齐，因此不能据此宣称漏洞治理已全部生产就绪。

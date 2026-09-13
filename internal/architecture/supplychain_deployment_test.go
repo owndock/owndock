@@ -90,8 +90,29 @@ func TestVulnerabilityDatabaseUpdaterComposeHasNoDirectEgressRoute(t *testing.T)
 	}
 	updaterService := compose[updaterStart:networkStart]
 	if strings.Contains(updaterService, "vulnerability-db-egress-uplink") ||
-		strings.Contains(updaterService, "OWNDOCK_TRIVY_DB_NO_PROXY") {
+		strings.Contains(updaterService, "OWNDOCK_TRIVY_DB_NO_PROXY") ||
+		strings.Contains(updaterService, "SSL_CERT_FILE") {
 		t.Fatal("updater must not join the uplink or accept an ambient bypass list")
+	}
+}
+
+func TestVulnerabilityDatabasePrivateCAOverrideUsesDedicatedReadOnlyInput(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(repositoryRoot(t), "deploy",
+		"vulnerability-db-private-ca.override.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	override := string(content)
+	for _, required := range []string{
+		"OWNDOCK_TRIVY_DB_CA_CERT_FILE: /etc/owndock/trivy-db-ca.pem",
+		"${OWNDOCK_TRIVY_DB_CA_CERT_FILE_HOST:?required}:/etc/owndock/trivy-db-ca.pem:ro",
+	} {
+		if !strings.Contains(override, required) {
+			t.Fatalf("private CA override is missing %q", required)
+		}
+	}
+	if strings.Contains(override, "SSL_CERT_FILE") {
+		t.Fatal("private CA override must not pass operator input through ambient tool variables")
 	}
 }
 
