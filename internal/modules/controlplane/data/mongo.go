@@ -483,6 +483,7 @@ func (s *MongoStore) EnvironmentExists(ctx context.Context, projectID, environme
 	count, err := s.environments.CountDocuments(ctx, bson.D{
 		{Key: "_id", Value: environmentID},
 		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusActive},
 	})
 	if err != nil {
 		return false, fmt.Errorf("check environment: %w", err)
@@ -498,6 +499,7 @@ func (s *MongoStore) EnvironmentExecution(
 	err := s.environments.FindOne(ctx, bson.D{
 		{Key: "_id", Value: environmentID},
 		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusActive},
 	}).Decode(&document)
 	if err == mongo.ErrNoDocuments {
 		return nil, biz.ErrNotFound
@@ -511,7 +513,10 @@ func (s *MongoStore) EnvironmentExecution(
 func (s *MongoStore) ListApplications(ctx context.Context, projectID string) ([]biz.Application, error) {
 	cursor, err := s.applications.Find(
 		ctx,
-		bson.D{{Key: "project_id", Value: projectID}},
+		bson.D{
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: biz.ProductResourceStatusActive},
+		},
 		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}),
 	)
 	if err != nil {
@@ -541,6 +546,7 @@ func (s *MongoStore) CreateApplication(ctx context.Context, item biz.Application
 		return biz.Application{}, err
 	}
 	item.TemplateSnapshot = snapshot
+	item.Status = biz.ProductResourceStatusActive
 	_, err = s.applications.InsertOne(ctx, applicationDocument{
 		ID: item.ID, ProjectID: item.ProjectID,
 		Name: item.Name, NameNormalized: normalizeName(item.Name),
@@ -548,6 +554,7 @@ func (s *MongoStore) CreateApplication(ctx context.Context, item biz.Application
 			item.TemplateSnapshot,
 		),
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+		Status: biz.ProductResourceStatusActive,
 	})
 	if mongo.IsDuplicateKeyError(err) {
 		return biz.Application{}, biz.ErrDuplicateName
@@ -562,9 +569,24 @@ func (s *MongoStore) ApplicationExists(ctx context.Context, projectID, applicati
 	count, err := s.applications.CountDocuments(ctx, bson.D{
 		{Key: "_id", Value: applicationID},
 		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusActive},
 	})
 	if err != nil {
 		return false, fmt.Errorf("check application: %w", err)
+	}
+	return count == 1, nil
+}
+
+func (s *MongoStore) ApplicationExistsAnyStatus(
+	ctx context.Context,
+	projectID, applicationID string,
+) (bool, error) {
+	count, err := s.applications.CountDocuments(ctx, bson.D{
+		{Key: "_id", Value: applicationID},
+		{Key: "project_id", Value: projectID},
+	})
+	if err != nil {
+		return false, fmt.Errorf("check application history: %w", err)
 	}
 	return count == 1, nil
 }
@@ -853,8 +875,207 @@ func (s *MongoStore) DeleteRetiringRuntimeTarget(
 	return nil
 }
 
+func (s *MongoStore) BeginApplicationRetirement(
+	ctx context.Context,
+	projectID, applicationID string,
+	retirement biz.ProductResourceRetirement,
+) (biz.Application, bool, error) {
+	var document applicationDocument
+	err := s.applications.FindOneAndUpdate(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: applicationID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: biz.ProductResourceStatusActive},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: biz.ProductResourceStatusRetiring},
+			{Key: "retirement", Value: productResourceRetirementDocumentFromDomain(retirement)},
+		}}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&document)
+	if err == nil {
+		item, domainErr := document.domain()
+		return item, true, domainErr
+	}
+	if err != mongo.ErrNoDocuments {
+		return biz.Application{}, false, fmt.Errorf("begin application retirement: %w", err)
+	}
+	err = s.applications.FindOne(ctx, bson.D{
+		{Key: "_id", Value: applicationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusRetiring},
+	}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.Application{}, false, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Application{}, false, fmt.Errorf("find retiring application: %w", err)
+	}
+	item, domainErr := document.domain()
+	return item, false, domainErr
+}
+
+func (s *MongoStore) ListRetiringApplications(ctx context.Context, limit int64) ([]biz.Application, error) {
+	cursor, err := s.applications.Find(
+		ctx,
+		bson.D{{Key: "status", Value: biz.ProductResourceStatusRetiring}},
+		options.Find().SetSort(bson.D{
+			{Key: "retirement.started_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find retiring applications: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []applicationDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode retiring applications: %w", err)
+	}
+	items := make([]biz.Application, len(documents))
+	for index, document := range documents {
+		items[index], err = document.domain()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
+func (s *MongoStore) CompleteApplicationRetirement(
+	ctx context.Context,
+	projectID, applicationID string,
+	retiredAt time.Time,
+) error {
+	result, err := s.applications.UpdateOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: applicationID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: biz.ProductResourceStatusRetiring},
+		},
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "status", Value: biz.ProductResourceStatusRetired},
+				{Key: "retired_at", Value: retiredAt.UTC()},
+			}},
+			{Key: "$unset", Value: bson.D{{Key: "retirement", Value: ""}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("complete application retirement: %w", err)
+	}
+	if result.ModifiedCount != 1 {
+		return biz.ErrNotFound
+	}
+	return nil
+}
+
+func (s *MongoStore) BeginEnvironmentRetirement(
+	ctx context.Context,
+	projectID, environmentID string,
+	retirement biz.ProductResourceRetirement,
+) (biz.Environment, bool, error) {
+	var document environmentDocument
+	err := s.environments.FindOneAndUpdate(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: environmentID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: biz.ProductResourceStatusActive},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: biz.ProductResourceStatusRetiring},
+			{Key: "retirement", Value: productResourceRetirementDocumentFromDomain(retirement)},
+		}}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&document)
+	if err == nil {
+		return document.domain(), true, nil
+	}
+	if err != mongo.ErrNoDocuments {
+		return biz.Environment{}, false, fmt.Errorf("begin environment retirement: %w", err)
+	}
+	err = s.environments.FindOne(ctx, bson.D{
+		{Key: "_id", Value: environmentID},
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusRetiring},
+	}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return biz.Environment{}, false, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.Environment{}, false, fmt.Errorf("find retiring environment: %w", err)
+	}
+	return document.domain(), false, nil
+}
+
+func (s *MongoStore) ListRetiringEnvironments(ctx context.Context, limit int64) ([]biz.Environment, error) {
+	cursor, err := s.environments.Find(
+		ctx,
+		bson.D{{Key: "status", Value: biz.ProductResourceStatusRetiring}},
+		options.Find().SetSort(bson.D{
+			{Key: "retirement.started_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find retiring environments: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []environmentDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode retiring environments: %w", err)
+	}
+	items := make([]biz.Environment, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain()
+	}
+	return items, nil
+}
+
+func (s *MongoStore) CompleteEnvironmentRetirement(
+	ctx context.Context,
+	projectID, environmentID string,
+	retiredAt time.Time,
+) error {
+	result, err := s.environments.UpdateOne(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: environmentID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: biz.ProductResourceStatusRetiring},
+		},
+		bson.D{
+			{Key: "$set", Value: bson.D{
+				{Key: "status", Value: biz.ProductResourceStatusRetired},
+				{Key: "retired_at", Value: retiredAt.UTC()},
+			}},
+			{Key: "$unset", Value: bson.D{{Key: "retirement", Value: ""}}},
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("complete environment retirement: %w", err)
+	}
+	if result.ModifiedCount != 1 {
+		return biz.ErrNotFound
+	}
+	return nil
+}
+
+func productResourceRetirementDocumentFromDomain(
+	item biz.ProductResourceRetirement,
+) productResourceRetirementDocument {
+	return productResourceRetirementDocument{
+		OrganizationID: item.OrganizationID, ActorID: item.ActorID,
+		RequestID: item.RequestID, StartedAt: item.StartedAt.UTC(),
+	}
+}
+
 func (s *MongoStore) ListEnvironments(ctx context.Context, projectID string) ([]biz.Environment, error) {
-	cursor, err := s.environments.Find(ctx, bson.D{{Key: "project_id", Value: projectID}}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}))
+	cursor, err := s.environments.Find(ctx, bson.D{
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusActive},
+	}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}))
 	if err != nil {
 		return nil, fmt.Errorf("find environments: %w", err)
 	}
@@ -876,6 +1097,7 @@ func (s *MongoStore) EnvironmentStage(ctx context.Context, projectID, environmen
 	}
 	err := s.environments.FindOne(ctx, bson.D{
 		{Key: "_id", Value: environmentID}, {Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.ProductResourceStatusActive},
 	}, options.FindOne().SetProjection(bson.D{{Key: "stage", Value: 1}})).Decode(&document)
 	if errors.Is(err, mongo.ErrNoDocuments) {
 		return "", biz.ErrNotFound
@@ -887,10 +1109,12 @@ func (s *MongoStore) EnvironmentStage(ctx context.Context, projectID, environmen
 }
 
 func (s *MongoStore) CreateEnvironment(ctx context.Context, item biz.Environment) (biz.Environment, error) {
+	item.Status = biz.ProductResourceStatusActive
 	_, err := s.environments.InsertOne(ctx, environmentDocument{
 		ID: item.ID, ProjectID: item.ProjectID, Name: item.Name, NameNormalized: normalizeName(item.Name),
 		Stage: item.Stage, Variables: item.Variables,
 		CreatedBy: item.CreatedBy, CreatedAt: item.CreatedAt,
+		Status: biz.ProductResourceStatusActive,
 	})
 	if mongo.IsDuplicateKeyError(err) {
 		return biz.Environment{}, biz.ErrDuplicateName
@@ -960,6 +1184,9 @@ type applicationDocument struct {
 	TemplateSnapshot *applicationTemplateSnapshotDocument `bson:"template_snapshot,omitempty"`
 	CreatedBy        string                               `bson:"created_by"`
 	CreatedAt        time.Time                            `bson:"created_at"`
+	Status           biz.ProductResourceStatus            `bson:"status"`
+	Retirement       *productResourceRetirementDocument   `bson:"retirement,omitempty"`
+	RetiredAt        time.Time                            `bson:"retired_at,omitempty"`
 }
 
 func (d applicationDocument) domain() (biz.Application, error) {
@@ -969,11 +1196,17 @@ func (d applicationDocument) domain() (biz.Application, error) {
 	if err != nil {
 		return biz.Application{}, err
 	}
-	return biz.Application{
+	item := biz.Application{
 		ID: d.ID, ProjectID: d.ProjectID, Name: d.Name,
 		TemplateSnapshot: snapshot,
 		CreatedBy:        d.CreatedBy, CreatedAt: d.CreatedAt,
-	}, nil
+		Status: d.Status, RetiredAt: d.RetiredAt,
+	}
+	if item.Status == "" {
+		item.Status = biz.ProductResourceStatusActive
+	}
+	item.Retirement = d.Retirement.domain()
+	return item, nil
 }
 
 type applicationTemplateSnapshotDocument struct {
@@ -1077,20 +1310,46 @@ type runtimeTargetRetirementDocument struct {
 }
 
 type environmentDocument struct {
-	ID             string            `bson:"_id"`
-	ProjectID      string            `bson:"project_id"`
-	Name           string            `bson:"name"`
-	NameNormalized string            `bson:"name_normalized"`
-	Stage          string            `bson:"stage"`
-	Variables      map[string]string `bson:"variables,omitempty"`
-	CreatedBy      string            `bson:"created_by"`
-	CreatedAt      time.Time         `bson:"created_at"`
+	ID             string                             `bson:"_id"`
+	ProjectID      string                             `bson:"project_id"`
+	Name           string                             `bson:"name"`
+	NameNormalized string                             `bson:"name_normalized"`
+	Stage          string                             `bson:"stage"`
+	Variables      map[string]string                  `bson:"variables,omitempty"`
+	CreatedBy      string                             `bson:"created_by"`
+	CreatedAt      time.Time                          `bson:"created_at"`
+	Status         biz.ProductResourceStatus          `bson:"status"`
+	Retirement     *productResourceRetirementDocument `bson:"retirement,omitempty"`
+	RetiredAt      time.Time                          `bson:"retired_at,omitempty"`
 }
 
 func (d environmentDocument) domain() biz.Environment {
-	return biz.Environment{
+	item := biz.Environment{
 		ID: d.ID, ProjectID: d.ProjectID, Name: d.Name, Stage: d.Stage,
 		Variables: d.Variables, CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt,
+		Status: d.Status, RetiredAt: d.RetiredAt,
+	}
+	if item.Status == "" {
+		item.Status = biz.ProductResourceStatusActive
+	}
+	item.Retirement = d.Retirement.domain()
+	return item
+}
+
+type productResourceRetirementDocument struct {
+	OrganizationID string    `bson:"organization_id"`
+	ActorID        string    `bson:"actor_id"`
+	RequestID      string    `bson:"request_id,omitempty"`
+	StartedAt      time.Time `bson:"started_at"`
+}
+
+func (d *productResourceRetirementDocument) domain() *biz.ProductResourceRetirement {
+	if d == nil {
+		return nil
+	}
+	return &biz.ProductResourceRetirement{
+		OrganizationID: d.OrganizationID, ActorID: d.ActorID,
+		RequestID: d.RequestID, StartedAt: d.StartedAt,
 	}
 }
 

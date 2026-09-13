@@ -19,6 +19,24 @@ type retirementCredentialResolver struct {
 	err        error
 }
 
+type retirementConnectionResolver struct {
+	connections map[string]runtimeaccess.Connection
+	errors      map[string]error
+}
+
+func (r retirementConnectionResolver) RuntimeTargetCleanupExecution(
+	_ context.Context, _, targetID string,
+) (runtimeaccess.Connection, error) {
+	if err := r.errors[targetID]; err != nil {
+		return runtimeaccess.Connection{}, err
+	}
+	connection, ok := r.connections[targetID]
+	if !ok {
+		return runtimeaccess.Connection{}, errors.New("target unavailable")
+	}
+	return connection, nil
+}
+
 func (r retirementCredentialResolver) ResolveCredential(
 	context.Context,
 	runtimeaccess.Connection,
@@ -260,5 +278,118 @@ func TestRuntimeTargetRetirementRemovesStableThenReleasesExactWatermark(t *testi
 		len(gateway.released) != 2 || gateway.released[0].CutoverSequence != 2 ||
 		gateway.released[1].CutoverSequence != 1 {
 		t.Fatalf("cleanup order = removed %+v, released %+v", gateway.removed, gateway.released)
+	}
+}
+
+func TestResourceRetirementScopesSlotsAcrossRuntimeTargets(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	for _, item := range []biz.Deployment{
+		{ID: "application-target-a", ProjectID: "project-1", ReleaseID: "release-1",
+			ApplicationID: "application-1", EnvironmentID: "environment-1",
+			RuntimeTargetID: "target-a", Status: biz.StatusSucceeded, Version: 1, CutoverSequence: 2},
+		{ID: "application-target-b", ProjectID: "project-1", ReleaseID: "release-2",
+			ApplicationID: "application-1", EnvironmentID: "environment-2",
+			RuntimeTargetID: "target-b", Status: biz.StatusSucceeded, Version: 1, CutoverSequence: 3},
+		{ID: "unrelated", ProjectID: "project-1", ReleaseID: "release-3",
+			ApplicationID: "application-2", EnvironmentID: "environment-1",
+			RuntimeTargetID: "target-a", Status: biz.StatusSucceeded, Version: 1, CutoverSequence: 7},
+	} {
+		if _, err := repository.Create(t.Context(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	connectionA, _ := runtimeaccess.NewDirectDocker(
+		"", "tcp://a.example.com:2376", "a.example.com", "secret://a",
+	)
+	connectionB, _ := runtimeaccess.NewDirectDocker(
+		"", "tcp://b.example.com:2376", "b.example.com", "secret://b",
+	)
+	gateway := &retirementGatewayProbe{}
+	retirement, err := biz.NewRuntimeTargetRetirement(
+		repository, retirementCredentialResolver{}, gateway,
+		transaction.Passthrough{}, &auditProbe{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirement.WithConnectionResolver(retirementConnectionResolver{connections: map[string]runtimeaccess.Connection{
+		"target-a": connectionA, "target-b": connectionB,
+	}})
+	if err := retirement.RetireScope(
+		t.Context(), biz.RetirementScope{ProjectID: "project-1", ApplicationID: "application-1"},
+		security.Principal{UserID: "owner-1", OrganizationID: "organization-1"}, "request-1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.removed) != 2 {
+		t.Fatalf("removed = %+v", gateway.removed)
+	}
+	for _, plan := range gateway.removed {
+		if plan.ApplicationID != "application-1" {
+			t.Fatalf("unrelated slot was removed: %+v", plan)
+		}
+	}
+}
+
+func TestResourceRetirementRequiresSelectorAndConnectionResolver(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	if _, err := repository.Create(t.Context(), biz.Deployment{
+		ID: "deployment-1", ProjectID: "project-1", ReleaseID: "release-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-1", Status: biz.StatusSucceeded, Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	retirement, err := biz.NewRuntimeTargetRetirement(
+		repository, retirementCredentialResolver{}, &retirementGatewayProbe{},
+		transaction.Passthrough{}, &auditProbe{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal := security.Principal{UserID: "owner-1", OrganizationID: "organization-1"}
+	if err := retirement.RetireScope(t.Context(), biz.RetirementScope{ProjectID: "project-1"}, principal, "request-1"); !errors.Is(err, biz.ErrRetirementUnavailable) {
+		t.Fatalf("empty scope error = %v", err)
+	}
+	if err := retirement.RetireScope(t.Context(), biz.RetirementScope{
+		ProjectID: "project-1", EnvironmentID: "environment-1",
+	}, principal, "request-1"); !errors.Is(err, biz.ErrRetirementUnavailable) {
+		t.Fatalf("missing resolver error = %v", err)
+	}
+}
+
+func TestResourceRetirementSkipsRuntimeTargetAlreadyRemoved(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	if _, err := repository.Create(t.Context(), biz.Deployment{
+		ID: "deployment-1", ProjectID: "project-1", ReleaseID: "release-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-removed", Status: biz.StatusSucceeded, Version: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	gateway := &retirementGatewayProbe{}
+	retirement, err := biz.NewRuntimeTargetRetirement(
+		repository, retirementCredentialResolver{}, gateway,
+		transaction.Passthrough{}, &auditProbe{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirement.WithConnectionResolver(retirementConnectionResolver{
+		errors: map[string]error{"target-removed": biz.ErrRetirementTargetRemoved},
+	})
+	if err := retirement.RetireScope(
+		t.Context(),
+		biz.RetirementScope{ProjectID: "project-1", ApplicationID: "application-1"},
+		security.Principal{UserID: "owner-1", OrganizationID: "organization-1"},
+		"request-1",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(gateway.removed) != 0 || len(gateway.released) != 0 {
+		t.Fatalf("runtime cleanup executed for removed target: %+v %+v", gateway.removed, gateway.released)
 	}
 }

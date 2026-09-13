@@ -135,6 +135,7 @@ func run() error {
 	var productAPI *server.ProductAPI
 	var deploymentWorkerServer *lifecycle.Server
 	var runtimeTargetRetirementWorkerServer *lifecycle.Server
+	var productResourceRetirementWorkerServer *lifecycle.Server
 	var inventoryWorkerServer *lifecycle.Server
 	var inventoryEventWorkerServer *lifecycle.Server
 	var agentControlServer *server.AgentServer
@@ -707,13 +708,18 @@ func run() error {
 			if retirementErr != nil {
 				return fmt.Errorf("create runtime target retirement: %w", retirementErr)
 			}
+			retirement.WithConnectionResolver(
+				deploymentdata.NewRetirementConnectionResolver(controlPlaneStore),
+			)
+			retirementAdapter := deploymentdata.NewRuntimeTargetRetirementAdapter(retirement)
 			controlPlaneUseCase.WithRuntimeTargetRetirement(
 				controlPlaneStore,
-				deploymentdata.NewRuntimeTargetRetirementAdapter(retirement),
+				retirementAdapter,
 			).WithRuntimeTargetDependencies(
 				terminalUseCase,
 				runtimeTargetInventoryConvergence,
-			)
+			).WithProductResourceRetirement(controlPlaneStore, retirementAdapter).
+				WithProductResourceDependencies(terminalUseCase)
 			retirementLoop, retirementLoopErr :=
 				controlplaneworker.NewRuntimeTargetRetirementLoop(
 					controlPlaneUseCase, 16, pollInterval, operationTimeout,
@@ -739,6 +745,26 @@ func run() error {
 				},
 			)
 			runtimeTargetRetirementWorkerServer = lifecycle.NewServer(retirementLoop)
+			resourceRetirementLoop, resourceRetirementLoopErr :=
+				controlplaneworker.NewProductResourceRetirementLoop(
+					controlPlaneUseCase, 16, pollInterval, operationTimeout,
+					func(workerErr error) {
+						_ = logger.Log(
+							log.LevelError,
+							"component", "product_resource_retirement_worker",
+							"error", workerErr,
+						)
+					},
+				)
+			if resourceRetirementLoopErr != nil {
+				return fmt.Errorf("create product resource retirement worker loop: %w", resourceRetirementLoopErr)
+			}
+			resourceRetirementLoop.WithObservability(
+				func(result string, duration time.Duration) {
+					metrics.RecordWorkerPoll("product_resource_retirement", result, duration)
+				},
+			)
+			productResourceRetirementWorkerServer = lifecycle.NewServer(resourceRetirementLoop)
 			runner, err := deploymentworker.NewRunner(
 				deploymentStore, executor, instanceID, leaseDuration, time.Now,
 			)
@@ -992,6 +1018,9 @@ func run() error {
 	}
 	if runtimeTargetRetirementWorkerServer != nil {
 		managedServers = append(managedServers, runtimeTargetRetirementWorkerServer)
+	}
+	if productResourceRetirementWorkerServer != nil {
+		managedServers = append(managedServers, productResourceRetirementWorkerServer)
 	}
 	if inventoryWorkerServer != nil {
 		managedServers = append(managedServers, inventoryWorkerServer)

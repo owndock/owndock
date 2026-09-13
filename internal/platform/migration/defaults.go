@@ -61,7 +61,132 @@ func Default() []Migration {
 		{Version: 45, Name: "support_registry_authentication_modes", Up: supportRegistryAuthenticationModes},
 		{Version: 46, Name: "schedule_runtime_target_retirements", Up: scheduleRuntimeTargetRetirements},
 		{Version: 47, Name: "index_runtime_target_terminal_convergence", Up: indexRuntimeTargetTerminalConvergence},
+		{Version: 48, Name: "add_product_resource_retirements", Up: addProductResourceRetirements},
+		{Version: 49, Name: "index_product_resource_terminal_convergence", Up: indexProductResourceTerminalConvergence},
 	}
+}
+
+func indexProductResourceTerminalConvergence(ctx context.Context, database *mongo.Database) error {
+	sessions := database.Collection("terminal_sessions")
+	cursor, err := sessions.Find(ctx, bson.D{
+		{Key: "kind", Value: "container"},
+		{Key: "active", Value: true},
+		{Key: "$or", Value: bson.A{
+			bson.D{{Key: "application_id", Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "environment_id", Value: bson.D{{Key: "$exists", Value: false}}}},
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("find active terminal sessions missing product scope: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	for cursor.Next(ctx) {
+		var session struct {
+			ID           string `bson:"_id"`
+			ProjectID    string `bson:"project_id"`
+			DeploymentID string `bson:"deployment_id"`
+		}
+		if err := cursor.Decode(&session); err != nil {
+			return fmt.Errorf("decode terminal session product scope: %w", err)
+		}
+		var deployment struct {
+			ApplicationID string `bson:"application_id"`
+			EnvironmentID string `bson:"environment_id"`
+		}
+		if err := database.Collection("deployments").FindOne(ctx, bson.D{
+			{Key: "_id", Value: session.DeploymentID},
+			{Key: "project_id", Value: session.ProjectID},
+		}).Decode(&deployment); err != nil {
+			return fmt.Errorf("resolve terminal session deployment product scope: %w", err)
+		}
+		if deployment.ApplicationID == "" || deployment.EnvironmentID == "" {
+			return errors.New("terminal session deployment product scope is empty")
+		}
+		if _, err := sessions.UpdateOne(
+			ctx,
+			bson.D{{Key: "_id", Value: session.ID}, {Key: "active", Value: true}},
+			bson.D{{Key: "$set", Value: bson.D{
+				{Key: "application_id", Value: deployment.ApplicationID},
+				{Key: "environment_id", Value: deployment.EnvironmentID},
+			}}},
+		); err != nil {
+			return fmt.Errorf("backfill terminal session product scope: %w", err)
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return fmt.Errorf("scan terminal session product scope: %w", err)
+	}
+	_, err = sessions.Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{
+			Keys: bson.D{
+				{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+				{Key: "application_id", Value: 1}, {Key: "active", Value: 1},
+				{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_terminal_application_active").
+				SetPartialFilterExpression(bson.D{{Key: "active", Value: true}}),
+		},
+		{
+			Keys: bson.D{
+				{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1},
+				{Key: "environment_id", Value: 1}, {Key: "active", Value: 1},
+				{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_terminal_environment_active").
+				SetPartialFilterExpression(bson.D{{Key: "active", Value: true}}),
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("create product resource terminal convergence indexes: %w", err)
+	}
+	return nil
+}
+
+func addProductResourceRetirements(ctx context.Context, database *mongo.Database) error {
+	resources := []struct {
+		collection string
+		uniqueName string
+		queueName  string
+	}{
+		{collection: "product_applications", uniqueName: "uniq_application_name", queueName: "idx_application_retirement_queue"},
+		{collection: "environments", uniqueName: "uniq_environment_name", queueName: "idx_environment_retirement_queue"},
+	}
+	for _, resource := range resources {
+		collection := database.Collection(resource.collection)
+		if _, err := collection.UpdateMany(
+			ctx,
+			bson.D{{Key: "status", Value: bson.D{{Key: "$exists", Value: false}}}},
+			bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "active"}}}},
+		); err != nil {
+			return fmt.Errorf("backfill %s lifecycle status: %w", resource.collection, err)
+		}
+		if err := collection.Indexes().DropOne(ctx, resource.uniqueName); err != nil {
+			var commandError mongo.CommandError
+			if !errors.As(err, &commandError) || commandError.Code != 27 {
+				return fmt.Errorf("drop %s lifecycle name index: %w", resource.collection, err)
+			}
+		}
+		_, err := collection.Indexes().CreateMany(ctx, []mongo.IndexModel{
+			{
+				Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "name_normalized", Value: 1}},
+				Options: options.Index().SetName(resource.uniqueName).SetUnique(true).
+					SetPartialFilterExpression(bson.D{{Key: "status", Value: "active"}}),
+			},
+			{
+				Keys: bson.D{
+					{Key: "status", Value: 1},
+					{Key: "retirement.started_at", Value: 1},
+					{Key: "_id", Value: 1},
+				},
+				Options: options.Index().SetName(resource.queueName).
+					SetPartialFilterExpression(bson.D{{Key: "status", Value: "retiring"}}),
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("create %s lifecycle indexes: %w", resource.collection, err)
+		}
+	}
+	return nil
 }
 
 func indexRuntimeTargetTerminalConvergence(ctx context.Context, database *mongo.Database) error {

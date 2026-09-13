@@ -35,6 +35,8 @@ var (
 	ErrRuntimeTargetProbeUnavailable      = errors.New("runtime target probe is unavailable")
 	ErrRuntimeTargetRetirementUnavailable = errors.New("runtime target retirement is unavailable")
 	ErrRuntimeTargetRetirementPending     = errors.New("runtime target retirement is pending")
+	ErrResourceRetirementUnavailable      = errors.New("resource retirement is unavailable")
+	ErrResourceRetirementPending          = errors.New("resource retirement is pending")
 	ErrNotFound                           = errors.New("resource was not found")
 	ErrInvalidTemplate                    = errors.New("template is invalid")
 )
@@ -76,6 +78,26 @@ type Application struct {
 	TemplateSnapshot *ApplicationTemplateSnapshot
 	CreatedBy        string
 	CreatedAt        time.Time
+	Status           ProductResourceStatus
+	Retirement       *ProductResourceRetirement
+	RetiredAt        time.Time
+}
+
+type ProductResourceStatus string
+
+const (
+	ProductResourceStatusActive   ProductResourceStatus = "active"
+	ProductResourceStatusRetiring ProductResourceStatus = "retiring"
+	ProductResourceStatusRetired  ProductResourceStatus = "retired"
+)
+
+// ProductResourceRetirement carries durable workflow identity so accepted
+// Application and Environment deletions continue after Server restarts.
+type ProductResourceRetirement struct {
+	OrganizationID string
+	ActorID        string
+	RequestID      string
+	StartedAt      time.Time
 }
 
 // LocalizedText keeps the built-in catalog useful to both supported product
@@ -181,13 +203,16 @@ type RuntimeTargetRetirement struct {
 }
 
 type Environment struct {
-	ID        string
-	ProjectID string
-	Name      string
-	Stage     string
-	Variables map[string]string
-	CreatedBy string
-	CreatedAt time.Time
+	ID         string
+	ProjectID  string
+	Name       string
+	Stage      string
+	Variables  map[string]string
+	CreatedBy  string
+	CreatedAt  time.Time
+	Status     ProductResourceStatus
+	Retirement *ProductResourceRetirement
+	RetiredAt  time.Time
 }
 
 type EnvironmentStage string
@@ -256,6 +281,38 @@ type ApplicationRepository interface {
 	ListApplications(context.Context, string) ([]Application, error)
 	CreateApplication(context.Context, Application) (Application, error)
 	ApplicationExists(context.Context, string, string) (bool, error)
+	ApplicationExistsAnyStatus(context.Context, string, string) (bool, error)
+}
+
+type ProductResourceLifecycleRepository interface {
+	BeginApplicationRetirement(context.Context, string, string, ProductResourceRetirement) (Application, bool, error)
+	ListRetiringApplications(context.Context, int64) ([]Application, error)
+	CompleteApplicationRetirement(context.Context, string, string, time.Time) error
+	BeginEnvironmentRetirement(context.Context, string, string, ProductResourceRetirement) (Environment, bool, error)
+	ListRetiringEnvironments(context.Context, int64) ([]Environment, error)
+	CompleteEnvironmentRetirement(context.Context, string, string, time.Time) error
+}
+
+type ProductResourceRetirementScope struct {
+	ProjectID     string
+	ApplicationID string
+	EnvironmentID string
+}
+
+type ProductResourceRetirer interface {
+	RetireProductResource(context.Context, ProductResourceRetirementScope, security.Principal, string) error
+}
+
+type ProductResourceDependency interface {
+	ConvergeProductResource(
+		context.Context,
+		string,
+		string,
+		string,
+		string,
+		string,
+		string,
+	) (pending bool, err error)
 }
 
 type ReleaseRepository interface {
@@ -364,6 +421,7 @@ func NewApplicationFromTemplate(
 	item := Application{
 		ID: id, ProjectID: projectID, Name: name,
 		CreatedBy: createdBy, CreatedAt: now.UTC(),
+		Status: ProductResourceStatusActive,
 	}
 	if template == nil {
 		return item, nil
@@ -646,7 +704,7 @@ func NewEnvironmentWithVariables(
 	}
 	return Environment{
 		ID: id, ProjectID: projectID, Name: name, Stage: stage, Variables: variables,
-		CreatedBy: createdBy, CreatedAt: now.UTC(),
+		CreatedBy: createdBy, CreatedAt: now.UTC(), Status: ProductResourceStatusActive,
 	}, nil
 }
 

@@ -217,6 +217,27 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("seed legacy project: %v", err)
 	}
+	if _, err := client.Database().Collection("product_applications").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-application"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "name", Value: "Legacy Application"},
+		{Key: "name_normalized", Value: "legacy application"},
+		{Key: "created_by", Value: "legacy-user"},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed legacy Application: %v", err)
+	}
+	if _, err := client.Database().Collection("environments").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-environment"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "name", Value: "Legacy Environment"},
+		{Key: "name_normalized", Value: "legacy environment"},
+		{Key: "stage", Value: "development"},
+		{Key: "created_by", Value: "legacy-user"},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed legacy Environment: %v", err)
+	}
 	if _, err := client.Database().Collection("releases").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "legacy-release"},
 		{Key: "project_id", Value: "legacy-project"},
@@ -259,11 +280,25 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if _, err := client.Database().Collection("deployments").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "legacy-deployment"},
 		{Key: "project_id", Value: "legacy-project"},
+		{Key: "application_id", Value: "legacy-application"},
+		{Key: "environment_id", Value: "legacy-environment"},
 		{Key: "idempotency_key", Value: "legacy-key"},
 		{Key: "status", Value: "building"},
 		{Key: "created_at", Value: time.Now().UTC()},
 	}); err != nil {
 		t.Fatalf("seed legacy deployment: %v", err)
+	}
+	if _, err := client.Database().Collection("terminal_sessions").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "legacy-terminal-session"},
+		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "project_id", Value: "legacy-project"},
+		{Key: "kind", Value: "container"},
+		{Key: "authentication_session_id", Value: "legacy-authentication-session"},
+		{Key: "deployment_id", Value: "legacy-deployment"},
+		{Key: "active", Value: true},
+		{Key: "created_at", Value: time.Now().UTC()},
+	}); err != nil {
+		t.Fatalf("seed legacy TerminalSession: %v", err)
 	}
 	if _, err := client.Database().Collection("deployments").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "legacy-failed-deployment"},
@@ -314,6 +349,30 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	if err := runner.Run(ctx, migration.Default()); err != nil {
 		t.Fatalf("rerun migrations: %v", err)
+	}
+	for collection, resourceID := range map[string]string{
+		"product_applications": "legacy-application",
+		"environments":         "legacy-environment",
+	} {
+		var document struct {
+			Status string `bson:"status"`
+		}
+		if err := client.Database().Collection(collection).FindOne(
+			ctx, bson.D{{Key: "_id", Value: resourceID}},
+		).Decode(&document); err != nil || document.Status != "active" {
+			t.Fatalf("%s lifecycle backfill = %+v/%v", collection, document, err)
+		}
+	}
+	var legacyTerminalScope struct {
+		ApplicationID string `bson:"application_id"`
+		EnvironmentID string `bson:"environment_id"`
+	}
+	if err := client.Database().Collection("terminal_sessions").FindOne(
+		ctx, bson.D{{Key: "_id", Value: "legacy-terminal-session"}},
+	).Decode(&legacyTerminalScope); err != nil ||
+		legacyTerminalScope.ApplicationID != "legacy-application" ||
+		legacyTerminalScope.EnvironmentID != "legacy-environment" {
+		t.Fatalf("legacy TerminalSession product scope = %+v/%v", legacyTerminalScope, err)
 	}
 	assertRuntimeInventoryViewIndexes(t, ctx, client.Database())
 	assertBuildLogIndexes(t, ctx, client.Database())
@@ -990,6 +1049,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 			{Key: "project_id", Value: project.ID},
 			{Key: "name", Value: "Invalid Snapshot"},
 			{Key: "name_normalized", Value: "invalid snapshot"},
+			{Key: "status", Value: "active"},
 			{Key: "template_snapshot", Value: bson.D{
 				{Key: "template_id", Value: "http-service"},
 				{Key: "template_version", Value: 1},
@@ -1508,6 +1568,69 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		ctx, project.ID, resumableTarget.ID,
 	); err != nil {
 		t.Fatalf("delete resumable runtime target: %v", err)
+	}
+
+	retiringApplication, err := controlPlaneUseCase.CreateApplication(
+		ctx, principal, project.ID, "Retiring Application", "retiring-application-create",
+	)
+	if err != nil {
+		t.Fatalf("create retiring Application fixture: %v", err)
+	}
+	retiringEnvironment, err := controlPlaneUseCase.CreateEnvironment(
+		ctx, principal, project.ID, "Retiring Environment", "staging", "retiring-environment-create",
+	)
+	if err != nil {
+		t.Fatalf("create retiring Environment fixture: %v", err)
+	}
+	resourceRetirement := controlplanebiz.ProductResourceRetirement{
+		OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+		RequestID: "resource-retirement-request", StartedAt: time.Now().UTC(),
+	}
+	retiringApplication, changed, err = controlPlaneStore.BeginApplicationRetirement(
+		ctx, project.ID, retiringApplication.ID, resourceRetirement,
+	)
+	if err != nil || !changed || retiringApplication.Retirement == nil {
+		t.Fatalf("begin Application retirement = %+v/%t/%v", retiringApplication, changed, err)
+	}
+	retiringEnvironment, changed, err = controlPlaneStore.BeginEnvironmentRetirement(
+		ctx, project.ID, retiringEnvironment.ID, resourceRetirement,
+	)
+	if err != nil || !changed || retiringEnvironment.Retirement == nil {
+		t.Fatalf("begin Environment retirement = %+v/%t/%v", retiringEnvironment, changed, err)
+	}
+	queuedApplications, err := controlPlaneStore.ListRetiringApplications(ctx, 10)
+	if err != nil || len(queuedApplications) != 1 || queuedApplications[0].ID != retiringApplication.ID {
+		t.Fatalf("retiring Application queue = %+v/%v", queuedApplications, err)
+	}
+	queuedEnvironments, err := controlPlaneStore.ListRetiringEnvironments(ctx, 10)
+	if err != nil || len(queuedEnvironments) != 1 || queuedEnvironments[0].ID != retiringEnvironment.ID {
+		t.Fatalf("retiring Environment queue = %+v/%v", queuedEnvironments, err)
+	}
+	if exists, existsErr := controlPlaneStore.ApplicationExists(ctx, project.ID, retiringApplication.ID); existsErr != nil || exists {
+		t.Fatalf("retiring Application admission = %t/%v", exists, existsErr)
+	}
+	if exists, existsErr := controlPlaneStore.EnvironmentExists(ctx, project.ID, retiringEnvironment.ID); existsErr != nil || exists {
+		t.Fatalf("retiring Environment admission = %t/%v", exists, existsErr)
+	}
+	retiredAt := time.Now().UTC()
+	if err := controlPlaneStore.CompleteApplicationRetirement(ctx, project.ID, retiringApplication.ID, retiredAt); err != nil {
+		t.Fatalf("complete Application retirement: %v", err)
+	}
+	if err := controlPlaneStore.CompleteEnvironmentRetirement(ctx, project.ID, retiringEnvironment.ID, retiredAt); err != nil {
+		t.Fatalf("complete Environment retirement: %v", err)
+	}
+	if exists, existsErr := controlPlaneStore.ApplicationExistsAnyStatus(ctx, project.ID, retiringApplication.ID); existsErr != nil || !exists {
+		t.Fatalf("retired Application history = %t/%v", exists, existsErr)
+	}
+	if _, err := controlPlaneUseCase.CreateApplication(
+		ctx, principal, project.ID, "Retiring Application", "replacement-application-create",
+	); err != nil {
+		t.Fatalf("reuse retired Application name: %v", err)
+	}
+	if _, err := controlPlaneUseCase.CreateEnvironment(
+		ctx, principal, project.ID, "Retiring Environment", "staging", "replacement-environment-create",
+	); err != nil {
+		t.Fatalf("reuse retired Environment name: %v", err)
 	}
 
 	if err := identityUseCase.Logout(ctx, loginPrincipal, "logout-request"); err != nil {
@@ -2750,6 +2873,7 @@ func verifyBuildSourceRepositoryIntegration(
 		{Key: "project_id", Value: projectID},
 		{Key: "name", Value: "Build application"},
 		{Key: "name_normalized", Value: "build application"},
+		{Key: "status", Value: "active"},
 		{Key: "created_by", Value: "build-user"},
 		{Key: "created_at", Value: time.Now().UTC()},
 	}); err != nil {
@@ -2771,10 +2895,12 @@ func verifyBuildSourceRepositoryIntegration(
 	for _, environment := range []bson.D{
 		{{Key: "_id", Value: developmentID}, {Key: "project_id", Value: projectID},
 			{Key: "name", Value: "Development"}, {Key: "name_normalized", Value: "development"},
+			{Key: "status", Value: "active"},
 			{Key: "stage", Value: "development"}, {Key: "variables", Value: bson.D{}},
 			{Key: "created_by", Value: "build-user"}, {Key: "created_at", Value: time.Now().UTC()}},
 		{{Key: "_id", Value: stagingID}, {Key: "project_id", Value: projectID},
 			{Key: "name", Value: "Staging"}, {Key: "name_normalized", Value: "staging"},
+			{Key: "status", Value: "active"},
 			{Key: "stage", Value: "staging"}, {Key: "variables", Value: bson.D{}},
 			{Key: "created_by", Value: "build-user"}, {Key: "created_at", Value: time.Now().UTC()}},
 	} {
@@ -4636,6 +4762,8 @@ func assertTerminalIndexes(t *testing.T, ctx context.Context, database *drivermo
 			"idx_terminal_expiry_reconciliation":         false,
 			"idx_terminal_authentication_session_active": false,
 			"idx_terminal_runtime_target_active":         false,
+			"idx_terminal_application_active":            false,
+			"idx_terminal_environment_active":            false,
 		},
 	} {
 		cursor, err := database.Collection(collection).Indexes().List(ctx)
@@ -4672,6 +4800,25 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	if _, err := database.Collection("terminal_sessions").DeleteMany(ctx, bson.D{}); err != nil {
 		t.Fatalf("clear terminal session fixtures: %v", err)
 	}
+	if _, err := database.Collection("product_applications").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "terminal-application"},
+		{Key: "project_id", Value: "terminal-project"},
+		{Key: "name", Value: "Terminal Application"},
+		{Key: "name_normalized", Value: "terminal application"},
+		{Key: "status", Value: "active"},
+	}); err != nil {
+		t.Fatalf("seed terminal Application: %v", err)
+	}
+	if _, err := database.Collection("environments").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: "terminal-environment"},
+		{Key: "project_id", Value: "terminal-project"},
+		{Key: "name", Value: "Terminal Environment"},
+		{Key: "name_normalized", Value: "terminal environment"},
+		{Key: "stage", Value: "development"},
+		{Key: "status", Value: "active"},
+	}); err != nil {
+		t.Fatalf("seed terminal Environment: %v", err)
+	}
 	repository := terminaldata.NewMongoRepository(database)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	policy, err := terminalbiz.NewProjectPolicy(
@@ -4699,6 +4846,7 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	}
 	target := terminalbiz.Target{
 		Kind: terminalbiz.KindContainer, OrganizationID: policy.OrganizationID, ProjectID: policy.ProjectID,
+		ApplicationID: "terminal-application", EnvironmentID: "terminal-environment",
 		ManagedHostID: "terminal-host", RuntimeTargetID: "terminal-target",
 		DeploymentID: "terminal-deployment", RunningInstanceID: "terminal-deployment:1",
 		InstanceGeneration: 1, EnvironmentStage: "development",
@@ -4712,7 +4860,7 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 		t.Fatalf("new terminal session: %v", err)
 	}
 	first.UserConcurrencySlot, first.TargetConcurrencySlot = 1, 1
-	if _, err := repository.CreateSession(ctx, first); err != nil {
+	if _, err := repository.CreateContainerSession(ctx, first); err != nil {
 		t.Fatalf("create terminal session: %v", err)
 	}
 	second := first
@@ -4750,6 +4898,41 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	)
 	if err != nil || len(activeForTarget) != 1 || activeForTarget[0].ID != second.ID {
 		t.Fatalf("active terminal sessions for target = %+v/%v", activeForTarget, err)
+	}
+	activeForApplication, err := repository.ListActiveSessionsForProductResource(
+		ctx, second.OrganizationID, second.ProjectID, second.ApplicationID, "", 10,
+	)
+	if err != nil || len(activeForApplication) != 1 || activeForApplication[0].ID != second.ID {
+		t.Fatalf("active terminal sessions for Application = %+v/%v", activeForApplication, err)
+	}
+	activeForEnvironment, err := repository.ListActiveSessionsForProductResource(
+		ctx, second.OrganizationID, second.ProjectID, "", second.EnvironmentID, 10,
+	)
+	if err != nil || len(activeForEnvironment) != 1 || activeForEnvironment[0].ID != second.ID {
+		t.Fatalf("active terminal sessions for Environment = %+v/%v", activeForEnvironment, err)
+	}
+	if _, err := database.Collection("product_applications").UpdateOne(
+		ctx,
+		bson.D{{Key: "_id", Value: first.ApplicationID}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "status", Value: "retiring"}}}},
+	); err != nil {
+		t.Fatalf("retire terminal Application fixture: %v", err)
+	}
+	blocked := first
+	blocked.ID, blocked.TicketHash = "terminal-session-blocked", strings.Repeat("c", 64)
+	blocked.UserConcurrencySlot, blocked.TargetConcurrencySlot = 2, 2
+	if _, err := repository.CreateContainerSession(ctx, blocked); !errors.Is(err, terminalbiz.ErrTargetUnavailable) {
+		t.Fatalf("retiring Application terminal admission error = %v", err)
+	}
+	if _, err := database.Collection("product_applications").DeleteOne(
+		ctx, bson.D{{Key: "_id", Value: first.ApplicationID}},
+	); err != nil {
+		t.Fatalf("remove terminal Application fixture: %v", err)
+	}
+	if _, err := database.Collection("environments").DeleteOne(
+		ctx, bson.D{{Key: "_id", Value: first.EnvironmentID}},
+	); err != nil {
+		t.Fatalf("remove terminal Environment fixture: %v", err)
 	}
 	stored, err := repository.GetSession(ctx, first.OrganizationID, first.ID)
 	if err != nil || stored.Active || stored.TicketHash != "" || stored.CloseReason != terminalbiz.CloseReasonUserRequested {

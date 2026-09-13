@@ -23,10 +23,14 @@ type SessionRepository interface {
 	GetSession(context.Context, string, string) (TerminalSession, error)
 	GetSessionForConnect(context.Context, string) (TerminalSession, error)
 	CreateSession(context.Context, TerminalSession) (TerminalSession, error)
+	CreateContainerSession(context.Context, TerminalSession) (TerminalSession, error)
 	SaveSession(context.Context, TerminalSession, uint64) (TerminalSession, error)
 	ConsumeTicket(context.Context, string, string, string, time.Time) (TerminalSession, error)
 	ListActiveSessionsForRuntimeTarget(
 		context.Context, string, string, string, int64,
+	) ([]TerminalSession, error)
+	ListActiveSessionsForProductResource(
+		context.Context, string, string, string, string, int64,
 	) ([]TerminalSession, error)
 }
 
@@ -195,6 +199,43 @@ func (u *UseCase) ConvergeRuntimeTarget(
 	if err != nil {
 		return false, err
 	}
+	return u.closeRetirementSessions(
+		ctx, sessions, organizationID, projectID, actorID, requestID,
+		"terminal_session.close_for_runtime_target_retirement",
+	)
+}
+
+func (u *UseCase) ConvergeProductResource(
+	ctx context.Context,
+	organizationID, projectID, applicationID, environmentID, actorID, requestID string,
+) (bool, error) {
+	organizationID = strings.TrimSpace(organizationID)
+	projectID = strings.TrimSpace(projectID)
+	applicationID = strings.TrimSpace(applicationID)
+	environmentID = strings.TrimSpace(environmentID)
+	actorID = strings.TrimSpace(actorID)
+	if organizationID == "" || projectID == "" || actorID == "" ||
+		(applicationID == "" && environmentID == "") {
+		return false, ErrTerminalUnavailable
+	}
+	sessions, err := u.sessions.ListActiveSessionsForProductResource(
+		ctx, organizationID, projectID, applicationID, environmentID,
+		runtimeTargetConvergenceBatchSize,
+	)
+	if err != nil {
+		return false, err
+	}
+	return u.closeRetirementSessions(
+		ctx, sessions, organizationID, projectID, actorID, requestID,
+		"terminal_session.close_for_product_resource_retirement",
+	)
+}
+
+func (u *UseCase) closeRetirementSessions(
+	ctx context.Context,
+	sessions []TerminalSession,
+	organizationID, projectID, actorID, requestID, auditAction string,
+) (bool, error) {
 	pending := int64(len(sessions)) == runtimeTargetConvergenceBatchSize
 	for _, session := range sessions {
 		updated, updateErr := session.Close(
@@ -223,7 +264,7 @@ func (u *UseCase) ConvergeRuntimeTarget(
 				return u.audit.Record(transactionContext, sharedaudit.Event{
 					ID: auditID, OrganizationID: organizationID,
 					ProjectID: projectID, ActorID: actorID,
-					Action:       "terminal_session.close_for_runtime_target_retirement",
+					Action:       auditAction,
 					ResourceType: "terminal_session", ResourceID: session.ID,
 					RequestID: requestID, CreatedAt: now,
 				})
@@ -849,7 +890,15 @@ func (u *UseCase) createSession(
 			candidate.UserConcurrencySlot = userSlot
 			candidate.TargetConcurrencySlot = targetSlot
 			err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
-				created, createErr := u.sessions.CreateSession(transactionContext, candidate)
+				var (
+					created   TerminalSession
+					createErr error
+				)
+				if candidate.Kind == KindContainer {
+					created, createErr = u.sessions.CreateContainerSession(transactionContext, candidate)
+				} else {
+					created, createErr = u.sessions.CreateSession(transactionContext, candidate)
+				}
 				if createErr != nil {
 					return createErr
 				}

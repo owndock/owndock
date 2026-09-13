@@ -81,6 +81,8 @@ type TerminalSession struct {
 	ManagedHostID           string
 	RuntimeTargetID         string
 	DeploymentID            string
+	ApplicationID           string
+	EnvironmentID           string
 	RunningInstanceID       string
 	InstanceGeneration      uint64
 	Status                  SessionStatus
@@ -129,6 +131,8 @@ func NewTerminalSession(
 		AuthenticationSessionID: strings.TrimSpace(authenticationSessionID),
 		RuntimeTargetID:         strings.TrimSpace(target.RuntimeTargetID),
 		DeploymentID:            strings.TrimSpace(target.DeploymentID),
+		ApplicationID:           strings.TrimSpace(target.ApplicationID),
+		EnvironmentID:           strings.TrimSpace(target.EnvironmentID),
 		RunningInstanceID:       strings.TrimSpace(target.RunningInstanceID),
 		InstanceGeneration:      target.InstanceGeneration,
 		Status:                  StatusPending, ConnectionMode: target.ConnectionMode,
@@ -163,6 +167,7 @@ func (s TerminalSession) Validate() error {
 			return ErrInvalidSession
 		}
 	} else if s.ProjectID != "" || s.RuntimeTargetID != "" || s.DeploymentID != "" ||
+		s.ApplicationID != "" || s.EnvironmentID != "" ||
 		s.RunningInstanceID != "" || s.InstanceGeneration != 0 {
 		return ErrInvalidSession
 	}

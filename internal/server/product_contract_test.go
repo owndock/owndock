@@ -141,6 +141,7 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 	}}}
 	managedHostStore := &contractManagedHostStore{}
 	runtimeTargetRetirer := &contractRuntimeTargetRetirer{}
+	productResourceRetirer := &contractProductResourceRetirer{}
 	controlUseCase := controlplanebiz.NewUseCaseWithResources(
 		controlStore, controlStore, controlStore, controlStore, controlStore, controlStore,
 		transaction.Passthrough{}, audits, audits, newID, now,
@@ -148,7 +149,8 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		WithProjectMembers(controlStore).
 		WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
 		WithRuntimeTargetProbe(controlStore, contractRuntimeTargetProber{}).
-		WithRuntimeTargetRetirement(controlStore, runtimeTargetRetirer)
+		WithRuntimeTargetRetirement(controlStore, runtimeTargetRetirer).
+		WithProductResourceRetirement(controlStore, productResourceRetirer)
 	controlHTTP := controlplaneservice.NewHTTP(controlUseCase)
 	managedHostHTTP := managedhostservice.NewHTTP(managedhostbiz.NewUseCase(
 		managedHostStore, transaction.Passthrough{}, audits, newID, now,
@@ -404,12 +406,42 @@ func (s *contractTerminalStore) ListActiveSessionsForRuntimeTarget(
 	return result, nil
 }
 
+func (s *contractTerminalStore) ListActiveSessionsForProductResource(
+	_ context.Context,
+	organizationID, projectID, applicationID, environmentID string,
+	limit int64,
+) ([]terminalbiz.TerminalSession, error) {
+	result := make([]terminalbiz.TerminalSession, 0, limit)
+	for _, item := range s.sessions {
+		if item.OrganizationID != organizationID || item.ProjectID != projectID || !item.Active {
+			continue
+		}
+		if applicationID != "" && item.ApplicationID != applicationID {
+			continue
+		}
+		if environmentID != "" && item.EnvironmentID != environmentID {
+			continue
+		}
+		result = append(result, item)
+		if int64(len(result)) == limit {
+			break
+		}
+	}
+	return result, nil
+}
+
 func (s *contractTerminalStore) CreateSession(_ context.Context, item terminalbiz.TerminalSession) (terminalbiz.TerminalSession, error) {
 	if existing, ok := s.sessions[item.ID]; ok && existing.Active {
 		return terminalbiz.TerminalSession{}, terminalbiz.ErrSessionSlotConflict
 	}
 	s.sessions[item.ID] = item
 	return item, nil
+}
+
+func (s *contractTerminalStore) CreateContainerSession(
+	ctx context.Context, item terminalbiz.TerminalSession,
+) (terminalbiz.TerminalSession, error) {
+	return s.CreateSession(ctx, item)
 }
 
 func (s *contractTerminalStore) SaveSession(_ context.Context, item terminalbiz.TerminalSession, expected uint64) (terminalbiz.TerminalSession, error) {
@@ -743,6 +775,27 @@ type contractRuntimeTargetProber struct{}
 
 type contractRuntimeTargetRetirer struct{ calls int }
 
+type contractProductResourceRetirer struct {
+	calls map[string]int
+}
+
+func (r *contractProductResourceRetirer) RetireProductResource(
+	_ context.Context,
+	scope controlplanebiz.ProductResourceRetirementScope,
+	_ security.Principal,
+	_ string,
+) error {
+	if r.calls == nil {
+		r.calls = make(map[string]int)
+	}
+	key := scope.ApplicationID + ":" + scope.EnvironmentID
+	r.calls[key]++
+	if r.calls[key] == 1 {
+		return controlplanebiz.ErrResourceRetirementPending
+	}
+	return nil
+}
+
 func (r *contractRuntimeTargetRetirer) RetireRuntimeTarget(
 	context.Context,
 	controlplanebiz.RuntimeTarget,
@@ -934,7 +987,8 @@ func (s *contractControlStore) DeleteProjectMember(_ context.Context, projectID,
 func (s *contractControlStore) ListApplications(_ context.Context, projectID string) ([]controlplanebiz.Application, error) {
 	var result []controlplanebiz.Application
 	for _, item := range s.applications {
-		if item.ProjectID == projectID {
+		if item.ProjectID == projectID && item.Status != controlplanebiz.ProductResourceStatusRetiring &&
+			item.Status != controlplanebiz.ProductResourceStatusRetired {
 			result = append(result, item)
 		}
 	}
@@ -947,6 +1001,19 @@ func (s *contractControlStore) CreateApplication(_ context.Context, item control
 }
 
 func (s *contractControlStore) ApplicationExists(_ context.Context, projectID, applicationID string) (bool, error) {
+	for _, item := range s.applications {
+		if item.ProjectID == projectID && item.ID == applicationID &&
+			item.Status != controlplanebiz.ProductResourceStatusRetiring &&
+			item.Status != controlplanebiz.ProductResourceStatusRetired {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *contractControlStore) ApplicationExistsAnyStatus(
+	_ context.Context, projectID, applicationID string,
+) (bool, error) {
 	for _, item := range s.applications {
 		if item.ProjectID == projectID && item.ID == applicationID {
 			return true, nil
@@ -1127,7 +1194,8 @@ func (s *contractControlStore) GetRegistryCredential(
 func (s *contractControlStore) ListEnvironments(_ context.Context, projectID string) ([]controlplanebiz.Environment, error) {
 	var result []controlplanebiz.Environment
 	for _, item := range s.environments {
-		if item.ProjectID == projectID {
+		if item.ProjectID == projectID && item.Status != controlplanebiz.ProductResourceStatusRetiring &&
+			item.Status != controlplanebiz.ProductResourceStatusRetired {
 			result = append(result, item)
 		}
 	}
@@ -1141,7 +1209,9 @@ func (s *contractControlStore) CreateEnvironment(_ context.Context, item control
 
 func (s *contractControlStore) EnvironmentExists(_ context.Context, projectID, environmentID string) (bool, error) {
 	for _, item := range s.environments {
-		if item.ID == environmentID && item.ProjectID == projectID {
+		if item.ID == environmentID && item.ProjectID == projectID &&
+			item.Status != controlplanebiz.ProductResourceStatusRetiring &&
+			item.Status != controlplanebiz.ProductResourceStatusRetired {
 			return true, nil
 		}
 	}
@@ -1150,11 +1220,111 @@ func (s *contractControlStore) EnvironmentExists(_ context.Context, projectID, e
 
 func (s *contractControlStore) EnvironmentStage(_ context.Context, projectID, environmentID string) (string, error) {
 	for _, item := range s.environments {
-		if item.ID == environmentID && item.ProjectID == projectID {
+		if item.ID == environmentID && item.ProjectID == projectID &&
+			item.Status != controlplanebiz.ProductResourceStatusRetiring &&
+			item.Status != controlplanebiz.ProductResourceStatusRetired {
 			return item.Stage, nil
 		}
 	}
 	return "", controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) BeginApplicationRetirement(
+	_ context.Context, projectID, applicationID string,
+	retirement controlplanebiz.ProductResourceRetirement,
+) (controlplanebiz.Application, bool, error) {
+	for index := range s.applications {
+		item := &s.applications[index]
+		if item.ProjectID != projectID || item.ID != applicationID {
+			continue
+		}
+		if item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			return *item, false, nil
+		}
+		if item.Status == controlplanebiz.ProductResourceStatusRetired {
+			return controlplanebiz.Application{}, false, controlplanebiz.ErrNotFound
+		}
+		item.Status, item.Retirement = controlplanebiz.ProductResourceStatusRetiring, &retirement
+		return *item, true, nil
+	}
+	return controlplanebiz.Application{}, false, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) ListRetiringApplications(
+	_ context.Context, limit int64,
+) ([]controlplanebiz.Application, error) {
+	var result []controlplanebiz.Application
+	for _, item := range s.applications {
+		if item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *contractControlStore) CompleteApplicationRetirement(
+	_ context.Context, projectID, applicationID string, retiredAt time.Time,
+) error {
+	for index := range s.applications {
+		item := &s.applications[index]
+		if item.ProjectID == projectID && item.ID == applicationID && item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			item.Status, item.Retirement, item.RetiredAt = controlplanebiz.ProductResourceStatusRetired, nil, retiredAt
+			return nil
+		}
+	}
+	return controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) BeginEnvironmentRetirement(
+	_ context.Context, projectID, environmentID string,
+	retirement controlplanebiz.ProductResourceRetirement,
+) (controlplanebiz.Environment, bool, error) {
+	for index := range s.environments {
+		item := &s.environments[index]
+		if item.ProjectID != projectID || item.ID != environmentID {
+			continue
+		}
+		if item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			return *item, false, nil
+		}
+		if item.Status == controlplanebiz.ProductResourceStatusRetired {
+			return controlplanebiz.Environment{}, false, controlplanebiz.ErrNotFound
+		}
+		item.Status, item.Retirement = controlplanebiz.ProductResourceStatusRetiring, &retirement
+		return *item, true, nil
+	}
+	return controlplanebiz.Environment{}, false, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) ListRetiringEnvironments(
+	_ context.Context, limit int64,
+) ([]controlplanebiz.Environment, error) {
+	var result []controlplanebiz.Environment
+	for _, item := range s.environments {
+		if item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
+}
+
+func (s *contractControlStore) CompleteEnvironmentRetirement(
+	_ context.Context, projectID, environmentID string, retiredAt time.Time,
+) error {
+	for index := range s.environments {
+		item := &s.environments[index]
+		if item.ProjectID == projectID && item.ID == environmentID && item.Status == controlplanebiz.ProductResourceStatusRetiring {
+			item.Status, item.Retirement, item.RetiredAt = controlplanebiz.ProductResourceStatusRetired, nil, retiredAt
+			return nil
+		}
+	}
+	return controlplanebiz.ErrNotFound
 }
 
 type contractBuildStore struct {

@@ -40,6 +40,18 @@ func TestTargetResolverRejectsStaleDeployment(t *testing.T) {
 	}
 }
 
+func TestTargetResolverRejectsRetiringApplication(t *testing.T) {
+	resolver := NewTargetResolver(
+		targetControlStub{applicationMissing: true}, deploymentTargetStub{}, targetHostStub{},
+	)
+	_, err := resolver.ResolveContainer(
+		context.Background(), "organization-1", "project-1", "deployment-1",
+	)
+	if !errors.Is(err, terminalbiz.ErrTargetUnavailable) {
+		t.Fatalf("retiring Application error = %v", err)
+	}
+}
+
 func TestTargetResolverRequiresConfiguredSSHForDirectHostTerminal(t *testing.T) {
 	hosts := targetHostStub{}
 	resolver := NewTargetResolver(targetControlStub{}, deploymentTargetStub{}, hosts)
@@ -54,10 +66,13 @@ func TestTargetResolverRequiresConfiguredSSHForDirectHostTerminal(t *testing.T) 
 	}
 }
 
-type targetControlStub struct{}
+type targetControlStub struct{ applicationMissing bool }
 
 func (targetControlStub) ProjectExists(context.Context, string, string) (bool, error) {
 	return true, nil
+}
+func (s targetControlStub) ApplicationExists(context.Context, string, string) (bool, error) {
+	return !s.applicationMissing, nil
 }
 func (targetControlStub) GetRuntimeTarget(context.Context, string, string) (controlbiz.RuntimeTarget, error) {
 	return controlbiz.RuntimeTarget{

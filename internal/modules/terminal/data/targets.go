@@ -16,6 +16,7 @@ import (
 
 type controlStore interface {
 	ProjectExists(context.Context, string, string) (bool, error)
+	ApplicationExists(context.Context, string, string) (bool, error)
 	GetRuntimeTarget(context.Context, string, string) (controlbiz.RuntimeTarget, error)
 	RuntimeTargetExecution(context.Context, string, string) (runtimeaccess.Connection, error)
 	EnvironmentStage(context.Context, string, string) (string, error)
@@ -57,6 +58,15 @@ func (r *TargetResolver) ResolveContainer(
 	}
 	if deployment.OrganizationID != organizationID || deployment.Status != deploymentbiz.StatusSucceeded ||
 		deployment.CutoverSequence == 0 {
+		return terminalbiz.Target{}, terminalbiz.ErrTargetUnavailable
+	}
+	applicationExists, err := r.control.ApplicationExists(
+		ctx, projectID, deployment.ApplicationID,
+	)
+	if err != nil {
+		return terminalbiz.Target{}, err
+	}
+	if !applicationExists {
 		return terminalbiz.Target{}, terminalbiz.ErrTargetUnavailable
 	}
 	current, err := r.deployments.CurrentSucceededForSlot(

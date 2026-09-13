@@ -64,6 +64,9 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		case len(segments) == 5 && segments[4] == "applications":
 			s.applications(w, r, principal, projectID)
 			return
+		case len(segments) == 6 && segments[4] == "applications":
+			s.application(w, r, principal, projectID, segments[5])
+			return
 		case len(segments) == 7 && segments[4] == "applications" && segments[6] == "releases":
 			s.releases(w, r, principal, projectID, segments[5])
 			return
@@ -82,9 +85,62 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		case len(segments) == 5 && segments[4] == "environments":
 			s.environments(w, r, principal, projectID)
 			return
+		case len(segments) == 6 && segments[4] == "environments":
+			s.environment(w, r, principal, projectID, segments[5])
+			return
 		}
 	}
 	httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+}
+
+func (s *HTTP) application(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal security.Principal,
+	projectID, applicationID string,
+) {
+	if r.Method != http.MethodDelete {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	completed, err := s.useCase.DeleteApplication(
+		r.Context(), principal, projectID, applicationID,
+		httpx.RequestIDFromContext(r.Context()),
+	)
+	writeRetirementResponse(w, r, completed, err)
+}
+
+func (s *HTTP) environment(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal security.Principal,
+	projectID, environmentID string,
+) {
+	if r.Method != http.MethodDelete {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	completed, err := s.useCase.DeleteEnvironment(
+		r.Context(), principal, projectID, environmentID,
+		httpx.RequestIDFromContext(r.Context()),
+	)
+	writeRetirementResponse(w, r, completed, err)
+}
+
+func writeRetirementResponse(
+	w http.ResponseWriter,
+	r *http.Request,
+	completed bool,
+	err error,
+) {
+	if writeError(w, r, err) {
+		return
+	}
+	if !completed {
+		httpx.JSON(w, http.StatusAccepted, map[string]string{"status": "retiring"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *HTTP) runtimeTarget(
@@ -104,11 +160,7 @@ func (s *HTTP) runtimeTarget(
 	if writeError(w, r, err) {
 		return
 	}
-	if !completed {
-		httpx.JSON(w, http.StatusAccepted, map[string]string{"status": "retiring"})
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	writeRetirementResponse(w, r, completed, nil)
 }
 
 func (s *HTTP) projectMembers(

@@ -73,9 +73,11 @@ Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Applicat
 
 Runtime Target 删除把 `retiring` 与最小退役上下文原子持久化：Organization、Actor、Request ID 和开始时间。migration v46 的 `status + retirement.started_at + _id` 索引支持 Server 有界扫描；最终删除与原始身份审计处于同一事务。记录在提交删除前始终可重新发现，因此 Server 重启或客户端不再重试也不会遗失已接受的退役工作。
 
+Application 与 Environment 使用软退役保留业务历史。Migration v48 回填 `active` 状态，把名称唯一索引改为只约束 active 文档，并分别增加 `status + retirement.started_at + _id` 部分索引。开始退役会原子保存 Organization、Actor、Request ID 与开始时间；完成时写入 `retired_at` 并移除临时上下文。默认列表、Application/Environment 引用解析和运行配置读取只接受 active 文档，不可变 Release 历史可按已知 Application ID 继续读取。Migration v49 为活动容器 TerminalSession 回填 Application/Environment ID，并建立 active 部分索引，使资源退役可有界关闭关联会话。
+
 退役收敛使用 migration v47 的 Organization/Project/Runtime Target/active/时间索引有界扫描 TerminalSession。会话状态转换与逐会话审计原子提交；Runtime Inventory 则在独立事务中分批删除完全可重建的调度、批次和 current 投影。Inventory `Begin` 与 `Complete` 都复核 Target=ready，阻止已领取租约的旧 Worker 在清理后重建视图。
 
-Migration v4–31 的执行与业务索引沿用各模块版本记录；v32/v33 建立 Terminal 策略、会话、并发槽位和登录 Session 绑定，v34–43 建立 Artifact 证据、签名、漏洞与 Deployment Policy 索引，v44/v45 支持外部 Artifact 和 Registry 匿名/Basic 模式，v46 建立 Runtime Target 退役队列，v47 建立按 Target 收敛活动 TerminalSession 的索引。
+Migration v4–31 的执行与业务索引沿用各模块版本记录；v32/v33 建立 Terminal 策略、会话、并发槽位和登录 Session 绑定，v34–43 建立 Artifact 证据、签名、漏洞与 Deployment Policy 索引，v44/v45 支持外部 Artifact 和 Registry 匿名/Basic 模式，v46 建立 Runtime Target 退役队列，v47 建立按 Target 收敛活动 TerminalSession 的索引，v48/v49 建立 Application/Environment 软退役及关联 Terminal 收敛。
 
 Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Target 原子分配单调 generation；多 Server 不使用本机时间判断 observation 新旧。
 

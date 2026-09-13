@@ -15,14 +15,18 @@ import (
 )
 
 type MongoRepository struct {
-	policies *mongo.Collection
-	sessions *mongo.Collection
+	policies     *mongo.Collection
+	sessions     *mongo.Collection
+	applications *mongo.Collection
+	environments *mongo.Collection
 }
 
 func NewMongoRepository(database *mongo.Database) *MongoRepository {
 	return &MongoRepository{
-		policies: database.Collection("terminal_access_policies"),
-		sessions: database.Collection("terminal_sessions"),
+		policies:     database.Collection("terminal_access_policies"),
+		sessions:     database.Collection("terminal_sessions"),
+		applications: database.Collection("product_applications"),
+		environments: database.Collection("environments"),
 	}
 }
 
@@ -153,7 +157,89 @@ func (r *MongoRepository) ListActiveSessionsForRuntimeTarget(
 	return result, nil
 }
 
+func (r *MongoRepository) ListActiveSessionsForProductResource(
+	ctx context.Context,
+	organizationID, projectID, applicationID, environmentID string,
+	limit int64,
+) ([]biz.TerminalSession, error) {
+	filter := bson.D{
+		{Key: "organization_id", Value: organizationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "active", Value: true},
+	}
+	if applicationID != "" {
+		filter = append(filter, bson.E{Key: "application_id", Value: applicationID})
+	}
+	if environmentID != "" {
+		filter = append(filter, bson.E{Key: "environment_id", Value: environmentID})
+	}
+	cursor, err := r.sessions.Find(
+		ctx, filter,
+		options.Find().SetSort(bson.D{
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find active product resource terminal sessions: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []sessionDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode active product resource terminal sessions: %w", err)
+	}
+	result := make([]biz.TerminalSession, len(documents))
+	for index, document := range documents {
+		result[index] = document.domain()
+		if err := validateStoredSession(result[index]); err != nil {
+			return nil, fmt.Errorf("decode active product resource terminal session: %w", err)
+		}
+	}
+	return result, nil
+}
+
 func (r *MongoRepository) CreateSession(ctx context.Context, session biz.TerminalSession) (biz.TerminalSession, error) {
+	return r.createSession(ctx, session)
+}
+
+// CreateContainerSession writes a harmless admission revision to both parent
+// resources inside the caller's transaction. A concurrent retirement updates
+// the same documents, so MongoDB cannot commit a session from a stale active
+// read after the retirement convergence scan.
+func (r *MongoRepository) CreateContainerSession(
+	ctx context.Context,
+	session biz.TerminalSession,
+) (biz.TerminalSession, error) {
+	if err := session.Validate(); err != nil ||
+		session.UserConcurrencySlot < 1 || session.TargetConcurrencySlot < 1 {
+		return biz.TerminalSession{}, biz.ErrInvalidSession
+	}
+	for _, parent := range []struct {
+		collection *mongo.Collection
+		id         string
+	}{
+		{collection: r.applications, id: session.ApplicationID},
+		{collection: r.environments, id: session.EnvironmentID},
+	} {
+		result, err := parent.collection.UpdateOne(
+			ctx,
+			bson.D{
+				{Key: "_id", Value: parent.id},
+				{Key: "project_id", Value: session.ProjectID},
+				{Key: "status", Value: "active"},
+			},
+			bson.D{{Key: "$inc", Value: bson.D{{Key: "terminal_admission_revision", Value: 1}}}},
+		)
+		if err != nil {
+			return biz.TerminalSession{}, fmt.Errorf("fence container terminal parent: %w", err)
+		}
+		if result.MatchedCount != 1 {
+			return biz.TerminalSession{}, biz.ErrTargetUnavailable
+		}
+	}
+	return r.createSession(ctx, session)
+}
+
+func (r *MongoRepository) createSession(ctx context.Context, session biz.TerminalSession) (biz.TerminalSession, error) {
 	if err := session.Validate(); err != nil || session.UserConcurrencySlot < 1 || session.TargetConcurrencySlot < 1 {
 		return biz.TerminalSession{}, biz.ErrInvalidSession
 	}
@@ -307,6 +393,8 @@ type sessionDocument struct {
 	ManagedHostID           string             `bson:"managed_host_id"`
 	RuntimeTargetID         string             `bson:"runtime_target_id,omitempty"`
 	DeploymentID            string             `bson:"deployment_id,omitempty"`
+	ApplicationID           string             `bson:"application_id,omitempty"`
+	EnvironmentID           string             `bson:"environment_id,omitempty"`
 	RunningInstanceID       string             `bson:"running_instance_id,omitempty"`
 	InstanceGeneration      uint64             `bson:"instance_generation,omitempty"`
 	TargetScope             string             `bson:"target_scope"`
@@ -338,6 +426,7 @@ func sessionDocumentFromDomain(session biz.TerminalSession) sessionDocument {
 		Kind: session.Kind, ActorID: session.ActorID, ManagedHostID: session.ManagedHostID,
 		AuthenticationSessionID: session.AuthenticationSessionID,
 		RuntimeTargetID:         session.RuntimeTargetID, DeploymentID: session.DeploymentID,
+		ApplicationID: session.ApplicationID, EnvironmentID: session.EnvironmentID,
 		RunningInstanceID: session.RunningInstanceID, InstanceGeneration: session.InstanceGeneration,
 		TargetScope: session.TargetScope(), Status: session.Status, ConnectionMode: session.ConnectionMode,
 		CreatedAt: session.CreatedAt, ConnectedAt: session.ConnectedAt, LastActivityAt: session.LastActivityAt,
@@ -356,6 +445,7 @@ func (document sessionDocument) domain() biz.TerminalSession {
 		Kind: document.Kind, ActorID: document.ActorID, ManagedHostID: document.ManagedHostID,
 		AuthenticationSessionID: document.AuthenticationSessionID,
 		RuntimeTargetID:         document.RuntimeTargetID, DeploymentID: document.DeploymentID,
+		ApplicationID: document.ApplicationID, EnvironmentID: document.EnvironmentID,
 		RunningInstanceID: document.RunningInstanceID, InstanceGeneration: document.InstanceGeneration,
 		Status: document.Status, ConnectionMode: document.ConnectionMode, CreatedAt: document.CreatedAt,
 		ConnectedAt: document.ConnectedAt, LastActivityAt: document.LastActivityAt, EndedAt: document.EndedAt,

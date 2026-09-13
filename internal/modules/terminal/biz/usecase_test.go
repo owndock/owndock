@@ -140,6 +140,44 @@ func TestConvergeRuntimeTargetHandlesRepositoryFailuresAndConflicts(t *testing.T
 	}
 }
 
+func TestConvergeProductResourceClosesOnlyMatchingSessions(t *testing.T) {
+	useCase, sessions, audits := newTestUseCase(t)
+	principal := terminalPrincipal(security.RoleMaintainer, "maintainer-1")
+	matching, err := useCase.CreateContainerSession(
+		t.Context(), principal, "project-1", "deployment-1",
+		"192.0.2.10", "Browser/1.0", "request-matching",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unrelated := matching.Session
+	unrelated.ID = "session-unrelated"
+	unrelated.ApplicationID = "application-2"
+	unrelated.UserConcurrencySlot = 2
+	unrelated.TargetConcurrencySlot = 2
+	sessions.items[unrelated.ID] = unrelated
+	pending, err := useCase.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "application-delete-request",
+	)
+	if err != nil || pending {
+		t.Fatalf("convergence = %t/%v", pending, err)
+	}
+	if sessions.items[matching.Session.ID].Status != StatusClosed ||
+		sessions.items[unrelated.ID].Status != StatusPending {
+		t.Fatalf("sessions = %+v", sessions.items)
+	}
+	if audits.events[len(audits.events)-1].Action !=
+		"terminal_session.close_for_product_resource_retirement" {
+		t.Fatalf("audit events = %+v", audits.events)
+	}
+	if _, err := useCase.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "", "", "owner-1", "request-1",
+	); !errors.Is(err, ErrTerminalUnavailable) {
+		t.Fatalf("invalid scope error = %v", err)
+	}
+}
+
 func TestUseCaseEnforcesDefaultRoleAndDistributedConcurrencyPolicy(t *testing.T) {
 	useCase, _, _ := newTestUseCase(t)
 	developer := terminalPrincipal(security.RoleDeveloper, "developer-1")
@@ -479,6 +517,32 @@ func (s *terminalSessionStore) ListActiveSessionsForRuntimeTarget(
 	}
 	return result, nil
 }
+func (s *terminalSessionStore) ListActiveSessionsForProductResource(
+	_ context.Context,
+	organizationID, projectID, applicationID, environmentID string,
+	limit int64,
+) ([]TerminalSession, error) {
+	if s.listErr != nil {
+		return nil, s.listErr
+	}
+	result := make([]TerminalSession, 0, limit)
+	for _, item := range s.items {
+		if item.OrganizationID != organizationID || item.ProjectID != projectID || !item.Active {
+			continue
+		}
+		if applicationID != "" && item.ApplicationID != applicationID {
+			continue
+		}
+		if environmentID != "" && item.EnvironmentID != environmentID {
+			continue
+		}
+		result = append(result, item)
+		if int64(len(result)) == limit {
+			break
+		}
+	}
+	return result, nil
+}
 func (s *terminalSessionStore) CreateSession(_ context.Context, candidate TerminalSession) (TerminalSession, error) {
 	for _, item := range s.items {
 		if !item.Active || item.OrganizationID != candidate.OrganizationID {
@@ -491,6 +555,11 @@ func (s *terminalSessionStore) CreateSession(_ context.Context, candidate Termin
 	}
 	s.items[candidate.ID] = candidate
 	return candidate, nil
+}
+func (s *terminalSessionStore) CreateContainerSession(
+	ctx context.Context, candidate TerminalSession,
+) (TerminalSession, error) {
+	return s.CreateSession(ctx, candidate)
 }
 func (s *terminalSessionStore) SaveSession(_ context.Context, item TerminalSession, expectedVersion uint64) (TerminalSession, error) {
 	if s.saveErr != nil {
@@ -526,6 +595,7 @@ func (terminalTargets) ProjectExists(context.Context, string, string) (bool, err
 func (terminalTargets) ResolveContainer(_ context.Context, organizationID, projectID, deploymentID string) (Target, error) {
 	return Target{
 		Kind: KindContainer, OrganizationID: organizationID, ProjectID: projectID,
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
 		ManagedHostID: "host-1", RuntimeTargetID: "target-1", DeploymentID: deploymentID,
 		RunningInstanceID: deploymentID + ":1", InstanceGeneration: 1,
 		EnvironmentStage: "development", ConnectionMode: runtimeaccess.ModeAgent,

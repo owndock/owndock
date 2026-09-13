@@ -27,8 +27,8 @@ func TestValidateMigrations(t *testing.T) {
 
 func TestDefaultMigrationsRemainContiguous(t *testing.T) {
 	items := Default()
-	if len(items) != 47 {
-		t.Fatalf("Default() migration count = %d, want 47", len(items))
+	if len(items) != 49 {
+		t.Fatalf("Default() migration count = %d, want 49", len(items))
 	}
 	for index, item := range items {
 		if item.Version != int64(index+1) {
@@ -36,7 +36,7 @@ func TestDefaultMigrationsRemainContiguous(t *testing.T) {
 		}
 	}
 	last := items[len(items)-1]
-	if last.Name != "index_runtime_target_terminal_convergence" || last.Up == nil {
+	if last.Name != "index_product_resource_terminal_convergence" || last.Up == nil {
 		t.Fatalf("latest migration = %+v", last)
 	}
 }

@@ -81,6 +81,233 @@ type runtimeTargetRetirerProbe struct {
 	onCall func()
 }
 
+type productResourceRetirerProbe struct {
+	scopes []ProductResourceRetirementScope
+	err    error
+}
+
+type productResourceDependencyProbe struct {
+	calls   int
+	pending bool
+	err     error
+}
+
+func (p *productResourceDependencyProbe) ConvergeProductResource(
+	context.Context, string, string, string, string, string, string,
+) (bool, error) {
+	p.calls++
+	return p.pending, p.err
+}
+
+func (p *productResourceRetirerProbe) RetireProductResource(
+	_ context.Context,
+	scope ProductResourceRetirementScope,
+	_ security.Principal,
+	_ string,
+) error {
+	p.scopes = append(p.scopes, scope)
+	return p.err
+}
+
+func TestProductResourceRetirementFencesAdmissionAndResumes(t *testing.T) {
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{
+			ID: "application-1", ProjectID: "project-1", Status: ProductResourceStatusActive,
+		}},
+		environments: []Environment{{
+			ID: "environment-1", ProjectID: "project-1", Status: ProductResourceStatusActive,
+		}},
+	}
+	retirer := &productResourceRetirerProbe{err: ErrResourceRetirementPending}
+	dependency := &productResourceDependencyProbe{}
+	sequence := 0
+	useCase := NewUseCaseWithEnvironment(
+		store, store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) {
+			sequence++
+			return fmt.Sprintf("id-%d", sequence), nil
+		},
+		func() time.Time { return time.Unix(100, 0) },
+	).WithProductResourceRetirement(store, retirer).
+		WithProductResourceDependencies(dependency)
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1", SessionID: "session-1", Role: security.RoleOwner,
+	}
+	completed, err := useCase.DeleteApplication(
+		t.Context(), owner, "project-1", "application-1", "request-1",
+	)
+	if err != nil || completed {
+		t.Fatalf("DeleteApplication() = %v, %v", completed, err)
+	}
+	completed, err = useCase.DeleteEnvironment(
+		t.Context(), owner, "project-1", "environment-1", "request-2",
+	)
+	if err != nil || completed {
+		t.Fatalf("DeleteEnvironment() = %v, %v", completed, err)
+	}
+	if exists, _ := store.ApplicationExists(t.Context(), "project-1", "application-1"); exists {
+		t.Fatal("retiring Application still admits writes")
+	}
+	if items, _ := store.ListEnvironments(t.Context(), "project-1"); len(items) != 0 {
+		t.Fatalf("retiring Environment remained visible: %+v", items)
+	}
+	retirer.err = nil
+	processed, err := useCase.ContinueProductResourceRetirements(t.Context(), 10)
+	if err != nil || processed != 2 {
+		t.Fatalf("ContinueProductResourceRetirements() = %d, %v", processed, err)
+	}
+	if store.applications[0].Status != ProductResourceStatusRetired ||
+		store.environments[0].Status != ProductResourceStatusRetired ||
+		len(retirer.scopes) != 4 || dependency.calls != 4 {
+		t.Fatalf("retirement result = %+v / %+v / %+v", store.applications, store.environments, retirer.scopes)
+	}
+	if exists, _ := store.ApplicationExistsAnyStatus(t.Context(), "project-1", "application-1"); !exists {
+		t.Fatal("retired Application history was removed")
+	}
+}
+
+func TestProductResourceRetirementHandlesIdempotencyDependenciesAndCorruptMetadata(t *testing.T) {
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{
+			ID: "application-1", ProjectID: "project-1", Status: ProductResourceStatusActive,
+		}},
+		environments: []Environment{{
+			ID: "environment-1", ProjectID: "project-1", Status: ProductResourceStatusRetiring,
+		}},
+	}
+	retirer := &productResourceRetirerProbe{}
+	dependency := &productResourceDependencyProbe{pending: true}
+	useCase := NewUseCaseWithEnvironment(
+		store, store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "audit-1", nil },
+		func() time.Time { return time.Unix(100, 0) },
+	).WithProductResourceRetirement(store, retirer).
+		WithProductResourceDependencies(dependency)
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1", SessionID: "session-1", Role: security.RoleOwner,
+	}
+	completed, err := useCase.DeleteApplication(
+		t.Context(), owner, "project-1", "missing", "request-missing",
+	)
+	if err != nil || !completed {
+		t.Fatalf("missing resource deletion = %t/%v", completed, err)
+	}
+	completed, err = useCase.DeleteApplication(
+		t.Context(), owner, "project-1", "application-1", "request-1",
+	)
+	if err != nil || completed || store.applications[0].Status != ProductResourceStatusRetiring {
+		t.Fatalf("pending dependency deletion = %t/%v/%+v", completed, err, store.applications[0])
+	}
+	dependency.pending = false
+	completed, err = useCase.DeleteApplication(
+		t.Context(), owner, "project-1", "application-1", "request-retry",
+	)
+	if err != nil || !completed || store.applications[0].Status != ProductResourceStatusRetired {
+		t.Fatalf("idempotent continuation = %t/%v/%+v", completed, err, store.applications[0])
+	}
+	if _, err := useCase.ContinueProductResourceRetirements(t.Context(), 10); !errors.Is(err, ErrResourceRetirementUnavailable) {
+		t.Fatalf("corrupt retirement metadata error = %v", err)
+	}
+}
+
+func TestProductResourceRetirementPropagatesDependencyAndRetirerErrors(t *testing.T) {
+	probeError := errors.New("dependency failed")
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{
+			ID: "application-1", ProjectID: "project-1", Status: ProductResourceStatusActive,
+		}},
+	}
+	retirer := &productResourceRetirerProbe{}
+	dependency := &productResourceDependencyProbe{err: probeError}
+	useCase := NewUseCase(
+		store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	).WithProductResourceRetirement(store, retirer).
+		WithProductResourceDependencies(dependency)
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1", SessionID: "session-1", Role: security.RoleOwner,
+	}
+	if _, err := useCase.DeleteApplication(
+		t.Context(), owner, "project-1", "application-1", "request-1",
+	); !errors.Is(err, probeError) {
+		t.Fatalf("dependency error = %v", err)
+	}
+	dependency.err = nil
+	retirer.err = probeError
+	if _, err := useCase.ContinueProductResourceRetirements(t.Context(), 10); !errors.Is(err, probeError) {
+		t.Fatalf("retirer error = %v", err)
+	}
+	useCase.WithProductResourceDependencies(nil)
+	if _, err := useCase.ContinueProductResourceRetirements(t.Context(), 10); !errors.Is(err, ErrResourceRetirementUnavailable) {
+		t.Fatalf("nil dependency error = %v", err)
+	}
+}
+
+func TestProductResourceRetirementValidatesPermissionConfigurationAndLimit(t *testing.T) {
+	store := &fakeStore{projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}}}
+	owner := security.Principal{UserID: "owner-1", OrganizationID: "organization-1", SessionID: "session-1", Role: security.RoleOwner}
+	viewer := security.Principal{UserID: "viewer-1", OrganizationID: "organization-1", SessionID: "session-2", Role: security.RoleViewer}
+	useCase := NewUseCaseWithEnvironment(
+		store, store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "id-1", nil }, time.Now,
+	)
+	if _, err := useCase.DeleteApplication(t.Context(), viewer, "project-1", "application-1", "request-1"); !errors.Is(err, security.ErrForbidden) {
+		t.Fatalf("viewer error = %v", err)
+	}
+	if _, err := useCase.DeleteEnvironment(t.Context(), viewer, "project-1", "environment-1", "request-1"); !errors.Is(err, security.ErrForbidden) {
+		t.Fatalf("viewer Environment error = %v", err)
+	}
+	if _, err := useCase.DeleteApplication(t.Context(), owner, "missing-project", "application-1", "request-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing project error = %v", err)
+	}
+	if _, err := useCase.DeleteApplication(t.Context(), owner, "project-1", "application-1", "request-1"); !errors.Is(err, ErrResourceRetirementUnavailable) {
+		t.Fatalf("unconfigured Application error = %v", err)
+	}
+	if _, err := useCase.DeleteEnvironment(t.Context(), owner, "project-1", "environment-1", "request-1"); !errors.Is(err, ErrResourceRetirementUnavailable) {
+		t.Fatalf("unconfigured error = %v", err)
+	}
+	if _, err := useCase.ContinueProductResourceRetirements(t.Context(), 10); !errors.Is(err, ErrResourceRetirementUnavailable) {
+		t.Fatalf("unconfigured continuation error = %v", err)
+	}
+	configured := useCase.WithProductResourceRetirement(store, &productResourceRetirerProbe{})
+	if completed, err := configured.DeleteEnvironment(t.Context(), owner, "project-1", "missing-environment", "request-1"); err != nil || !completed {
+		t.Fatalf("missing Environment deletion = %t/%v", completed, err)
+	}
+	if _, err := configured.ContinueProductResourceRetirements(t.Context(), 0); err == nil {
+		t.Fatal("invalid limit was accepted")
+	}
+}
+
+func TestProductResourceRetirementPropagatesIdentifierFailure(t *testing.T) {
+	store := &fakeStore{
+		projects:     []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{ID: "application-1", ProjectID: "project-1"}},
+		environments: []Environment{{ID: "environment-1", ProjectID: "project-1"}},
+	}
+	probeError := errors.New("identifier failed")
+	useCase := NewUseCaseWithEnvironment(
+		store, store, store, store, store,
+		transaction.Passthrough{}, &fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "", probeError }, time.Now,
+	).WithProductResourceRetirement(store, &productResourceRetirerProbe{})
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1", SessionID: "session-1", Role: security.RoleOwner,
+	}
+	if _, err := useCase.DeleteApplication(t.Context(), owner, "project-1", "application-1", "request-1"); !errors.Is(err, probeError) {
+		t.Fatalf("Application identifier error = %v", err)
+	}
+	if _, err := useCase.DeleteEnvironment(t.Context(), owner, "project-1", "environment-1", "request-1"); !errors.Is(err, probeError) {
+		t.Fatalf("Environment identifier error = %v", err)
+	}
+}
+
 type runtimeTargetDependencyProbe struct {
 	pending bool
 	calls   int
@@ -636,7 +863,8 @@ func (s *fakeStore) ProjectExists(_ context.Context, organizationID, projectID s
 func (s *fakeStore) ListApplications(_ context.Context, projectID string) ([]Application, error) {
 	var result []Application
 	for _, item := range s.applications {
-		if item.ProjectID == projectID {
+		if item.ProjectID == projectID &&
+			(item.Status == "" || item.Status == ProductResourceStatusActive) {
 			result = append(result, item)
 		}
 	}
@@ -649,6 +877,18 @@ func (s *fakeStore) CreateApplication(_ context.Context, item Application) (Appl
 }
 
 func (s *fakeStore) ApplicationExists(_ context.Context, projectID, applicationID string) (bool, error) {
+	for _, item := range s.applications {
+		if item.ID == applicationID && item.ProjectID == projectID &&
+			(item.Status == "" || item.Status == ProductResourceStatusActive) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *fakeStore) ApplicationExistsAnyStatus(
+	_ context.Context, projectID, applicationID string,
+) (bool, error) {
 	for _, item := range s.applications {
 		if item.ID == applicationID && item.ProjectID == projectID {
 			return true, nil
@@ -806,11 +1046,106 @@ func (s *fakeStore) GetRegistryCredential(_ context.Context, projectID, credenti
 func (s *fakeStore) ListEnvironments(_ context.Context, projectID string) ([]Environment, error) {
 	var result []Environment
 	for _, item := range s.environments {
-		if item.ProjectID == projectID {
+		if item.ProjectID == projectID &&
+			(item.Status == "" || item.Status == ProductResourceStatusActive) {
 			result = append(result, item)
 		}
 	}
 	return result, nil
+}
+
+func (s *fakeStore) BeginApplicationRetirement(
+	_ context.Context, projectID, applicationID string, retirement ProductResourceRetirement,
+) (Application, bool, error) {
+	for index := range s.applications {
+		item := &s.applications[index]
+		if item.ProjectID != projectID || item.ID != applicationID {
+			continue
+		}
+		if item.Status == ProductResourceStatusRetiring {
+			return *item, false, nil
+		}
+		if item.Status == ProductResourceStatusRetired {
+			return Application{}, false, ErrNotFound
+		}
+		item.Status = ProductResourceStatusRetiring
+		item.Retirement = &retirement
+		return *item, true, nil
+	}
+	return Application{}, false, ErrNotFound
+}
+
+func (s *fakeStore) ListRetiringApplications(_ context.Context, limit int64) ([]Application, error) {
+	items := make([]Application, 0, limit)
+	for _, item := range s.applications {
+		if item.Status == ProductResourceStatusRetiring {
+			items = append(items, item)
+			if int64(len(items)) == limit {
+				break
+			}
+		}
+	}
+	return items, nil
+}
+
+func (s *fakeStore) CompleteApplicationRetirement(
+	_ context.Context, projectID, applicationID string, retiredAt time.Time,
+) error {
+	for index := range s.applications {
+		item := &s.applications[index]
+		if item.ProjectID == projectID && item.ID == applicationID && item.Status == ProductResourceStatusRetiring {
+			item.Status, item.Retirement, item.RetiredAt = ProductResourceStatusRetired, nil, retiredAt
+			return nil
+		}
+	}
+	return ErrNotFound
+}
+
+func (s *fakeStore) BeginEnvironmentRetirement(
+	_ context.Context, projectID, environmentID string, retirement ProductResourceRetirement,
+) (Environment, bool, error) {
+	for index := range s.environments {
+		item := &s.environments[index]
+		if item.ProjectID != projectID || item.ID != environmentID {
+			continue
+		}
+		if item.Status == ProductResourceStatusRetiring {
+			return *item, false, nil
+		}
+		if item.Status == ProductResourceStatusRetired {
+			return Environment{}, false, ErrNotFound
+		}
+		item.Status = ProductResourceStatusRetiring
+		item.Retirement = &retirement
+		return *item, true, nil
+	}
+	return Environment{}, false, ErrNotFound
+}
+
+func (s *fakeStore) ListRetiringEnvironments(_ context.Context, limit int64) ([]Environment, error) {
+	items := make([]Environment, 0, limit)
+	for _, item := range s.environments {
+		if item.Status == ProductResourceStatusRetiring {
+			items = append(items, item)
+			if int64(len(items)) == limit {
+				break
+			}
+		}
+	}
+	return items, nil
+}
+
+func (s *fakeStore) CompleteEnvironmentRetirement(
+	_ context.Context, projectID, environmentID string, retiredAt time.Time,
+) error {
+	for index := range s.environments {
+		item := &s.environments[index]
+		if item.ProjectID == projectID && item.ID == environmentID && item.Status == ProductResourceStatusRetiring {
+			item.Status, item.Retirement, item.RetiredAt = ProductResourceStatusRetired, nil, retiredAt
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *fakeStore) CreateEnvironment(_ context.Context, item Environment) (Environment, error) {

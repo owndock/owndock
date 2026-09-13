@@ -35,26 +35,45 @@ type ManagedHostLookup interface {
 }
 
 type UseCase struct {
-	projects           ProjectRepository
-	members            ProjectMemberRepository
-	applications       ApplicationRepository
-	releases           ReleaseRepository
-	artifactReleases   ArtifactReleaseRepository
-	targets            RuntimeTargetRepository
-	targetProbes       RuntimeTargetProbeRepository
-	targetProber       RuntimeTargetProber
-	targetLifecycle    RuntimeTargetLifecycleRepository
-	targetRetirer      RuntimeTargetRetirer
-	targetDependencies []RuntimeTargetDependency
-	managedHosts       ManagedHostLookup
-	registries         RegistryCredentialRepository
-	environments       EnvironmentRepository
-	templates          TemplateCatalog
-	transaction        transaction.Manager
-	audit              sharedaudit.Recorder
-	auditReader        sharedaudit.Reader
-	newID              IDGenerator
-	now                Clock
+	projects             ProjectRepository
+	members              ProjectMemberRepository
+	applications         ApplicationRepository
+	releases             ReleaseRepository
+	artifactReleases     ArtifactReleaseRepository
+	targets              RuntimeTargetRepository
+	targetProbes         RuntimeTargetProbeRepository
+	targetProber         RuntimeTargetProber
+	targetLifecycle      RuntimeTargetLifecycleRepository
+	targetRetirer        RuntimeTargetRetirer
+	targetDependencies   []RuntimeTargetDependency
+	resourceLifecycle    ProductResourceLifecycleRepository
+	resourceRetirer      ProductResourceRetirer
+	resourceDependencies []ProductResourceDependency
+	managedHosts         ManagedHostLookup
+	registries           RegistryCredentialRepository
+	environments         EnvironmentRepository
+	templates            TemplateCatalog
+	transaction          transaction.Manager
+	audit                sharedaudit.Recorder
+	auditReader          sharedaudit.Reader
+	newID                IDGenerator
+	now                  Clock
+}
+
+func (u *UseCase) WithProductResourceDependencies(
+	dependencies ...ProductResourceDependency,
+) *UseCase {
+	u.resourceDependencies = append(u.resourceDependencies[:0], dependencies...)
+	return u
+}
+
+func (u *UseCase) WithProductResourceRetirement(
+	repository ProductResourceLifecycleRepository,
+	retirer ProductResourceRetirer,
+) *UseCase {
+	u.resourceLifecycle = repository
+	u.resourceRetirer = retirer
+	return u
 }
 
 func (u *UseCase) WithRuntimeTargetDependencies(
@@ -451,10 +470,28 @@ func (u *UseCase) ListReleases(
 	if err := principal.Require(security.PermissionReleaseRead); err != nil {
 		return nil, err
 	}
-	if err := u.requireProjectAndApplication(ctx, principal, projectID, applicationID); err != nil {
+	if err := u.requireProjectAndApplicationAnyStatus(ctx, principal, projectID, applicationID); err != nil {
 		return nil, err
 	}
 	return u.releases.ListReleases(ctx, projectID, applicationID)
+}
+
+func (u *UseCase) requireProjectAndApplicationAnyStatus(
+	ctx context.Context,
+	principal security.Principal,
+	projectID, applicationID string,
+) error {
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return err
+	}
+	exists, err := u.applications.ApplicationExistsAnyStatus(ctx, projectID, applicationID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (u *UseCase) CreateRelease(

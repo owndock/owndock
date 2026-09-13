@@ -987,6 +987,41 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/applications/{application_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/ApplicationID"
+    delete:
+      tags: [Product Applications]
+      operationId: deleteProjectApplication
+      summary: Retire an Application and its runtime resources
+      description: Fences new Release, Build, and Deployment admission immediately, then durably drains matching deployments and removes their exact stable runtime slots. Immutable Release, Build, Deployment, and Audit history is retained. A 202 response requires no client retry; the Server resumes work after restarts. Repeating a completed deletion is idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Durable retirement was accepted and continues in the background.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [retiring]
+        "204":
+          description: Application runtime resources are retired; immutable history remains.
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/members:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -2856,6 +2891,46 @@ paths:
         "415":
           $ref: "#/components/responses/APIError"
         "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/environments/{environment_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: environment_id
+        in: path
+        required: true
+        schema:
+          type: string
+          minLength: 1
+    delete:
+      tags: [Environments]
+      operationId: deleteProjectEnvironment
+      summary: Retire an Environment and its runtime resources
+      description: Fences new Build and Deployment admission immediately, then durably drains matching deployments and removes their exact stable runtime slots. Immutable history is retained. A 202 response requires no client retry; the Server resumes work after restarts. Repeating a completed deletion is idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Durable retirement was accepted and continues in the background.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [retiring]
+        "204":
+          description: Environment runtime resources are retired; immutable history remains.
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "404":
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"

@@ -45,7 +45,7 @@ test-changed-coverage:
 		-coverprofile=$(CHANGED_COVERAGE_DIRECTORY)/http-contract.out \
 		./internal/server -run TestHTTPImplementationMatchesOpenAPI
 	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test -count=1 -timeout=5m \
-		-covermode=atomic -coverpkg=./internal/modules/... \
+		-covermode=atomic -coverpkg=./internal/... \
 		-coverprofile=$(CHANGED_COVERAGE_DIRECTORY)/mongo.out \
 		./internal/platform/mongo -run TestMongoReplicaSetIntegration
 	OWNDOCK_RUN_SUPPLY_CHAIN_INTEGRATION=1 go test -count=1 -timeout=3m \
