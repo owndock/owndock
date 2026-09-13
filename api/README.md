@@ -106,8 +106,4 @@ TerminalSession 控制面、同域 WSS、direct/Agent 容器 Docker exec 和主�
 
 凭据正文不通过资源 API 保存：Git、Runtime、Registry、Environment Secret 与 Agent CA 都由受约束的外部秘密来源提供。公开响应也不回传 `secret://` 引用：Registry/Runtime Target 只显示是否配置，Environment 只显示变量名。
 
-## 默认关闭的工程样例
-
-`development.enable_engineering_samples` 控制顶层 `/api/v1/applications`、`/api/v1/environments` 和 `/api/v1/deployments`。这些路由使用进程内存仓储、没有认证授权，只能在隔离的本地开发环境验证架构和错误模型，不是正式产品 API，也不能作为 Project 范围接口的兼容入口。
-
-新增功能不得继续扩展工程样例；应直接进入有所有权、授权、持久化和审计的正式领域契约。
+早期未认证、进程内存实现的顶层 Application、Environment 和 Deployment 样例已经删除。新增功能必须直接进入有所有权、授权、持久化和审计的正式 Project 范围领域契约。

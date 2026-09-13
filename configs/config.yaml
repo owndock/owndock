@@ -26,9 +26,6 @@ observability:
     insecure: true
     sample_ratio: 1
 
-development:
-  enable_engineering_samples: false
-
 product:
   enabled: false
   source_probe_timeout: 10s

@@ -17,7 +17,7 @@ security:
 - 同一可信来源默认每分钟最多 600 个产品 API 请求；
 - 整个 OwnDock 安装默认每分钟最多 6,000 个产品 API 请求；
 - `/api/v1/auth/*`、Project、Managed Host、Build Trigger、Webhook 等正式产品路由都经过这层保护；
-- `/livez`、`/readyz`、`/metrics`、版本信息和默认关闭的工程样例不经过产品限流，便于平台在业务入口拥塞时继续判断进程状态；
+- `/livez`、`/readyz`、`/metrics` 和版本信息不经过产品限流，便于平台在业务入口拥塞时继续判断进程状态；
 - 来源键只以 SHA-256 保存，不把原始 IP 写入限流 collection；窗口过期后由 TTL 索引清理。
 
 超过任一阈值时返回 `429 rate_limited`，并通过 `Retry-After` 告诉客户端至少等待多少秒。若 MongoDB 无法安全完成共享计数，OwnDock 返回 `503 ingress_protection_unavailable`，不会在保护失效时放行请求。

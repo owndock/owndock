@@ -126,9 +126,6 @@ func TestLoadDefaultsTraceSampleRatio(t *testing.T) {
 	if got := cfg.Observability.Tracing.SampleRatio; got != defaultTraceSampleRatio {
 		t.Fatalf("sample ratio = %v, want %v", got, defaultTraceSampleRatio)
 	}
-	if cfg.Development.EnableEngineeringSamples {
-		t.Fatal("engineering samples must be disabled by default")
-	}
 	if cfg.Database.Mongo.Enabled {
 		t.Fatal("MongoDB must be disabled by default")
 	}

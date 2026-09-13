@@ -199,14 +199,6 @@ type Repository interface {
 	RenewLease(context.Context, string, string, uint64, time.Time, time.Time) (Deployment, error)
 }
 
-type ApplicationLookup interface {
-	Exists(context.Context, string) (bool, error)
-}
-
-type EnvironmentLookup interface {
-	Exists(context.Context, string) (bool, error)
-}
-
 func New(applicationID, environmentID, revision, id string, now time.Time) (Deployment, error) {
 	applicationID = strings.TrimSpace(applicationID)
 	environmentID = strings.TrimSpace(environmentID)

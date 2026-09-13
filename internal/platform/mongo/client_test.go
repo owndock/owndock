@@ -1193,7 +1193,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 
 	deploymentStore := deploymentdata.NewMongoRepository(client.Database())
-	deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+	deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, id.New, time.Now).
 		WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlPlaneStore)).
 		WithFormalSecurity(client, auditStore).
 		WithAdmissionEvaluator(staticAdmissionEvaluator{stage: "production"})
@@ -3634,7 +3634,7 @@ func verifyBuildSourceRepositoryIntegration(
 	).WithArtifactReleases(controlStore)
 	deploymentStore := deploymentdata.NewMongoRepository(database)
 	deploymentReferences := deploymentdata.NewFormalReferenceLookup(controlStore)
-	automaticDeployments := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+	automaticDeployments := deploymentbiz.NewUseCase(deploymentStore, id.New, time.Now).
 		WithFormalReferences(deploymentReferences).
 		WithAutomaticReferences(deploymentReferences).
 		WithFormalSecurity(client, platformaudit.NewMongoStore(database)).

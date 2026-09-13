@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, digest-bound Artifact Evidence, vulnerability waivers, versioned restricted Deployment Policies and immutable admission snapshots, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Top-level Application, Environment, and Deployment operations remain disabled engineering samples.
+  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, digest-bound Artifact Evidence, vulnerability waivers, versioned restricted Deployment Policies and immutable admission snapshots, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Application, Environment, and Deployment operations exist only under an authenticated Project scope.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -3201,120 +3201,6 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
-  /api/v1/applications:
-    parameters:
-      - $ref: "#/components/parameters/RequestID"
-    get:
-      tags: [Applications]
-      operationId: listApplications
-      summary: List applications
-      responses:
-        "200":
-          $ref: "#/components/responses/ApplicationList"
-        "500":
-          $ref: "#/components/responses/APIError"
-    post:
-      tags: [Applications]
-      operationId: createApplication
-      summary: Create an application
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateApplicationRequest"
-      responses:
-        "201":
-          $ref: "#/components/responses/ApplicationCreated"
-        "400":
-          $ref: "#/components/responses/APIError"
-        "409":
-          $ref: "#/components/responses/APIError"
-        "415":
-          $ref: "#/components/responses/APIError"
-        "422":
-          $ref: "#/components/responses/APIError"
-        "500":
-          $ref: "#/components/responses/APIError"
-  /api/v1/environments:
-    parameters:
-      - $ref: "#/components/parameters/RequestID"
-    get:
-      tags: [Environments]
-      operationId: listEnvironments
-      summary: List environments
-      responses:
-        "200":
-          $ref: "#/components/responses/EnvironmentList"
-        "500":
-          $ref: "#/components/responses/APIError"
-    post:
-      tags: [Environments]
-      operationId: createEnvironment
-      summary: Create an environment
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateEnvironmentRequest"
-      responses:
-        "201":
-          $ref: "#/components/responses/EnvironmentCreated"
-        "400":
-          $ref: "#/components/responses/APIError"
-        "409":
-          $ref: "#/components/responses/APIError"
-        "415":
-          $ref: "#/components/responses/APIError"
-        "422":
-          $ref: "#/components/responses/APIError"
-        "500":
-          $ref: "#/components/responses/APIError"
-  /api/v1/deployments:
-    parameters:
-      - $ref: "#/components/parameters/RequestID"
-    get:
-      tags: [Deployments]
-      operationId: listDeployments
-      summary: List deployments
-      parameters:
-        - name: application_id
-          in: query
-          required: false
-          schema:
-            type: string
-        - name: environment_id
-          in: query
-          required: false
-          schema:
-            type: string
-      responses:
-        "200":
-          $ref: "#/components/responses/DeploymentList"
-        "500":
-          $ref: "#/components/responses/APIError"
-    post:
-      tags: [Deployments]
-      operationId: createDeployment
-      summary: Create a deployment
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: "#/components/schemas/CreateDeploymentRequest"
-      responses:
-        "201":
-          $ref: "#/components/responses/DeploymentCreated"
-        "400":
-          $ref: "#/components/responses/APIError"
-        "415":
-          $ref: "#/components/responses/APIError"
-        "422":
-          $ref: "#/components/responses/APIError"
-        "500":
-          $ref: "#/components/responses/APIError"
 components:
   securitySchemes:
     bearerAuth:
@@ -4451,81 +4337,6 @@ components:
               next_cursor:
                 type: string
                 minLength: 1
-    ApplicationList:
-      description: Application collection.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            type: object
-            additionalProperties: false
-            required: [items]
-            properties:
-              items:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Application"
-    ApplicationCreated:
-      description: Application created.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Application"
-    EnvironmentList:
-      description: Environment collection.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            type: object
-            additionalProperties: false
-            required: [items]
-            properties:
-              items:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Environment"
-    EnvironmentCreated:
-      description: Environment created.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Environment"
-    DeploymentList:
-      description: Deployment collection.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            type: object
-            additionalProperties: false
-            required: [items]
-            properties:
-              items:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Deployment"
-    DeploymentCreated:
-      description: Deployment created.
-      headers:
-        X-Request-ID:
-          $ref: "#/components/headers/RequestID"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Deployment"
     APIError:
       description: Request failed. The safe message is localized from Accept-Language; clients branch on the stable error.code, never on message text.
       headers:
@@ -6995,43 +6806,6 @@ components:
         credential_ref:
           type: string
           pattern: "^secret://[a-z0-9][a-z0-9-]{0,62}$"
-    Application:
-      type: object
-      additionalProperties: false
-      required: [id, name, status, created_at]
-      properties:
-        id:
-          type: string
-          minLength: 1
-        name:
-          type: string
-          minLength: 1
-        status:
-          type: string
-          enum: [pending, ready, failed]
-        created_at:
-          type: string
-          format: date-time
-    Environment:
-      type: object
-      additionalProperties: false
-      required: [id, name, provider, status, created_at]
-      properties:
-        id:
-          type: string
-          minLength: 1
-        name:
-          type: string
-          minLength: 1
-        provider:
-          type: string
-          minLength: 1
-        status:
-          type: string
-          enum: [active, draining, deleted]
-        created_at:
-          type: string
-          format: date-time
     ProjectEnvironment:
       type: object
       additionalProperties: false
@@ -7238,44 +7012,6 @@ components:
         updated_at:
           type: string
           format: date-time
-    Deployment:
-      type: object
-      additionalProperties: false
-      required: [id, application_id, environment_id, revision, status, created_at]
-      properties:
-        id:
-          type: string
-          minLength: 1
-        application_id:
-          type: string
-          minLength: 1
-        environment_id:
-          type: string
-          minLength: 1
-        revision:
-          type: string
-        status:
-          type: string
-          enum: [queued, preparing, deploying, succeeded, failed, canceled]
-        created_at:
-          type: string
-          format: date-time
-    CreateApplicationRequest:
-      type: object
-      additionalProperties: false
-      required: [name]
-      properties:
-        name:
-          type: string
-    CreateEnvironmentRequest:
-      type: object
-      additionalProperties: false
-      required: [name, provider]
-      properties:
-        name:
-          type: string
-        provider:
-          type: string
     CreateProjectEnvironmentRequest:
       type: object
       additionalProperties: false
@@ -7319,17 +7055,6 @@ components:
         release_id:
           type: string
           minLength: 1
-    CreateDeploymentRequest:
-      type: object
-      additionalProperties: false
-      required: [application_id, environment_id]
-      properties:
-        application_id:
-          type: string
-        environment_id:
-          type: string
-        revision:
-          type: string
     RuntimeInventoryState:
       type: object
       additionalProperties: false

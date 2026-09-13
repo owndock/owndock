@@ -107,7 +107,6 @@ const (
 type Config struct {
 	Server        Server        `json:"server"`
 	Observability Observability `json:"observability"`
-	Development   Development   `json:"development"`
 	Database      Database      `json:"database"`
 	Product       Product       `json:"product"`
 	Runtime       Runtime       `json:"runtime"`
@@ -149,12 +148,6 @@ type Tracing struct {
 	Endpoint    string  `json:"endpoint"`
 	Insecure    bool    `json:"insecure"`
 	SampleRatio float64 `json:"sample_ratio"`
-}
-
-// Development contains explicitly non-production switches. Features in this
-// section must remain disabled in the checked-in default configuration.
-type Development struct {
-	EnableEngineeringSamples bool `json:"enable_engineering_samples"`
 }
 
 type Product struct {

@@ -8,9 +8,6 @@ import (
 	"github.com/go-kratos/kratos/v2/log"
 	kratoshttp "github.com/go-kratos/kratos/v2/transport/http"
 
-	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
-	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
-	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	"github.com/owndock/owndock/internal/modules/meta"
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
 	"github.com/owndock/owndock/internal/platform/health"
@@ -21,14 +18,6 @@ import (
 )
 
 const apiV1 = "/api/v1"
-
-// EngineeringSamples groups replaceable technical examples that are not
-// accepted product modules. A nil value keeps every sample route unregistered.
-type EngineeringSamples struct {
-	Application *applicationservice.HTTP
-	Environment *environmentservice.HTTP
-	Deployment  *deploymentservice.HTTP
-}
 
 type ProductAPI struct {
 	identity             http.Handler
@@ -297,7 +286,6 @@ func NewHTTPServer(
 	cfg platformconfig.HTTP,
 	healthChecker *health.Checker,
 	metaService *meta.Service,
-	samples *EngineeringSamples,
 	productAPI *ProductAPI,
 	metrics *observability.Metrics,
 	tracing *observability.Tracing,
@@ -343,14 +331,6 @@ func NewHTTPServer(
 		srv.HandlePrefix(apiV1+"/managed-hosts/", productAPI)
 		srv.Handle(apiV1+"/terminal-policy", productAPI)
 		srv.HandlePrefix(apiV1+"/terminal-sessions/", productAPI)
-	}
-	if samples != nil {
-		if samples.Application == nil || samples.Environment == nil || samples.Deployment == nil {
-			return nil, fmt.Errorf("engineering sample services must be provided together")
-		}
-		srv.HandleFunc(apiV1+"/applications", samples.Application.Handle)
-		srv.HandleFunc(apiV1+"/environments", samples.Environment.Handle)
-		srv.HandleFunc(apiV1+"/deployments", samples.Deployment.Handle)
 	}
 	return srv, nil
 }

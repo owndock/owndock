@@ -175,7 +175,7 @@ func run(ctx context.Context, arguments []string) error {
 	).WithArtifactReleases(controlPlaneStore)
 	deploymentStore := deploymentdata.NewMongoRepository(client.Database())
 	deploymentReferences := deploymentdata.NewFormalReferenceLookup(controlPlaneStore)
-	deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+	deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, id.New, time.Now).
 		WithFormalReferences(deploymentReferences).
 		WithAutomaticReferences(deploymentReferences).
 		WithFormalSecurity(client, auditStore)

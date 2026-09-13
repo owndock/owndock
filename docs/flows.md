@@ -627,4 +627,4 @@ stateDiagram-v2
 - 当前正式持久化资源：Organization、User、User Invitation、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Member、Project Application（含可选 Template 快照）、Repository Credential、Source Repository、Build Configuration、Build Trigger、Build Hook、Webhook Delivery、Build（含状态/lease/fence）、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event；内置 Template Catalog 随 Server 版本只读发布。
 - Runtime Target 只保存连接元数据和 `credential_ref`，不保存凭据正文；显式探测会更新 `ready`、`unreachable` 或 `credential_error` 及探测时间。
 - Git 自建 CA/代理矩阵、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；只读内置 Template 与 Application 脱钩快照已经落地。独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
-- 顶层 Application、Environment、Deployment 路由是默认关闭的工程样例，与正式 Project 范围 API 相互隔离。
+- 早期顶层 Application、Environment、Deployment 样例路由已经删除；所有同名产品资源仅通过正式 Project 范围 API 提供。

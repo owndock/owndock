@@ -6,6 +6,7 @@ BUILD_TIME ?= $(shell git show -s --format=%cI HEAD 2>/dev/null || date -u +%Y-%
 LDFLAGS := -X main.version=$(VERSION) -X main.commit=$(COMMIT) -X main.buildTime=$(BUILD_TIME)
 GOVULNCHECK_VERSION := v1.6.0
 OASDIFF_VERSION := v1.25.0
+OASDIFF_BREAKING_ALLOWLIST ?= .github/oasdiff-breaking-allowlist.md
 ACTIONLINT_VERSION := v1.7.12
 AGENT_GOOS ?= linux
 AGENT_GOARCH ?= amd64
@@ -277,7 +278,8 @@ api-validate:
 
 api-breaking:
 	@test -n "$(BASE_SPEC)" || (echo "BASE_SPEC is required, for example main:api/openapi.yaml" && exit 2)
-	go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) breaking --allow-external-refs=false --fail-on ERR "$(BASE_SPEC)" api/openapi.yaml
+	go run github.com/oasdiff/oasdiff@$(OASDIFF_VERSION) breaking --allow-external-refs=false --fail-on ERR \
+		--err-ignore $(OASDIFF_BREAKING_ALLOWLIST) "$(BASE_SPEC)" api/openapi.yaml
 
 check: fmt-check mod-verify vet test workflow-validate api-validate build
 

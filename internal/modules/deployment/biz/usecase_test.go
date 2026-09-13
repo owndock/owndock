@@ -82,7 +82,7 @@ func TestCreateFormalIsProjectScopedAuditedAndIdempotent(t *testing.T) {
 	references := &referenceProbe{}
 	audits := &auditProbe{}
 	sequence := 0
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		sequence++
 		return fmt.Sprintf("id-%d", sequence), nil
 	}, func() time.Time {
@@ -130,7 +130,7 @@ func TestCreateFormalFailsWhenProductAdmissionFenceCloses(t *testing.T) {
 	active := false
 	references := &referenceProbe{active: &active}
 	useCase := biz.NewUseCase(
-		repository, nil, nil, func() (string, error) { return "deployment-1", nil },
+		repository, func() (string, error) { return "deployment-1", nil },
 		func() time.Time { return time.Unix(100, 0) },
 	).WithFormalReferences(references).
 		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
@@ -164,7 +164,7 @@ func TestCreateFormalReplaysFrozenAdmissionBeforeReevaluation(t *testing.T) {
 	repository := data.NewMemoryRepository()
 	evaluator := &changingAdmission{}
 	sequence := 0
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		sequence++
 		return fmt.Sprintf("deployment-%d", sequence), nil
 	}, func() time.Time { return time.Unix(100, 0) }).
@@ -193,7 +193,7 @@ func TestCreateFormalReplaysFrozenAdmissionBeforeReevaluation(t *testing.T) {
 }
 
 func TestCreateFormalRequiresDeploymentPermission(t *testing.T) {
-	useCase := biz.NewUseCase(data.NewMemoryRepository(), nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(data.NewMemoryRepository(), func() (string, error) {
 		return "id", nil
 	}, time.Now).WithFormalReferences(&referenceProbe{}).
 		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
@@ -213,7 +213,7 @@ func TestCreateAutomaticIsDevelopmentOnlyAuditedAndIdempotent(t *testing.T) {
 	references := &referenceProbe{}
 	audits := &auditProbe{}
 	sequence := 0
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		sequence++
 		return fmt.Sprintf("automatic-%d", sequence), nil
 	}, func() time.Time { return time.Unix(100, 0) }).
@@ -255,7 +255,7 @@ func TestCancelFormalPersistsAndAuditsCommand(t *testing.T) {
 	repository := data.NewMemoryRepository()
 	audits := &auditProbe{}
 	sequence := 0
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		sequence++
 		return fmt.Sprintf("id-%d", sequence), nil
 	}, func() time.Time { return time.Unix(100, 0) }).
@@ -291,7 +291,7 @@ func TestRetryAndRollbackCreateAuditedLinkedOperations(t *testing.T) {
 	audits := &auditProbe{}
 	sequence := 0
 	now := time.Unix(100, 0)
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		sequence++
 		return fmt.Sprintf("id-%d", sequence), nil
 	}, func() time.Time { return now }).
@@ -378,7 +378,7 @@ func TestRetryAndRollbackCreateAuditedLinkedOperations(t *testing.T) {
 
 func TestRollbackRequiresMaintainerAndPreviouslySuccessfulRelease(t *testing.T) {
 	repository := data.NewMemoryRepository()
-	useCase := biz.NewUseCase(repository, nil, nil, func() (string, error) {
+	useCase := biz.NewUseCase(repository, func() (string, error) {
 		return "new-id", nil
 	}, func() time.Time { return time.Unix(100, 0) }).
 		WithFormalReferences(&referenceProbe{}).

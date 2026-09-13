@@ -13,9 +13,6 @@ import (
 	"github.com/go-kratos/kratos/v2/transport"
 
 	serverapp "github.com/owndock/owndock/internal/app"
-	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
-	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
-	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
@@ -27,9 +24,6 @@ import (
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
 	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
 	deploymentworker "github.com/owndock/owndock/internal/modules/deployment/worker"
-	environmentbiz "github.com/owndock/owndock/internal/modules/environment/biz"
-	environmentdata "github.com/owndock/owndock/internal/modules/environment/data"
-	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	identitybiz "github.com/owndock/owndock/internal/modules/identity/biz"
 	identitydata "github.com/owndock/owndock/internal/modules/identity/data"
 	identityservice "github.com/owndock/owndock/internal/modules/identity/service"
@@ -110,22 +104,6 @@ func run() error {
 		Commit:    commit,
 		BuildTime: buildTime,
 	})
-	var engineeringSamples *server.EngineeringSamples
-	if cfg.Development.EnableEngineeringSamples {
-		applicationRepository := applicationdata.NewMemoryRepository()
-		environmentRepository := environmentdata.NewMemoryRepository()
-		engineeringSamples = &server.EngineeringSamples{
-			Application: applicationservice.NewHTTP(applicationbiz.NewUseCase(applicationRepository, id.New, time.Now)),
-			Environment: environmentservice.NewHTTP(environmentbiz.NewUseCase(environmentRepository, id.New, time.Now)),
-			Deployment: deploymentservice.NewHTTP(deploymentbiz.NewUseCase(
-				deploymentdata.NewMemoryRepository(),
-				deploymentdata.NewApplicationLookup(applicationRepository),
-				deploymentdata.NewEnvironmentLookup(environmentRepository),
-				id.New,
-				time.Now,
-			)),
-		}
-	}
 	metrics := observability.NewMetrics()
 	tracing, err := observability.NewTracing(context.Background(), cfg.Observability.Tracing, serviceName, version, instanceID)
 	if err != nil {
@@ -369,7 +347,7 @@ func run() error {
 		}
 		deploymentStore := deploymentdata.NewMongoRepository(mongoClient.Database())
 		deploymentReferences := deploymentdata.NewFormalReferenceLookup(controlPlaneStore)
-		deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, nil, nil, id.New, time.Now).
+		deploymentUseCase := deploymentbiz.NewUseCase(deploymentStore, id.New, time.Now).
 			WithFormalReferences(deploymentReferences).
 			WithAutomaticReferences(deploymentReferences).
 			WithFormalSecurity(mongoClient, auditStore)
@@ -1011,7 +989,6 @@ func run() error {
 		cfg.Server.HTTP,
 		healthChecker,
 		metaService,
-		engineeringSamples,
 		productAPI,
 		metrics,
 		tracing,

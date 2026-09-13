@@ -16,9 +16,6 @@ import (
 
 	"github.com/go-kratos/kratos/v2/log"
 
-	applicationbiz "github.com/owndock/owndock/internal/modules/application/biz"
-	applicationdata "github.com/owndock/owndock/internal/modules/application/data"
-	applicationservice "github.com/owndock/owndock/internal/modules/application/service"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
@@ -27,9 +24,6 @@ import (
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
 	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
-	environmentbiz "github.com/owndock/owndock/internal/modules/environment/biz"
-	environmentdata "github.com/owndock/owndock/internal/modules/environment/data"
-	environmentservice "github.com/owndock/owndock/internal/modules/environment/service"
 	identitybiz "github.com/owndock/owndock/internal/modules/identity/biz"
 	identityservice "github.com/owndock/owndock/internal/modules/identity/service"
 	managedhostbiz "github.com/owndock/owndock/internal/modules/managedhost/biz"
@@ -156,7 +150,7 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		managedHostStore, transaction.Passthrough{}, audits, newID, now,
 	))
 	formalDeploymentHTTP := deploymentservice.NewHTTP(
-		deploymentbiz.NewUseCase(deploymentdata.NewMemoryRepository(), nil, nil, newID, now).
+		deploymentbiz.NewUseCase(deploymentdata.NewMemoryRepository(), newID, now).
 			WithFormalReferences(deploymentdata.NewFormalReferenceLookup(controlStore)).
 			WithFormalSecurity(transaction.Passthrough{}, audits).
 			WithAdmissionEvaluator(contractAdmissionEvaluator{now: now}),
@@ -304,19 +298,6 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		t.Fatalf("WithIngressProtection() error = %v", err)
 	}
 
-	applications := applicationdata.NewMemoryRepository()
-	environments := environmentdata.NewMemoryRepository()
-	samples := &EngineeringSamples{
-		Application: applicationservice.NewHTTP(applicationbiz.NewUseCase(applications, newID, now)),
-		Environment: environmentservice.NewHTTP(environmentbiz.NewUseCase(environments, newID, now)),
-		Deployment: deploymentservice.NewHTTP(deploymentbiz.NewUseCase(
-			deploymentdata.NewMemoryRepository(),
-			deploymentdata.NewApplicationLookup(applications),
-			deploymentdata.NewEnvironmentLookup(environments),
-			newID,
-			now,
-		)),
-	}
 	checker := health.NewChecker()
 	checker.SetReady(true)
 	tracing, err := observability.NewTracing(context.Background(), platformconfig.Tracing{}, "owndock", "test", "test-instance")
@@ -327,7 +308,6 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		platformconfig.HTTP{Address: "127.0.0.1:0", Timeout: "1s"},
 		checker,
 		meta.NewService(meta.BuildInfo{Service: "owndock", Version: "test"}),
-		samples,
 		productAPI,
 		observability.NewMetrics(),
 		tracing,

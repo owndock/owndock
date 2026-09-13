@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、Registry `anonymous/basic` 显式认证、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 与 OwnDock Registry 客户端已经支持显式自建 CA；Registry 代理、品牌和客户网络兼容矩阵尚未完成，BuildKit/Docker daemon 的 Registry CA 仍由各守护进程独立配置。默认关闭的顶层工程样例不属于正式产品实现。
+产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、Registry `anonymous/basic` 显式认证、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 与 OwnDock Registry 客户端已经支持显式自建 CA；Registry 代理、品牌和客户网络兼容矩阵尚未完成，BuildKit/Docker daemon 的 Registry CA 仍由各守护进程独立配置。早期未认证、进程内存实现的顶层资源样例已经删除。
 
 平台触发链也已落地：通用 Trigger Token 适合任意能发出 HTTPS 请求的自动化系统；GitHub、GitLab、Gitea 和 Forgejo 使用独立 Build Hook。Build Hook 固定平台、Build Configuration 和允许 ref，使用与 Git 读取凭据分离的 Secret 引用，先对原始 body 验签再解析，并按 delivery 长期去重。
 
@@ -108,11 +108,11 @@ Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一�
 
 ## API 契约
 
-`api/openapi.yaml` 是发布前 HTTP 行为的机器可读契约，覆盖运维接口、首个正式产品切片和当前工程样例；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。正式切片 operation 已具备 Organization 所有权、内置角色授权、审计和 MongoDB 持久化，但在首个端到端部署用例完成前仍标记为 pre-release。Handler 显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
+`api/openapi.yaml` 是发布前 HTTP 行为的机器可读契约，覆盖运维接口和正式产品切片；Prometheus `/metrics` 使用其自身 exposition 协议，不纳入 OpenAPI。正式切片 operation 已具备 Organization 所有权、内置角色授权、审计和 MongoDB 持久化，但在首个端到端部署用例完成前仍标记为 pre-release。Handler 显式完成 DTO 与领域对象转换，不把 OpenAPI schema 当作领域或持久化模型。
 
 REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session Cookie。浏览器跨域默认拒绝，只接受 `server.http.cors_allowed_origins` 中不含通配符的精确 HTTPS Origin；loopback HTTP 仅供本机开发。跨域响应不启用 credentials，预检方法和 Header 使用封闭集合。所有 `/api/` 响应 `no-store`，并设置 API 专用 CSP、nosniff、frame deny、no-referrer 和权限策略。独立 Web 前端需要配置适合自身资源的 CSP，公网 HSTS 由实际 TLS 终止层负责。Terminal 的一次性 HttpOnly Cookie 与 WSS 严格同域 Origin 校验是独立安全边界，不能从 REST CORS 配置推导权限。完整客户规则见[浏览器接入 API](browser-api-security.md)。
 
-契约文件必须通过 oasdiff 严格校验，真实 Handler 的请求与响应必须通过 kin-openapi 契约测试。工程样例在产品接受前允许显式删除或重塑；正式 operation 则执行 breaking-change 门禁，不兼容变更进入新的 API 主版本并记录迁移窗口。
+契约文件必须通过 oasdiff 严格校验，真实 Handler 的请求与响应必须通过 kin-openapi 契约测试。正式 operation 执行 breaking-change 门禁，不兼容变更进入新的 API 主版本并记录迁移窗口。`.github/oasdiff-breaking-allowlist.md` 只记录已接受的一次性样例退役，不得作为正式 operation 的通用绕过机制。
 
 ## MongoDB 平台边界
 

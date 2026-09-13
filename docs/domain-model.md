@@ -103,9 +103,7 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 这些能力不能通过占位路由、假状态或工程样例提前声明为可用。
 
-## 工程样例边界
-
-顶层 Application、Environment、Deployment 路由由开发配置显式启用，使用进程内存仓储且没有认证授权。它们仅用于验证 `service → biz.UseCase → Repository/Gateway` 依赖方向，不能进入共享或生产网络，也不能作为正式 Project API 的兼容入口。
+早期未认证、进程内存实现的顶层 Application、Environment、Deployment 路由已经删除。领域能力只通过正式 Project 范围 API 暴露，并统一满足所有权、授权、持久化和审计约束。
 
 正式 HTTP Service 使用独立响应 DTO，领域实体不声明 JSON tag。Deployment 的内部 `Version`、`Lease.Owner`、`Lease.ExpiresAt`、`CutoverSequence` 与 Agent token/certificate hash 不属于普通公开 API；Mongo BSON 映射由 data adapter 独立定义。
 
@@ -117,6 +115,6 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 4. 按独立构建信任边界实现 Git-to-Deploy，不在 API Server 或生产 Runtime Target 内执行不可信 Dockerfile；
 5. 在已完成 Terminal 控制面、direct/Agent 容器与主机 Gateway、活动撤权和 WSS 安全链路上继续完成真实远程与浏览器系统验收；
 6. 建立密码恢复/OIDC、Template 商业治理扩展和生产安全告警能力；
-7. 完成远程 mTLS Engine、真实代理入口压力、网络故障注入后移除或重塑工程样例。
+7. 完成远程 mTLS Engine、真实代理入口压力和网络故障注入验收。
 
 当前和目标链路的时序见 [flows.md](flows.md)。
