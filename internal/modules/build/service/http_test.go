@@ -60,6 +60,12 @@ func (serviceProjects) ApplicationExists(context.Context, string, string) (bool,
 	return true, nil
 }
 
+func (serviceProjects) FenceProductResourceAdmission(
+	context.Context, string, string, string,
+) (bool, error) {
+	return true, nil
+}
+
 func (serviceProjects) RegistryServer(context.Context, string, string) (string, error) {
 	return "registry.example.com", nil
 }

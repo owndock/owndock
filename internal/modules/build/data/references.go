@@ -11,6 +11,7 @@ import (
 
 type configurationReferenceSource interface {
 	ApplicationExists(context.Context, string, string) (bool, error)
+	FenceProductResourceAdmission(context.Context, string, string, string) (bool, error)
 	GetRegistryCredential(context.Context, string, string) (controlplanebiz.RegistryCredential, error)
 	EnvironmentStage(context.Context, string, string) (string, error)
 	RuntimeTargetExists(context.Context, string, string) (bool, error)
@@ -59,6 +60,15 @@ func (l *ConfigurationReferenceLookup) ApplicationExists(
 	projectID, applicationID string,
 ) (bool, error) {
 	return l.source.ApplicationExists(ctx, projectID, applicationID)
+}
+
+func (l *ConfigurationReferenceLookup) FenceProductResourceAdmission(
+	ctx context.Context,
+	projectID, applicationID, environmentID string,
+) (bool, error) {
+	return l.source.FenceProductResourceAdmission(
+		ctx, projectID, applicationID, environmentID,
+	)
 }
 
 func (l *ConfigurationReferenceLookup) RegistryServer(
@@ -172,6 +182,7 @@ func (a *ArtifactReleaseAdapter) CreateArtifactRelease(
 
 var (
 	_ biz.ApplicationLookup                  = (*ConfigurationReferenceLookup)(nil)
+	_ biz.ProductResourceAdmissionFence      = (*ConfigurationReferenceLookup)(nil)
 	_ biz.RegistryCredentialLookup           = (*ConfigurationReferenceLookup)(nil)
 	_ biz.AutomaticDeploymentReferenceLookup = (*ConfigurationReferenceLookup)(nil)
 	_ biz.BuildRegistrySource                = (*BuildRegistrySourceAdapter)(nil)

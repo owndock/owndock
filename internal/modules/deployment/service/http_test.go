@@ -28,6 +28,11 @@ func (formalReferences) ValidateProject(context.Context, string, string) error {
 func (r formalReferences) Validate(context.Context, string, string, string, string, string) error {
 	return r.validateErr
 }
+func (formalReferences) FenceProductResourceAdmission(
+	context.Context, string, string, string,
+) (bool, error) {
+	return true, nil
+}
 
 type auditRecorder struct{}
 

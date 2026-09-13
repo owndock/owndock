@@ -75,6 +75,44 @@ func TestAcceptedProductResourceFlow(t *testing.T) {
 	}
 }
 
+func TestReleaseCreationFailsWhenApplicationAdmissionFenceCloses(t *testing.T) {
+	active := false
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		applications: []Application{{
+			ID: "application-1", ProjectID: "project-1", Status: ProductResourceStatusActive,
+		}},
+		admissionActive: &active,
+	}
+	audits := &fakeAudits{}
+	useCase := NewUseCase(
+		store, store, store, store, transaction.Passthrough{}, audits, audits,
+		func() (string, error) { return "release-1", nil }, time.Now,
+	)
+	principal := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleOwner,
+	}
+	if _, err := useCase.CreateRelease(
+		t.Context(), principal, "project-1", "application-1",
+		"registry.example.com/team/api@sha256:"+strings.Repeat("a", 64), "request-1",
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("closed Application fence error = %v", err)
+	}
+	if len(store.releases) != 0 || len(audits.events) != 0 {
+		t.Fatalf("release or audit persisted after closed fence: %+v / %+v", store.releases, audits.events)
+	}
+
+	fenceFailure := errors.New("fence unavailable")
+	store.admissionErr = fenceFailure
+	if _, err := useCase.CreateRelease(
+		t.Context(), principal, "project-1", "application-1",
+		"registry.example.com/team/api@sha256:"+strings.Repeat("b", 64), "request-2",
+	); !errors.Is(err, fenceFailure) {
+		t.Fatalf("fence failure = %v", err)
+	}
+}
+
 type runtimeTargetRetirerProbe struct {
 	err    error
 	calls  int
@@ -828,12 +866,14 @@ func TestAgentRuntimeTargetProbeUsesConfiguredProber(t *testing.T) {
 }
 
 type fakeStore struct {
-	projects     []Project
-	applications []Application
-	releases     []Release
-	targets      []RuntimeTarget
-	registries   []RegistryCredential
-	environments []Environment
+	projects        []Project
+	applications    []Application
+	releases        []Release
+	targets         []RuntimeTarget
+	registries      []RegistryCredential
+	environments    []Environment
+	admissionActive *bool
+	admissionErr    error
 }
 
 func (s *fakeStore) ListProjects(_ context.Context, organizationID string) ([]Project, error) {
@@ -910,6 +950,38 @@ func (s *fakeStore) ListReleases(_ context.Context, projectID, applicationID str
 func (s *fakeStore) CreateRelease(_ context.Context, item Release) (Release, error) {
 	s.releases = append(s.releases, item)
 	return item, nil
+}
+
+func (s *fakeStore) FenceProductResourceAdmission(
+	_ context.Context, projectID, applicationID, environmentID string,
+) (bool, error) {
+	if s.admissionErr != nil {
+		return false, s.admissionErr
+	}
+	if s.admissionActive != nil {
+		return *s.admissionActive, nil
+	}
+	applicationActive := false
+	for _, item := range s.applications {
+		if item.ProjectID == projectID && item.ID == applicationID &&
+			(item.Status == "" || item.Status == ProductResourceStatusActive) {
+			applicationActive = true
+			break
+		}
+	}
+	if !applicationActive {
+		return false, nil
+	}
+	if environmentID == "" {
+		return true, nil
+	}
+	for _, item := range s.environments {
+		if item.ProjectID == projectID && item.ID == environmentID &&
+			(item.Status == "" || item.Status == ProductResourceStatusActive) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *fakeStore) GetReleaseByArtifact(_ context.Context, projectID, artifactID string) (Release, error) {

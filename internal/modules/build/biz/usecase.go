@@ -27,6 +27,10 @@ type ApplicationLookup interface {
 	ApplicationExists(context.Context, string, string) (bool, error)
 }
 
+type ProductResourceAdmissionFence interface {
+	FenceProductResourceAdmission(context.Context, string, string, string) (bool, error)
+}
+
 type RegistryCredentialLookup interface {
 	RegistryServer(context.Context, string, string) (string, error)
 }
@@ -127,6 +131,7 @@ type UseCase struct {
 	prober           SourceProber
 	resolver         SourceRevisionResolver
 	applications     ApplicationLookup
+	resourceFence    ProductResourceAdmissionFence
 	registries       RegistryCredentialLookup
 	automation       AutomaticDeploymentReferenceLookup
 	triggerTokens    BuildTriggerTokens
@@ -198,6 +203,16 @@ func (u *UseCase) WithConfigurationReferences(
 ) *UseCase {
 	u.applications = applications
 	u.registries = registries
+	if fence, ok := applications.(ProductResourceAdmissionFence); ok {
+		u.resourceFence = fence
+	}
+	return u
+}
+
+func (u *UseCase) WithProductResourceAdmissionFence(
+	fence ProductResourceAdmissionFence,
+) *UseCase {
+	u.resourceFence = fence
 	return u
 }
 
@@ -927,6 +942,11 @@ func (u *UseCase) RetryBuild(ctx context.Context, principal security.Principal,
 		return Build{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if fenceErr := u.fenceApplicationAdmission(
+			transactionContext, item.ProjectID, item.ApplicationID,
+		); fenceErr != nil {
+			return fenceErr
+		}
 		var createErr error
 		item, createErr = u.repository.CreateBuild(transactionContext, item)
 		if createErr != nil {
@@ -1021,6 +1041,11 @@ func (u *UseCase) TriggerManualBuild(
 		return Build{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if fenceErr := u.fenceApplicationAdmission(
+			transactionContext, item.ProjectID, item.ApplicationID,
+		); fenceErr != nil {
+			return fenceErr
+		}
 		created, createErr := u.repository.CreateBuild(transactionContext, item)
 		if createErr != nil {
 			return createErr
@@ -1264,6 +1289,11 @@ func (u *UseCase) TriggerExternalBuild(
 		return Build{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if fenceErr := u.fenceApplicationAdmission(
+			transactionContext, item.ProjectID, item.ApplicationID,
+		); fenceErr != nil {
+			return fenceErr
+		}
 		created, createErr := u.repository.CreateBuild(transactionContext, item)
 		if createErr != nil {
 			return createErr
@@ -1484,6 +1514,11 @@ func (u *UseCase) HandleWebhook(ctx context.Context, provider WebhookProvider, h
 		BuildID: build.ID, CreatedAt: now,
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if fenceErr := u.fenceApplicationAdmission(
+			transactionContext, build.ProjectID, build.ApplicationID,
+		); fenceErr != nil {
+			return fenceErr
+		}
 		if createErr := u.repository.CreateWebhookDelivery(transactionContext, delivery); createErr != nil {
 			return createErr
 		}
@@ -1630,6 +1665,25 @@ func (u *UseCase) requireProject(
 		return err
 	}
 	if !exists {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (u *UseCase) fenceApplicationAdmission(
+	ctx context.Context,
+	projectID, applicationID string,
+) error {
+	if u.resourceFence == nil {
+		return ErrNotFound
+	}
+	active, err := u.resourceFence.FenceProductResourceAdmission(
+		ctx, projectID, applicationID, "",
+	)
+	if err != nil {
+		return err
+	}
+	if !active {
 		return ErrNotFound
 	}
 	return nil

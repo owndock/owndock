@@ -15,6 +15,7 @@ type ScopedReferenceStore interface {
 	ReleaseExists(context.Context, string, string, string) (bool, error)
 	RuntimeTargetExists(context.Context, string, string) (bool, error)
 	RuntimeTargetReady(context.Context, string, string) (bool, error)
+	FenceProductResourceAdmission(context.Context, string, string, string) (bool, error)
 }
 
 type FormalReferenceLookup struct {
@@ -61,6 +62,15 @@ func (l *FormalReferenceLookup) ValidateProject(ctx context.Context, organizatio
 		return biz.ErrNotFound
 	}
 	return nil
+}
+
+func (l *FormalReferenceLookup) FenceProductResourceAdmission(
+	ctx context.Context,
+	projectID, applicationID, environmentID string,
+) (bool, error) {
+	return l.store.FenceProductResourceAdmission(
+		ctx, projectID, applicationID, environmentID,
+	)
 }
 
 func (l *FormalReferenceLookup) Validate(

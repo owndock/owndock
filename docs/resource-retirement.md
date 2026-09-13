@@ -17,7 +17,7 @@ sequenceDiagram
 
     U->>API: DELETE Application / Environment
     API->>DB: active → retiring + actor/request/started_at
-    Note over DB: 新 Release、Build、Deployment、Terminal 立即失败关闭
+    Note over DB: 新 Release/Build/Deployment/Terminal<br/>事务写 active 父资源 admission revision
     API->>DB: Application 的活动 Build → canceling + audit
     API->>T: 关闭匹配的 pending/open 会话
     API->>D: 将非终态 Deployment 置为 canceling
@@ -59,5 +59,7 @@ Application 的非终态 Build 按最多 100 条的批次进入 `canceling`，�
 历史 Deployment 引用的 Runtime Target 只有在权威控制面确认目标记录已经不存在时才跳过清理，因为目标自身的退役流程已经完成相同的运行排空。目标记录仍存在但处于 `unreachable`、非 ready 或暂时无法解析清理连接时不会被当作已删除，资源保持 `retiring` 并由 Worker 重试。
 
 容器 TerminalSession 创建会在同一 MongoDB 事务中写入 Application/Environment 的内部 admission revision，再写会话与审计。退役状态切换会写同一父文档，因此并发的“最后一次 active 检查”和退役不能同时提交，消除收敛扫描后落入新活动会话的 write-skew 窗口。
+
+Release、Build 和 Deployment 创建也遵循相同的父资源事务围栏：Release/Build 写 active Application 的 `work_admission_revision`，Deployment 同时写 active Application 与 Environment，再创建子记录和审计。MongoDB 写冲突保证“新工作提交”和 `active → retiring` 只能有一个先完成；退役先完成时新工作失败，工作先完成时重试后的退役扫描一定能发现并收敛它。幂等重放已有不可变记录不创建新工作，因此仍可读取原结果。
 
 MongoDB migration v48 为 Application/Environment 增加状态、持久退役队列和 active-only 名称唯一索引；v49 为活动容器会话回填 Application/Environment 归属，并建立两类有界收敛索引；v50 建立 Application 活动 Build 有界收敛索引。

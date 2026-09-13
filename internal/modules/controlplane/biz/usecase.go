@@ -556,6 +556,15 @@ func (u *UseCase) CreateReleaseWithRuntimeSpec(
 		return Release{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		active, fenceErr := u.releases.FenceProductResourceAdmission(
+			transactionContext, projectID, applicationID, "",
+		)
+		if fenceErr != nil {
+			return fenceErr
+		}
+		if !active {
+			return ErrNotFound
+		}
 		created, err := u.releases.CreateRelease(transactionContext, item)
 		if err != nil {
 			return err
@@ -623,6 +632,15 @@ func (u *UseCase) CreateReleaseFromArtifact(ctx context.Context, input ArtifactR
 		return Release{}, err
 	}
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		active, fenceErr := u.releases.FenceProductResourceAdmission(
+			transactionContext, input.ProjectID, input.ApplicationID, "",
+		)
+		if fenceErr != nil {
+			return fenceErr
+		}
+		if !active {
+			return ErrNotFound
+		}
 		created, createErr := u.releases.CreateRelease(transactionContext, item)
 		if createErr != nil {
 			return createErr

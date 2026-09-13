@@ -25,6 +25,7 @@ type UseCase struct {
 	transaction         transaction.Manager
 	audit               sharedaudit.Recorder
 	admission           AdmissionEvaluator
+	resourceFence       ProductResourceAdmissionFence
 	newID               IDGenerator
 	now                 Clock
 }
@@ -39,6 +40,10 @@ type FormalReferenceLookup interface {
 	Validate(context.Context, string, string, string, string, string) error
 }
 
+type ProductResourceAdmissionFence interface {
+	FenceProductResourceAdmission(context.Context, string, string, string) (bool, error)
+}
+
 type AutomaticReferenceLookup interface {
 	ValidateProject(context.Context, string, string) error
 	ValidateAutomatic(context.Context, string, string, string, string, string) error
@@ -46,11 +51,17 @@ type AutomaticReferenceLookup interface {
 
 func (u *UseCase) WithFormalReferences(references FormalReferenceLookup) *UseCase {
 	u.formalReferences = references
+	if fence, ok := references.(ProductResourceAdmissionFence); ok {
+		u.resourceFence = fence
+	}
 	return u
 }
 
 func (u *UseCase) WithAutomaticReferences(references AutomaticReferenceLookup) *UseCase {
 	u.automaticReferences = references
+	if fence, ok := references.(ProductResourceAdmissionFence); ok {
+		u.resourceFence = fence
+	}
 	return u
 }
 
@@ -416,6 +427,18 @@ func (u *UseCase) persistFormal(
 	}
 	now := u.now().UTC()
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if u.resourceFence == nil {
+			return ErrReferenceLookup
+		}
+		active, fenceErr := u.resourceFence.FenceProductResourceAdmission(
+			transactionContext, item.ProjectID, item.ApplicationID, item.EnvironmentID,
+		)
+		if fenceErr != nil {
+			return fenceErr
+		}
+		if !active {
+			return ErrApplicationNotFound
+		}
 		created, createErr := u.repo.Create(transactionContext, item)
 		if createErr != nil {
 			return createErr

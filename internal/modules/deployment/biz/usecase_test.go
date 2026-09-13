@@ -18,6 +18,8 @@ import (
 type referenceProbe struct {
 	calls        int
 	automaticErr error
+	active       *bool
+	fenceErr     error
 }
 
 func (p *referenceProbe) ValidateProject(context.Context, string, string) error { return nil }
@@ -28,6 +30,17 @@ func (p *referenceProbe) Validate(context.Context, string, string, string, strin
 func (p *referenceProbe) ValidateAutomatic(context.Context, string, string, string, string, string) error {
 	p.calls++
 	return p.automaticErr
+}
+func (p *referenceProbe) FenceProductResourceAdmission(
+	context.Context, string, string, string,
+) (bool, error) {
+	if p.fenceErr != nil {
+		return false, p.fenceErr
+	}
+	if p.active != nil {
+		return *p.active, nil
+	}
+	return true, nil
 }
 
 type auditProbe struct{ events []sharedaudit.Event }
@@ -109,6 +122,41 @@ func TestCreateFormalIsProjectScopedAuditedAndIdempotent(t *testing.T) {
 	if len(audits.events) != 1 || audits.events[0].Action != biz.AuditActionCreate ||
 		audits.events[0].ProjectID != "project-1" {
 		t.Fatalf("audit events = %+v", audits.events)
+	}
+}
+
+func TestCreateFormalFailsWhenProductAdmissionFenceCloses(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	active := false
+	references := &referenceProbe{active: &active}
+	useCase := biz.NewUseCase(
+		repository, nil, nil, func() (string, error) { return "deployment-1", nil },
+		func() time.Time { return time.Unix(100, 0) },
+	).WithFormalReferences(references).
+		WithFormalSecurity(transaction.Passthrough{}, &auditProbe{}).
+		WithAdmissionEvaluator(allowAdmission{})
+	principal := security.Principal{
+		UserID: "user-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleDeveloper,
+	}
+	if _, err := useCase.CreateFormal(
+		t.Context(), principal, "project-1", "release-1", "app-1", "env-1",
+		"target-1", "request-1", "trace-1",
+	); !errors.Is(err, biz.ErrApplicationNotFound) {
+		t.Fatalf("closed product resource fence error = %v", err)
+	}
+	items, err := repository.List(t.Context(), "project-1", "app-1", "env-1")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("Deployment persisted after closed fence: %+v/%v", items, err)
+	}
+
+	fenceFailure := errors.New("fence unavailable")
+	references.fenceErr = fenceFailure
+	if _, err := useCase.CreateFormal(
+		t.Context(), principal, "project-1", "release-1", "app-1", "env-1",
+		"target-1", "request-2", "trace-2",
+	); !errors.Is(err, fenceFailure) {
+		t.Fatalf("fence failure = %v", err)
 	}
 }
 

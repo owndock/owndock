@@ -491,6 +491,46 @@ func (s *MongoStore) EnvironmentExists(ctx context.Context, projectID, environme
 	return count == 1, nil
 }
 
+// FenceProductResourceAdmission writes the active parent documents in the
+// caller's transaction. A concurrent retirement writes the same documents,
+// so MongoDB can commit either the admitted child or the retirement fence,
+// never a child based on a stale active check after retirement.
+func (s *MongoStore) FenceProductResourceAdmission(
+	ctx context.Context,
+	projectID, applicationID, environmentID string,
+) (bool, error) {
+	parents := []struct {
+		collection *mongo.Collection
+		id         string
+	}{
+		{collection: s.applications, id: applicationID},
+	}
+	if environmentID != "" {
+		parents = append(parents, struct {
+			collection *mongo.Collection
+			id         string
+		}{collection: s.environments, id: environmentID})
+	}
+	for _, parent := range parents {
+		result, err := parent.collection.UpdateOne(
+			ctx,
+			bson.D{
+				{Key: "_id", Value: parent.id},
+				{Key: "project_id", Value: projectID},
+				{Key: "status", Value: biz.ProductResourceStatusActive},
+			},
+			bson.D{{Key: "$inc", Value: bson.D{{Key: "work_admission_revision", Value: 1}}}},
+		)
+		if err != nil {
+			return false, fmt.Errorf("fence product resource admission: %w", err)
+		}
+		if result.MatchedCount != 1 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 func (s *MongoStore) EnvironmentExecution(
 	ctx context.Context,
 	projectID, environmentID string,

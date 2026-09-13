@@ -80,7 +80,7 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
 - Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式探测只公开安全状态；删除先持久化 `retiring` 关闭 ready 门禁，再收敛容器 TerminalSession、清除可重建 Runtime Inventory、排空 Deployment、删除精确运行资源并回收 Agent 水位；
 - Environment 内部保存运行变量绑定，但公开 API 只返回排序后的 `variable_keys`，不回传明文值或 `secret://` 引用；
-- Application 与 Environment 使用 `active → retiring → retired` 持久生命周期。退役立即关闭新工作入口，后台按部署槽位清理运行实例和 Terminal 会话，但保留不可变 Release、Build、Deployment 与 Audit 历史；详见 [resource-retirement.md](resource-retirement.md)；
+- Application 与 Environment 使用 `active → retiring → retired` 持久生命周期。Release、Build、Deployment 与容器 Terminal 创建会在同一事务写 active 父资源 admission revision，不能越过并发退役围栏；后台按部署槽位清理运行实例和 Terminal 会话，但保留不可变 Release、Build、Deployment 与 Audit 历史；详见 [resource-retirement.md](resource-retirement.md)；
 - Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；`trigger_source` 区分 manual/automatic，自动记录来源 Artifact、Build 和 Build Configuration；受管 Worker 使用原子领取、租约 heartbeat、同 Deployment generation fence、跨 Deployment cutover sequence 和安全失败分类；
 - Session 只保存 access token 的单向哈希；每个用户的活跃 Session 数有配置上限，用户可治理自己的 Session，Owner 可治理同一 Organization 成员的 Session；删除与 Audit Event 在同一 MongoDB 事务中提交，所有列表都排除 Token/hash；
 - 登录尝试按 normalized email 的 SHA-256 键在 MongoDB 共享计数，达到配置阈值后返回统一 `429` 和 `Retry-After`；正确登录清理计数，TTL 回收过期窗口。

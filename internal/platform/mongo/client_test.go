@@ -1584,6 +1584,20 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create retiring Environment fixture: %v", err)
 	}
+	if err := client.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		active, fenceErr := controlPlaneStore.FenceProductResourceAdmission(
+			transactionContext, project.ID, retiringApplication.ID, retiringEnvironment.ID,
+		)
+		if fenceErr != nil {
+			return fenceErr
+		}
+		if !active {
+			return errors.New("active product resource admission fence was closed")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("fence active product resources: %v", err)
+	}
 	resourceRetirement := controlplanebiz.ProductResourceRetirement{
 		OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
 		RequestID: "resource-retirement-request", StartedAt: time.Now().UTC(),
@@ -1613,6 +1627,16 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	}
 	if exists, existsErr := controlPlaneStore.EnvironmentExists(ctx, project.ID, retiringEnvironment.ID); existsErr != nil || exists {
 		t.Fatalf("retiring Environment admission = %t/%v", exists, existsErr)
+	}
+	if active, fenceErr := controlPlaneStore.FenceProductResourceAdmission(
+		ctx, project.ID, retiringApplication.ID, "",
+	); fenceErr != nil || active {
+		t.Fatalf("retiring Application transaction fence = %t/%v", active, fenceErr)
+	}
+	if active, fenceErr := controlPlaneStore.FenceProductResourceAdmission(
+		ctx, project.ID, retiringApplication.ID, retiringEnvironment.ID,
+	); fenceErr != nil || active {
+		t.Fatalf("retiring product resources transaction fence = %t/%v", active, fenceErr)
 	}
 	retiredAt := time.Now().UTC()
 	if err := controlPlaneStore.CompleteApplicationRetirement(ctx, project.ID, retiringApplication.ID, retiredAt); err != nil {

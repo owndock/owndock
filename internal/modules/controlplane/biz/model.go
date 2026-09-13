@@ -318,6 +318,7 @@ type ProductResourceDependency interface {
 type ReleaseRepository interface {
 	ListReleases(context.Context, string, string) ([]Release, error)
 	CreateRelease(context.Context, Release) (Release, error)
+	FenceProductResourceAdmission(context.Context, string, string, string) (bool, error)
 }
 
 type ArtifactReleaseRepository interface {

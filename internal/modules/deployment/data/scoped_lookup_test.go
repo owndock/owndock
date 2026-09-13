@@ -49,6 +49,12 @@ func (p *lookupProbe) RuntimeTargetReady(_ context.Context, projectID, id string
 	p.projectIDs = append(p.projectIDs, projectID)
 	return id != p.notReady, nil
 }
+func (p *lookupProbe) FenceProductResourceAdmission(
+	_ context.Context, projectID, applicationID, environmentID string,
+) (bool, error) {
+	p.projectIDs = append(p.projectIDs, projectID)
+	return applicationID != p.missing && environmentID != p.missing, nil
+}
 
 func TestFormalReferenceLookupRejectsTargetThatIsNotReady(t *testing.T) {
 	lookup := NewFormalReferenceLookup(&lookupProbe{notReady: "target-1"})

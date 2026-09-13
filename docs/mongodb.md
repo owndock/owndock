@@ -75,6 +75,8 @@ Runtime Target 删除把 `retiring` 与最小退役上下文原子持久化：Or
 
 Application 与 Environment 使用软退役保留业务历史。Migration v48 回填 `active` 状态，把名称唯一索引改为只约束 active 文档，并分别增加 `status + retirement.started_at + _id` 部分索引。开始退役会原子保存 Organization、Actor、Request ID 与开始时间；完成时写入 `retired_at` 并移除临时上下文。默认列表、Application/Environment 引用解析和运行配置读取只接受 active 文档，不可变 Release 历史可按已知 Application ID 继续读取。Migration v49 为活动容器 TerminalSession 回填 Application/Environment ID，并建立 active 部分索引，使资源退役可有界关闭关联会话。
 
+Release、Build 和 Deployment 的创建事务会 `$inc` active Application/Environment 的内部 `work_admission_revision`，容器 TerminalSession 使用独立的 `terminal_admission_revision`。这些 revision 不表达业务版本，仅用于让 MongoDB 检测父资源退役与子资源准入的并发写冲突；父状态不是 active 时更新不匹配，整个子资源与审计事务回滚。
+
 Migration v50 为 Build 建立 Organization/Project/Application/status/创建时间顺序索引。Application 退役据此每批最多读取 100 个 queued/checking_out/building/pushing/canceling Build；转入 canceling 与逐 Build 审计处于同一事务，Build Worker 写入终态后下一轮退役扫描自然推进。
 
 退役收敛使用 migration v47 的 Organization/Project/Runtime Target/active/时间索引有界扫描 TerminalSession。会话状态转换与逐会话审计原子提交；Runtime Inventory 则在独立事务中分批删除完全可重建的调度、批次和 current 投影。Inventory `Begin` 与 `Complete` 都复核 Target=ready，阻止已领取租约的旧 Worker 在清理后重建视图。

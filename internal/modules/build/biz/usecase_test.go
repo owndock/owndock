@@ -23,6 +23,8 @@ type configurationReferencesStub struct {
 	applicationExists bool
 	registryServer    string
 	err               error
+	admissionActive   *bool
+	admissionErr      error
 }
 
 type automaticDeploymentReferencesStub struct{ err error }
@@ -39,6 +41,18 @@ func (s configurationReferencesStub) ApplicationExists(
 	string,
 ) (bool, error) {
 	return s.applicationExists, s.err
+}
+
+func (s configurationReferencesStub) FenceProductResourceAdmission(
+	context.Context, string, string, string,
+) (bool, error) {
+	if s.admissionErr != nil {
+		return false, s.admissionErr
+	}
+	if s.admissionActive != nil {
+		return *s.admissionActive, nil
+	}
+	return s.applicationExists, nil
 }
 
 func (s configurationReferencesStub) RegistryServer(
@@ -1182,7 +1196,8 @@ func TestBuildCancelAndRetryUseCases(t *testing.T) {
 	sequence := 0
 	useCase := NewUseCase(projectLookupStub{exists: true}, repository, transaction.Passthrough{}, audit,
 		func() (string, error) { sequence++; return fmt.Sprintf("id-%d", sequence), nil },
-		func() time.Time { return time.Unix(200, 0) })
+		func() time.Time { return time.Unix(200, 0) }).
+		WithProductResourceAdmissionFence(configurationReferencesStub{applicationExists: true})
 
 	canceled, err := useCase.CancelBuild(context.Background(), testPrincipal(security.RoleDeveloper), "project-1", queued.ID, "request-cancel")
 	if err != nil || canceled.Status != BuildStatusCanceling || canceled.Version != 2 {
@@ -1206,5 +1221,46 @@ func TestBuildCancelAndRetryUseCases(t *testing.T) {
 	}
 	if _, err := useCase.CancelBuild(context.Background(), testPrincipal(security.RoleViewer), "project-1", failed.ID, "request-forbidden"); !errors.Is(err, security.ErrForbidden) {
 		t.Fatalf("viewer cancel error = %v", err)
+	}
+}
+
+func TestBuildCreationFailsWhenApplicationAdmissionFenceCloses(t *testing.T) {
+	repository := newRepositoryStub()
+	now := time.Unix(100, 0)
+	failed := Build{
+		ID: "build-failed", OrganizationID: "organization-1", ProjectID: "project-1",
+		ApplicationID: "application-1", BuildConfigurationID: "configuration-1",
+		IdempotencyKey: "original-build", Status: BuildStatusFailed,
+		FailureCategory: BuildFailureBuild, Version: 1,
+		TriggeredBy: "user-1", CreatedAt: now, UpdatedAt: now, FinishedAt: now,
+	}
+	repository.builds[failed.ID] = failed
+	active := false
+	references := configurationReferencesStub{
+		applicationExists: true, admissionActive: &active,
+	}
+	useCase := NewUseCase(
+		projectLookupStub{exists: true}, repository, transaction.Passthrough{},
+		&auditStub{}, func() (string, error) { return "new-build", nil }, time.Now,
+	).WithProductResourceAdmissionFence(references)
+	if _, err := useCase.RetryBuild(
+		t.Context(), testPrincipal(security.RoleDeveloper), "project-1", failed.ID,
+		"retry-build", "request-1",
+	); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("closed Application fence error = %v", err)
+	}
+	if len(repository.builds) != 1 {
+		t.Fatalf("Build persisted after closed fence: %+v", repository.builds)
+	}
+
+	fenceFailure := errors.New("fence unavailable")
+	useCase.WithProductResourceAdmissionFence(configurationReferencesStub{
+		applicationExists: true, admissionErr: fenceFailure,
+	})
+	if _, err := useCase.RetryBuild(
+		t.Context(), testPrincipal(security.RoleDeveloper), "project-1", failed.ID,
+		"retry-build-2", "request-2",
+	); !errors.Is(err, fenceFailure) {
+		t.Fatalf("fence failure = %v", err)
 	}
 }

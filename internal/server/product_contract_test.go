@@ -1037,6 +1037,32 @@ func (s *contractControlStore) CreateRelease(_ context.Context, item controlplan
 	return item, nil
 }
 
+func (s *contractControlStore) FenceProductResourceAdmission(
+	_ context.Context, projectID, applicationID, environmentID string,
+) (bool, error) {
+	applicationActive := false
+	for _, item := range s.applications {
+		if item.ProjectID == projectID && item.ID == applicationID &&
+			(item.Status == "" || item.Status == controlplanebiz.ProductResourceStatusActive) {
+			applicationActive = true
+			break
+		}
+	}
+	if !applicationActive {
+		return false, nil
+	}
+	if environmentID == "" {
+		return true, nil
+	}
+	for _, item := range s.environments {
+		if item.ProjectID == projectID && item.ID == environmentID &&
+			(item.Status == "" || item.Status == controlplanebiz.ProductResourceStatusActive) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *contractControlStore) ReleaseExists(_ context.Context, projectID, applicationID, releaseID string) (bool, error) {
 	for _, item := range s.releases {
 		if item.ID == releaseID && item.ProjectID == projectID && item.ApplicationID == applicationID {
@@ -1629,6 +1655,12 @@ func (contractBuildReferences) ApplicationExists(
 	context.Context,
 	string,
 	string,
+) (bool, error) {
+	return true, nil
+}
+
+func (contractBuildReferences) FenceProductResourceAdmission(
+	context.Context, string, string, string,
 ) (bool, error) {
 	return true, nil
 }
