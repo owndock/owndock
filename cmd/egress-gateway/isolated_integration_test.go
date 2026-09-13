@@ -44,9 +44,13 @@ func runIsolatedEgressGatewayDockerIntegration(t *testing.T, scope string) {
 	runEgressDocker(t, "network", "create", uplink)
 	t.Cleanup(func() { _ = egressDockerCommand("network", "rm", uplink).Run() })
 	runEgressDocker(t, "run", "--detach", "--name", target, "--network", uplink,
-		"--network-alias", "allowed-egress", "--network-alias", "denied-egress",
+		"--network-alias", "allowed-egress", "--network-alias", "redirect-egress",
+		"--network-alias", "denied-egress",
 		pinnedEgressBusyBoxImage, "sh", "-c",
-		"mkdir -p /www && printf 'approved evidence dependency\\n' >/www/dependency && exec httpd -f -p 8080 -h /www")
+		"mkdir -p /www/cgi-bin && printf 'approved evidence dependency\\n' >/www/dependency && "+
+			"printf '#!/bin/sh\\nprintf \"Status: 302 Found\\\\r\\\\nLocation: http://redirect-egress:8080/dependency\\\\r\\\\n\\\\r\\\\n\"\\n' >/www/cgi-bin/redirect && "+
+			"printf '#!/bin/sh\\nprintf \"Status: 302 Found\\\\r\\\\nLocation: http://denied-egress:8080/dependency\\\\r\\\\n\\\\r\\\\n\"\\n' >/www/cgi-bin/redirect-denied && "+
+			"chmod 0755 /www/cgi-bin/redirect /www/cgi-bin/redirect-denied && exec httpd -f -p 8080 -h /www")
 	t.Cleanup(func() { _ = egressDockerCommand("rm", "--force", target).Run() })
 
 	binary, config := isolatedEgressFixture(t, root, scope)
@@ -71,6 +75,13 @@ func runIsolatedEgressGatewayDockerIntegration(t *testing.T, scope string) {
 	if strings.TrimSpace(output) != "approved evidence dependency" {
 		t.Fatalf("allowed destination response = %q", output)
 	}
+	output = runEgressDocker(t, "exec", worker, "sh", "-c",
+		"http_proxy="+proxy+" wget -qO- http://allowed-egress:8080/cgi-bin/redirect")
+	if strings.TrimSpace(output) != "approved evidence dependency" {
+		t.Fatalf("explicitly allowlisted redirect response = %q", output)
+	}
+	assertEgressDockerFails(t, "denied redirect destination", "exec", worker, "sh", "-c",
+		"http_proxy="+proxy+" wget -T 2 -qO- http://allowed-egress:8080/cgi-bin/redirect-denied")
 	assertEgressDockerFails(t, "denied destination", "exec", worker, "sh", "-c",
 		"http_proxy="+proxy+" wget -T 2 -qO- http://denied-egress:8080/dependency?secret=must-not-reflect")
 
@@ -131,6 +142,8 @@ runtime:
     maximum_connections: 8
     allowed_destinations:
       - authority: allowed-egress:8080
+        allow_private: true
+      - authority: redirect-egress:8080
         allow_private: true
 `
 	if err := os.WriteFile(configPath, []byte(config), 0o600); err != nil {

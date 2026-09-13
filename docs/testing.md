@@ -47,7 +47,7 @@ Trivy 适配器单元测试覆盖固定 `0.74.0`、精确 digest 调用、扫描
 
 Registry 传输测试使用自签名 TLS Registry 和真实 HTTP CONNECT 隧道，验证未配置时忽略宿主环境代理、配置后只走显式代理、仍执行 CA/主机名校验且不发送 `Proxy-Authorization`。Syft、Trivy、Cosign 的子进程测试进一步核对只注入配置指定的大小写代理变量并清空 `NO_PROXY`；ORAS、Artifact Probe、Evidence Reader 和 Referrer Client 对含凭据或非规范代理地址失败关闭。
 
-`make test-isolated-egress` 会构建完整 Linux `owndock-egress-gateway`，分别在真实 Docker `internal` Evidence 与 Vulnerability DB Boundary 中运行网关、workload fixture 和目标服务。门禁验证各 scope 的精确目标允许、未授权 authority 拒绝、清空代理后的 raw TCP/metadata 绕过不可达、网关中断失败关闭、按原内部地址恢复后相邻请求成功，以及网关日志不反射请求秘密。Build、Evidence 与 Vulnerability DB 使用同一不可变网关镜像，但以独立 scope、配置、实例和网络运行。
+`make test-isolated-egress` 会构建完整 Linux `owndock-egress-gateway`，分别在真实 Docker `internal` Evidence 与 Vulnerability DB Boundary 中运行网关、workload fixture 和目标服务。门禁验证各 scope 的精确目标允许、跨 authority 302 只有在重定向目标也显式进入 allowlist 时成功、未授权 authority 拒绝、清空代理后的 raw TCP/metadata 绕过不可达、网关中断失败关闭、按原内部地址恢复后相邻请求成功，以及网关日志不反射请求秘密。Build、Evidence 与 Vulnerability DB 使用同一不可变网关镜像，但以独立 scope、配置、实例和网络运行。
 
 真实 Distribution/Syft 门禁还会上传一个带实际压缩 layer blob 的超限 OCI 镜像，在较小但同语义的测试阈值下验证 OwnDock 先读取不可变 manifest 并在 Syft 子进程启动前失败关闭。配套生成器和 Worker 测试继续验证 Registry Credential 清零与稳定的 `resource_limit` 分类。纯解析测试覆盖单 manifest、多平台 index、畸形 digest/size、递归 index 和数量上限；这项门禁验证产品代码，不依赖 Syft 对 Registry source 的上游大小参数实现。
 
