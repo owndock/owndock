@@ -138,7 +138,7 @@ sh deploy/backup-community.sh \
    ```
 
    脚本会再次校验 SHA-256，并在 Server 运行、MongoDB 停止、目标存在任何非系统 collection 或输入可被组/其他用户写入时拒绝恢复；它不使用 `--drop` 覆盖现有数据；
-5. 启动与备份相同版本的 Server，让 migration 检查现有 schema；
+5. 使用 `docker compose -f deploy/community.compose.yaml up -d --no-deps server` 启动与备份相同版本的 Server，让 migration 检查现有 schema；
 6. 验证 `/readyz`、Owner 登录、Project/Release/Deployment、审计、Agent 身份和 Runtime Target；
 7. 再升级到目标版本并重复关键旅程；失败时丢弃恢复环境，不能反向修改原备份。
 

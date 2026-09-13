@@ -21,9 +21,10 @@ docker compose version >/dev/null
 
 script_directory=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 compose_file=$script_directory/community.compose.yaml
-test_directory=$(mktemp -d)
+temporary_root=$(CDPATH= cd -- "${TMPDIR:-/tmp}" && pwd -P)
+test_directory=$(mktemp -d "$temporary_root/owndock-community.XXXXXX")
 case "$test_directory" in
-  /tmp/*|/private/tmp/*) ;;
+  "$temporary_root"/owndock-community.*) ;;
   *) echo "unexpected temporary directory: $test_directory" >&2; exit 2 ;;
 esac
 secret_directory=$test_directory/secrets
@@ -50,7 +51,11 @@ cleanup() {
 trap cleanup EXIT HUP INT TERM
 
 sh "$script_directory/prepare-community-secrets.sh" "$secret_directory" >/dev/null
-docker compose -f "$compose_file" up -d
+if ! docker compose -f "$compose_file" up -d; then
+  docker compose -f "$compose_file" ps -a >&2 || true
+  docker compose -f "$compose_file" logs --no-color --tail 100 >&2 || true
+  exit 1
+fi
 
 wait_ready() {
   attempt=0
@@ -68,10 +73,13 @@ wait_ready() {
 }
 wait_ready
 
-if docker compose -f "$compose_file" port mongodb 27017 2>/dev/null | grep -q .; then
-  echo "MongoDB unexpectedly exposes a host port" >&2
-  exit 1
-fi
+mongodb_container=$(docker compose -f "$compose_file" ps -q mongodb)
+test -n "$mongodb_container"
+port_bindings=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$mongodb_container")
+case "$port_bindings" in
+  null|'{}') ;;
+  *) echo "MongoDB unexpectedly exposes a host port: $port_bindings" >&2; exit 1 ;;
+esac
 server_container=$(docker compose -f "$compose_file" ps -q server)
 test -n "$server_container"
 server_user=$(docker inspect --format '{{.Config.User}}' "$server_container")
@@ -117,7 +125,11 @@ test "$status" = 200
 
 docker compose -f "$compose_file" stop server >/dev/null
 archive=$backup_directory/community.archive.gz
-sh "$script_directory/backup-community.sh" "$archive" >/dev/null
+if ! sh "$script_directory/backup-community.sh" "$archive" \
+  >"$test_directory/backup-command.log" 2>&1; then
+  cat "$test_directory/backup-command.log" >&2
+  exit 1
+fi
 test -s "$archive"
 test -s "$archive.sha256"
 docker compose -f "$compose_file" logs --no-color >"$test_directory/compose.log"
@@ -138,8 +150,12 @@ while [ "$attempt" -lt 90 ]; do
 done
 test "$init_state" = exited:0
 OWNDOCK_RESTORE_CONFIRM=empty-owndock-database \
-  sh "$script_directory/restore-community.sh" "$archive" "$archive.sha256" >/dev/null
-docker compose -f "$compose_file" up -d server
+  sh "$script_directory/restore-community.sh" "$archive" "$archive.sha256" \
+    >"$test_directory/restore-command.log" 2>&1 || {
+      cat "$test_directory/restore-command.log" >&2
+      exit 1
+    }
+docker compose -f "$compose_file" up -d --no-deps server
 wait_ready
 
 status=$(curl --silent --show-error --output "$test_directory/restored-login-response.json" --write-out '%{http_code}' \

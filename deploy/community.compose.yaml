@@ -7,13 +7,33 @@ services:
       - /bin/sh
       - -eu
       - -c
-      - install -o 999 -g 999 -m 0400 /source/keyfile /target/keyfile
+      - |
+        source=/run/secrets/mongodb-keyfile-source
+        target=/target/keyfile
+        checksum=/target/keyfile.sha256
+        source_digest=$$(sha256sum "$$source" | awk '{print $$1}')
+        if [ -e "$$target" ] || [ -e "$$checksum" ]; then
+          test -f "$$target"
+          test -f "$$checksum"
+          test "$$(cat "$$checksum")" = "$$source_digest"
+          test "$$(stat -c '%u:%g:%a' "$$target")" = "999:999:400"
+          test "$$(stat -c '%u:%g:%a' "$$checksum")" = "0:0:400"
+          exit 0
+        fi
+        cp "$$source" "$$target"
+        chmod 0400 "$$target"
+        printf '%s\n' "$$source_digest" >"$$checksum"
+        chmod 0400 "$$checksum"
+        chown 999:999 "$$target"
     volumes:
-      - ${OWNDOCK_MONGODB_KEYFILE_PATH:?set the absolute MongoDB keyfile path}:/source/keyfile:ro
       - mongodb-keyfile:/target
+    secrets:
+      - mongodb-keyfile-source
     network_mode: none
     cap_drop:
       - ALL
+    cap_add:
+      - CHOWN
     security_opt:
       - no-new-privileges:true
 
@@ -99,6 +119,8 @@ networks:
   ingress:
 
 secrets:
+  mongodb-keyfile-source:
+    file: ${OWNDOCK_MONGODB_KEYFILE_PATH:?set the absolute MongoDB keyfile path}
   mongodb-root-username:
     file: ${OWNDOCK_MONGODB_ROOT_USERNAME_PATH:?set the absolute MongoDB root username file path}
   mongodb-root-password:
