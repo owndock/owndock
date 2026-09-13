@@ -771,7 +771,7 @@ func (s *MongoStore) UpdateRuntimeTargetProbe(
 func (s *MongoStore) BeginRuntimeTargetRetirement(
 	ctx context.Context,
 	projectID, targetID string,
-	now time.Time,
+	retirement biz.RuntimeTargetRetirement,
 ) (biz.RuntimeTarget, bool, error) {
 	var document runtimeTargetDocument
 	err := s.targets.FindOneAndUpdate(
@@ -783,7 +783,12 @@ func (s *MongoStore) BeginRuntimeTargetRetirement(
 		},
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: biz.RuntimeTargetStatusRetiring},
-			{Key: "retirement_started_at", Value: now.UTC()},
+			{Key: "retirement", Value: runtimeTargetRetirementDocument{
+				OrganizationID: retirement.OrganizationID,
+				ActorID:        retirement.ActorID,
+				RequestID:      retirement.RequestID,
+				StartedAt:      retirement.StartedAt.UTC(),
+			}},
 		}}},
 		options.FindOneAndUpdate().SetReturnDocument(options.After),
 	).Decode(&document)
@@ -801,6 +806,33 @@ func (s *MongoStore) BeginRuntimeTargetRetirement(
 		return biz.RuntimeTarget{}, false, biz.ErrNotFound
 	}
 	return target, false, nil
+}
+
+func (s *MongoStore) ListRetiringRuntimeTargets(
+	ctx context.Context,
+	limit int64,
+) ([]biz.RuntimeTarget, error) {
+	cursor, err := s.targets.Find(
+		ctx,
+		bson.D{{Key: "status", Value: biz.RuntimeTargetStatusRetiring}},
+		options.Find().SetSort(bson.D{
+			{Key: "retirement.started_at", Value: 1},
+			{Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find retiring runtime targets: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []runtimeTargetDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode retiring runtime targets: %w", err)
+	}
+	items := make([]biz.RuntimeTarget, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain()
+	}
+	return items, nil
 }
 
 func (s *MongoStore) DeleteRetiringRuntimeTarget(
@@ -1021,19 +1053,27 @@ func (d registryCredentialDocument) domain() biz.RegistryCredential {
 }
 
 type runtimeTargetDocument struct {
-	ID             string                  `bson:"_id"`
-	ProjectID      string                  `bson:"project_id"`
-	Name           string                  `bson:"name"`
-	NameNormalized string                  `bson:"name_normalized"`
-	ManagedHostID  string                  `bson:"managed_host_id"`
-	ConnectionMode runtimeaccess.Mode      `bson:"connection_mode"`
-	Endpoint       string                  `bson:"endpoint,omitempty"`
-	TLSServerName  string                  `bson:"tls_server_name,omitempty"`
-	CredentialRef  string                  `bson:"credential_ref,omitempty"`
-	Status         biz.RuntimeTargetStatus `bson:"status"`
-	LastProbedAt   time.Time               `bson:"last_probed_at,omitempty"`
-	CreatedBy      string                  `bson:"created_by"`
-	CreatedAt      time.Time               `bson:"created_at"`
+	ID             string                           `bson:"_id"`
+	ProjectID      string                           `bson:"project_id"`
+	Name           string                           `bson:"name"`
+	NameNormalized string                           `bson:"name_normalized"`
+	ManagedHostID  string                           `bson:"managed_host_id"`
+	ConnectionMode runtimeaccess.Mode               `bson:"connection_mode"`
+	Endpoint       string                           `bson:"endpoint,omitempty"`
+	TLSServerName  string                           `bson:"tls_server_name,omitempty"`
+	CredentialRef  string                           `bson:"credential_ref,omitempty"`
+	Status         biz.RuntimeTargetStatus          `bson:"status"`
+	LastProbedAt   time.Time                        `bson:"last_probed_at,omitempty"`
+	CreatedBy      string                           `bson:"created_by"`
+	CreatedAt      time.Time                        `bson:"created_at"`
+	Retirement     *runtimeTargetRetirementDocument `bson:"retirement,omitempty"`
+}
+
+type runtimeTargetRetirementDocument struct {
+	OrganizationID string    `bson:"organization_id"`
+	ActorID        string    `bson:"actor_id"`
+	RequestID      string    `bson:"request_id,omitempty"`
+	StartedAt      time.Time `bson:"started_at"`
 }
 
 type environmentDocument struct {
@@ -1055,7 +1095,7 @@ func (d environmentDocument) domain() biz.Environment {
 }
 
 func (d runtimeTargetDocument) domain() biz.RuntimeTarget {
-	return biz.RuntimeTarget{
+	item := biz.RuntimeTarget{
 		ID: d.ID, ProjectID: d.ProjectID, Name: d.Name,
 		ManagedHostID: d.ManagedHostID, ConnectionMode: d.ConnectionMode,
 		Endpoint:      d.Endpoint,
@@ -1063,6 +1103,15 @@ func (d runtimeTargetDocument) domain() biz.RuntimeTarget {
 		Status: d.Status, LastProbedAt: d.LastProbedAt,
 		CreatedBy: d.CreatedBy, CreatedAt: d.CreatedAt,
 	}
+	if d.Retirement != nil {
+		item.Retirement = &biz.RuntimeTargetRetirement{
+			OrganizationID: d.Retirement.OrganizationID,
+			ActorID:        d.Retirement.ActorID,
+			RequestID:      d.Retirement.RequestID,
+			StartedAt:      d.Retirement.StartedAt,
+		}
+	}
+	return item
 }
 
 type runtimeSpecDocument struct {

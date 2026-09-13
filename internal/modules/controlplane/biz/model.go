@@ -167,6 +167,17 @@ type RuntimeTarget struct {
 	LastProbedAt   time.Time
 	CreatedBy      string
 	CreatedAt      time.Time
+	Retirement     *RuntimeTargetRetirement
+}
+
+// RuntimeTargetRetirement is internal durable workflow metadata. It preserves
+// the initiating identity and request correlation across Server restarts so a
+// background worker can finish the lifecycle operation without a client retry.
+type RuntimeTargetRetirement struct {
+	OrganizationID string
+	ActorID        string
+	RequestID      string
+	StartedAt      time.Time
 }
 
 type Environment struct {
@@ -277,8 +288,9 @@ type RuntimeTargetLifecycleRepository interface {
 		context.Context,
 		string,
 		string,
-		time.Time,
+		RuntimeTargetRetirement,
 	) (RuntimeTarget, bool, error)
+	ListRetiringRuntimeTargets(context.Context, int64) ([]RuntimeTarget, error)
 	DeleteRetiringRuntimeTarget(context.Context, string, string) error
 }
 

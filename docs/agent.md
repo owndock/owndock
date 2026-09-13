@@ -114,7 +114,7 @@ runtime:
 - 持久结果只保存 command kind、SHA-256 指纹和安全结果；Registry authorization、Environment 值、目标 ID 和原始 Docker 错误不会写入缓存；
 - Runtime Inventory manifest/chunk/release/events 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 和 Event poll 每批最多携带 64 条规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
 - 部署切换水位只保存稳定容器槽位、最高 cutover sequence 和对应 Deployment ID，不保存完整命令或秘密；它独立于可淘汰的结果缓存，因此 Agent 重启或容器缺失后仍能拒绝旧命令；
-- `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Runtime Target `DELETE` 已接入 `retiring → canceling/drain → deployment.runtime.remove → deployment.cutover.release → 删除元数据` 的可重试链路；
+- `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Runtime Target `DELETE` 已接入 `retiring → canceling/drain → deployment.runtime.remove → deployment.cutover.release → 删除元数据` 的持久后台链路；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
 - Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。

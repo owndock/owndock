@@ -59,7 +59,26 @@ func Default() []Migration {
 		{Version: 43, Name: "index_deployment_policies", Up: indexDeploymentPolicies},
 		{Version: 44, Name: "support_external_artifacts", Up: supportExternalArtifacts},
 		{Version: 45, Name: "support_registry_authentication_modes", Up: supportRegistryAuthenticationModes},
+		{Version: 46, Name: "schedule_runtime_target_retirements", Up: scheduleRuntimeTargetRetirements},
 	}
+}
+
+func scheduleRuntimeTargetRetirements(ctx context.Context, database *mongo.Database) error {
+	_, err := database.Collection("runtime_targets").Indexes().CreateOne(
+		ctx,
+		mongo.IndexModel{
+			Keys: bson.D{
+				{Key: "status", Value: 1},
+				{Key: "retirement.started_at", Value: 1},
+				{Key: "_id", Value: 1},
+			},
+			Options: options.Index().SetName("idx_runtime_target_retirement_queue"),
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("create Runtime Target retirement queue index: %w", err)
+	}
+	return nil
 }
 
 func supportRegistryAuthenticationModes(ctx context.Context, database *mongo.Database) error {

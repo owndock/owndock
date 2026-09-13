@@ -800,9 +800,9 @@ func (u *UseCase) ProbeRuntimeTarget(
 	return target, err
 }
 
-// DeleteRuntimeTarget is a retryable lifecycle operation. The first call
+// DeleteRuntimeTarget starts a durable lifecycle operation. The first call
 // atomically moves the target out of ready, which closes deployment admission.
-// It returns completed=false while deployment workers drain cancellations.
+// It returns completed=false while background workers drain cancellations.
 func (u *UseCase) DeleteRuntimeTarget(
 	ctx context.Context,
 	principal security.Principal,
@@ -828,7 +828,12 @@ func (u *UseCase) DeleteRuntimeTarget(
 		var changed bool
 		var beginErr error
 		target, changed, beginErr = u.targetLifecycle.BeginRuntimeTargetRetirement(
-			transactionContext, projectID, targetID, now,
+			transactionContext, projectID, targetID, RuntimeTargetRetirement{
+				OrganizationID: principal.OrganizationID,
+				ActorID:        principal.UserID,
+				RequestID:      requestID,
+				StartedAt:      now,
+			},
 		)
 		if errors.Is(beginErr, ErrNotFound) {
 			found = false
@@ -846,8 +851,55 @@ func (u *UseCase) DeleteRuntimeTarget(
 	if err != nil || !found {
 		return !found, err
 	}
+	return u.continueRuntimeTargetRetirement(ctx, target)
+}
+
+// ContinueRuntimeTargetRetirements resumes durable retirement workflows after
+// an API request has returned and after process restarts. Pending work is not
+// an error; it will be scanned again on the next bounded worker poll.
+func (u *UseCase) ContinueRuntimeTargetRetirements(
+	ctx context.Context,
+	limit int64,
+) (int, error) {
+	if u.targetLifecycle == nil || u.targetRetirer == nil {
+		return 0, ErrRuntimeTargetRetirementUnavailable
+	}
+	if limit < 1 || limit > 100 {
+		return 0, errors.New("runtime target retirement limit must be between 1 and 100")
+	}
+	targets, err := u.targetLifecycle.ListRetiringRuntimeTargets(ctx, limit)
+	if err != nil {
+		return 0, err
+	}
+	processed := 0
+	var result error
+	for _, target := range targets {
+		completed, continueErr := u.continueRuntimeTargetRetirement(ctx, target)
+		if continueErr != nil {
+			result = errors.Join(result, continueErr)
+			continue
+		}
+		if completed {
+			processed++
+		}
+	}
+	return processed, result
+}
+
+func (u *UseCase) continueRuntimeTargetRetirement(
+	ctx context.Context,
+	target RuntimeTarget,
+) (bool, error) {
+	retirement := target.Retirement
+	if retirement == nil || strings.TrimSpace(retirement.OrganizationID) == "" ||
+		strings.TrimSpace(retirement.ActorID) == "" || retirement.StartedAt.IsZero() {
+		return false, ErrRuntimeTargetRetirementUnavailable
+	}
+	principal := security.Principal{
+		UserID: retirement.ActorID, OrganizationID: retirement.OrganizationID,
+	}
 	if err := u.targetRetirer.RetireRuntimeTarget(
-		ctx, target, principal, requestID,
+		ctx, target, principal, retirement.RequestID,
 	); err != nil {
 		if errors.Is(err, ErrRuntimeTargetRetirementPending) {
 			return false, nil
@@ -861,16 +913,19 @@ func (u *UseCase) DeleteRuntimeTarget(
 	deletedAt := u.now().UTC()
 	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
 		if deleteErr := u.targetLifecycle.DeleteRetiringRuntimeTarget(
-			transactionContext, projectID, targetID,
+			transactionContext, target.ProjectID, target.ID,
 		); deleteErr != nil {
 			return deleteErr
 		}
 		return u.record(
 			transactionContext, principal, deleteAuditID,
-			"runtime_target.delete", "runtime_target", targetID,
-			projectID, requestID, deletedAt,
+			"runtime_target.delete", "runtime_target", target.ID,
+			target.ProjectID, retirement.RequestID, deletedAt,
 		)
 	})
+	if errors.Is(err, ErrNotFound) {
+		return true, nil
+	}
 	return err == nil, err
 }
 

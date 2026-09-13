@@ -2,6 +2,7 @@ package biz
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -75,8 +76,9 @@ func TestAcceptedProductResourceFlow(t *testing.T) {
 }
 
 type runtimeTargetRetirerProbe struct {
-	err   error
-	calls int
+	err    error
+	calls  int
+	onCall func()
 }
 
 func (p *runtimeTargetRetirerProbe) RetireRuntimeTarget(
@@ -86,10 +88,13 @@ func (p *runtimeTargetRetirerProbe) RetireRuntimeTarget(
 	string,
 ) error {
 	p.calls++
+	if p.onCall != nil {
+		p.onCall()
+	}
 	return p.err
 }
 
-func TestDeleteRuntimeTargetFencesDrainsAndCompletesOnRetry(t *testing.T) {
+func TestDeleteRuntimeTargetFencesAndBackgroundContinuationCompletes(t *testing.T) {
 	store := &fakeStore{
 		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
 		targets: []RuntimeTarget{{
@@ -119,12 +124,16 @@ func TestDeleteRuntimeTargetFencesDrainsAndCompletesOnRetry(t *testing.T) {
 	if err != nil || completed || store.targets[0].Status != RuntimeTargetStatusRetiring {
 		t.Fatalf("first delete = %v/%v, target = %+v", completed, err, store.targets)
 	}
+	if retirement := store.targets[0].Retirement; retirement == nil ||
+		retirement.OrganizationID != principal.OrganizationID ||
+		retirement.ActorID != principal.UserID ||
+		retirement.RequestID != "request-1" {
+		t.Fatalf("retirement metadata = %+v", retirement)
+	}
 	retirer.err = nil
-	completed, err = useCase.DeleteRuntimeTarget(
-		t.Context(), principal, "project-1", "target-1", "request-2",
-	)
-	if err != nil || !completed || len(store.targets) != 0 || retirer.calls != 2 {
-		t.Fatalf("second delete = %v/%v, targets = %+v calls = %d", completed, err, store.targets, retirer.calls)
+	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 10)
+	if err != nil || processed != 1 || len(store.targets) != 0 || retirer.calls != 2 {
+		t.Fatalf("continuation = %d/%v, targets = %+v calls = %d", processed, err, store.targets, retirer.calls)
 	}
 	if len(audits.events) != 2 ||
 		audits.events[0].Action != "runtime_target.retirement_started" ||
@@ -151,6 +160,11 @@ func TestDeleteRuntimeTargetRequiresLifecyclePermissionAndProject(t *testing.T) 
 	); err != ErrRuntimeTargetRetirementUnavailable {
 		t.Fatalf("missing lifecycle error = %v", err)
 	}
+	if _, err := newUseCase().ContinueRuntimeTargetRetirements(
+		t.Context(), 1,
+	); err != ErrRuntimeTargetRetirementUnavailable {
+		t.Fatalf("missing continuation lifecycle error = %v", err)
+	}
 	configured := newUseCase().WithRuntimeTargetRetirement(
 		store, &runtimeTargetRetirerProbe{},
 	)
@@ -165,6 +179,52 @@ func TestDeleteRuntimeTargetRequiresLifecyclePermissionAndProject(t *testing.T) 
 		t.Context(), owner, "project-1", "target-1", "request-1",
 	); err != ErrNotFound {
 		t.Fatalf("missing project error = %v", err)
+	}
+}
+
+func TestContinueRuntimeTargetRetirementsValidatesDurableMetadata(t *testing.T) {
+	store := &fakeStore{targets: []RuntimeTarget{{
+		ID: "target-1", ProjectID: "project-1",
+		Status: RuntimeTargetStatusRetiring,
+	}}}
+	retirer := &runtimeTargetRetirerProbe{}
+	useCase := NewUseCase(
+		store, store, store, store, transaction.Passthrough{},
+		&fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	).WithRuntimeTargetRetirement(store, retirer)
+	if _, err := useCase.ContinueRuntimeTargetRetirements(
+		t.Context(), 0,
+	); err == nil {
+		t.Fatal("invalid batch size was accepted")
+	}
+	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 1)
+	if !errors.Is(err, ErrRuntimeTargetRetirementUnavailable) ||
+		processed != 0 || retirer.calls != 0 {
+		t.Fatalf("continuation = %d/%v, retirer calls = %d", processed, err, retirer.calls)
+	}
+}
+
+func TestContinueRuntimeTargetRetirementToleratesConcurrentCompletion(t *testing.T) {
+	retirement := RuntimeTargetRetirement{
+		OrganizationID: "organization-1", ActorID: "owner-1",
+		RequestID: "request-1", StartedAt: time.Unix(100, 0),
+	}
+	store := &fakeStore{targets: []RuntimeTarget{{
+		ID: "target-1", ProjectID: "project-1",
+		Status: RuntimeTargetStatusRetiring, Retirement: &retirement,
+	}}}
+	retirer := &runtimeTargetRetirerProbe{
+		onCall: func() { store.targets = nil },
+	}
+	useCase := NewUseCase(
+		store, store, store, store, transaction.Passthrough{},
+		&fakeAudits{}, &fakeAudits{},
+		func() (string, error) { return "audit-1", nil }, time.Now,
+	).WithRuntimeTargetRetirement(store, retirer)
+	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 1)
+	if err != nil || processed != 1 {
+		t.Fatalf("continuation = %d/%v", processed, err)
 	}
 }
 
@@ -624,16 +684,35 @@ func (s *fakeStore) UpdateRuntimeTargetProbe(
 func (s *fakeStore) BeginRuntimeTargetRetirement(
 	_ context.Context,
 	projectID, targetID string,
-	_ time.Time,
+	retirement RuntimeTargetRetirement,
 ) (RuntimeTarget, bool, error) {
 	for index := range s.targets {
 		if s.targets[index].ProjectID == projectID && s.targets[index].ID == targetID {
 			changed := s.targets[index].Status != RuntimeTargetStatusRetiring
 			s.targets[index].Status = RuntimeTargetStatusRetiring
+			if changed {
+				s.targets[index].Retirement = &retirement
+			}
 			return s.targets[index], changed, nil
 		}
 	}
 	return RuntimeTarget{}, false, ErrNotFound
+}
+
+func (s *fakeStore) ListRetiringRuntimeTargets(
+	_ context.Context,
+	limit int64,
+) ([]RuntimeTarget, error) {
+	result := make([]RuntimeTarget, 0, limit)
+	for _, item := range s.targets {
+		if item.Status == RuntimeTargetStatusRetiring {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *fakeStore) DeleteRetiringRuntimeTarget(

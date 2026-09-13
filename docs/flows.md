@@ -215,9 +215,9 @@ sequenceDiagram
     U-->>M: 安全状态，不返回底层错误
 ```
 
-## 已实现：Runtime Target 可重试删除
+## 已实现：Runtime Target 持久后台删除
 
-删除不是单次数据库操作。第一次请求先把 Target 原子改为 `retiring`，因此所有新建、重试、回滚和自动部署都会被 ready 门禁拒绝；非终态 Deployment 在事务和审计中转为 `canceling`，API 返回 `202`。客户端重试后，只有当 Worker 已排空命令，系统才按槽位清理稳定运行资源、释放 Agent 水位并删除元数据。
+删除不是单次数据库操作。第一次请求先把 Target 原子改为 `retiring`，同时持久化原始 Organization、Actor、Request ID 与开始时间，因此所有新建、重试、回滚和自动部署都会被 ready 门禁拒绝；非终态 Deployment 在事务和审计中转为 `canceling`，API 返回 `202`。Server 的有界后台扫描会在 Worker 排空命令后自动按槽位清理稳定运行资源、释放 Agent 水位并删除元数据，进程重启或客户端离开不会丢失已接受的工作。
 
 ```mermaid
 sequenceDiagram
@@ -225,6 +225,7 @@ sequenceDiagram
     actor M as Maintainer
     participant API as Runtime Target API
     participant CP as Control Plane
+    participant RW as Retirement Worker
     participant DQ as Deployment Repository
     participant W as Deployment Worker
     participant RG as Runtime Gateway
@@ -238,20 +239,25 @@ sequenceDiagram
     CP-->>M: 202 retiring
     W->>RG: cancel（ready/retiring 清理解析）
     RG-->>W: candidate/旧执行已退出
-    M->>API: 重试 DELETE
-    CP->>DQ: 确认全部终态，按槽位解析稳定 Deployment
-    CP->>RG: RemoveRuntime(stable ID + sequence)
+    loop 有界轮询，可跨 Server 重启恢复
+        RW->>DB: 按 started_at 扫描 retiring Target
+        RW->>DQ: 确认全部终态，按槽位解析稳定 Deployment
+    end
+    RW->>RG: RemoveRuntime(stable ID + sequence)
     alt Agent Target
         RG->>A: deployment.runtime.remove
         A-->>RG: 精确资源已退出
         RG->>A: deployment.cutover.release（sequence 从高到低匹配）
         A-->>RG: 水位原子释放
     end
-    CP->>DB: 删除 retiring Target + audit（事务）
-    CP-->>M: 204 No Content
+    RW->>DB: 删除 retiring Target + 原始 Actor/Request audit（事务）
+    opt 客户端查询或幂等重试 DELETE
+        M->>API: DELETE .../runtime-targets/{id}
+        API-->>M: 204 No Content
+    end
 ```
 
-任一步外部清理失败都会保留 `retiring` 状态；重试不会重新开放部署，也不会把普通 cancel 的租约 fence 绕过去。Agent 删除命令要求持久水位足以保护目标稳定容器，release 仍只接受精确当前水位。
+任一步外部清理失败都会保留 `retiring` 状态并由后续轮询重试；它不会重新开放部署，也不会把普通 cancel 的租约 fence 绕过去。并发 Server 可以重复执行幂等外部清理，但只有一个元数据删除事务会提交最终审计。Agent 删除命令要求持久水位足以保护目标稳定容器，release 仍只接受精确当前水位。
 
 ## 已实现：Managed Host 与 Runtime Target 绑定
 

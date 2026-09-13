@@ -1028,16 +1028,35 @@ func (s *contractControlStore) UpdateRuntimeTargetProbe(
 func (s *contractControlStore) BeginRuntimeTargetRetirement(
 	_ context.Context,
 	projectID, targetID string,
-	_ time.Time,
+	retirement controlplanebiz.RuntimeTargetRetirement,
 ) (controlplanebiz.RuntimeTarget, bool, error) {
 	for index := range s.targets {
 		if s.targets[index].ID == targetID && s.targets[index].ProjectID == projectID {
 			changed := s.targets[index].Status != controlplanebiz.RuntimeTargetStatusRetiring
 			s.targets[index].Status = controlplanebiz.RuntimeTargetStatusRetiring
+			if changed {
+				s.targets[index].Retirement = &retirement
+			}
 			return s.targets[index], changed, nil
 		}
 	}
 	return controlplanebiz.RuntimeTarget{}, false, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) ListRetiringRuntimeTargets(
+	_ context.Context,
+	limit int64,
+) ([]controlplanebiz.RuntimeTarget, error) {
+	result := make([]controlplanebiz.RuntimeTarget, 0, limit)
+	for _, item := range s.targets {
+		if item.Status == controlplanebiz.RuntimeTargetStatusRetiring {
+			result = append(result, item)
+			if int64(len(result)) == limit {
+				break
+			}
+		}
+	}
+	return result, nil
 }
 
 func (s *contractControlStore) DeleteRetiringRuntimeTarget(

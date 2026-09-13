@@ -22,6 +22,7 @@ import (
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
 	controlplanedata "github.com/owndock/owndock/internal/modules/controlplane/data"
 	controlplaneservice "github.com/owndock/owndock/internal/modules/controlplane/service"
+	controlplaneworker "github.com/owndock/owndock/internal/modules/controlplane/worker"
 	deploymentbiz "github.com/owndock/owndock/internal/modules/deployment/biz"
 	deploymentdata "github.com/owndock/owndock/internal/modules/deployment/data"
 	deploymentservice "github.com/owndock/owndock/internal/modules/deployment/service"
@@ -133,6 +134,7 @@ func run() error {
 	var mongoClient *platformmongo.Client
 	var productAPI *server.ProductAPI
 	var deploymentWorkerServer *lifecycle.Server
+	var runtimeTargetRetirementWorkerServer *lifecycle.Server
 	var inventoryWorkerServer *lifecycle.Server
 	var inventoryEventWorkerServer *lifecycle.Server
 	var agentControlServer *server.AgentServer
@@ -705,6 +707,31 @@ func run() error {
 				controlPlaneStore,
 				deploymentdata.NewRuntimeTargetRetirementAdapter(retirement),
 			)
+			retirementLoop, retirementLoopErr :=
+				controlplaneworker.NewRuntimeTargetRetirementLoop(
+					controlPlaneUseCase, 16, pollInterval, operationTimeout,
+					func(workerErr error) {
+						_ = logger.Log(
+							log.LevelError,
+							"component", "runtime_target_retirement_worker",
+							"error", workerErr,
+						)
+					},
+				)
+			if retirementLoopErr != nil {
+				return fmt.Errorf(
+					"create runtime target retirement worker loop: %w",
+					retirementLoopErr,
+				)
+			}
+			retirementLoop.WithObservability(
+				func(result string, duration time.Duration) {
+					metrics.RecordWorkerPoll(
+						"runtime_target_retirement", result, duration,
+					)
+				},
+			)
+			runtimeTargetRetirementWorkerServer = lifecycle.NewServer(retirementLoop)
 			runner, err := deploymentworker.NewRunner(
 				deploymentStore, executor, instanceID, leaseDuration, time.Now,
 			)
@@ -955,6 +982,9 @@ func run() error {
 	managedServers := []transport.Server{httpServer}
 	if deploymentWorkerServer != nil {
 		managedServers = append(managedServers, deploymentWorkerServer)
+	}
+	if runtimeTargetRetirementWorkerServer != nil {
+		managedServers = append(managedServers, runtimeTargetRetirementWorkerServer)
 	}
 	if inventoryWorkerServer != nil {
 		managedServers = append(managedServers, inventoryWorkerServer)

@@ -1478,6 +1478,37 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	); !errors.Is(err, controlplanebiz.ErrNotFound) {
 		t.Fatalf("deleted runtime target lookup = %v", err)
 	}
+	resumableTarget, err := controlPlaneUseCase.CreateRuntimeTarget(
+		ctx, principal, project.ID, "resumable retirement", host.ID,
+		runtimeaccess.ModeDirectDocker,
+		"tcp://docker.example.com:2376", "docker.example.com",
+		"secret://docker-production", "resumable-target-request",
+	)
+	if err != nil {
+		t.Fatalf("create resumable runtime target: %v", err)
+	}
+	retirement := controlplanebiz.RuntimeTargetRetirement{
+		OrganizationID: principal.OrganizationID, ActorID: principal.UserID,
+		RequestID: "resumable-delete-request", StartedAt: time.Now().UTC(),
+	}
+	retiringTarget, changed, err := controlPlaneStore.BeginRuntimeTargetRetirement(
+		ctx, project.ID, resumableTarget.ID, retirement,
+	)
+	if err != nil || !changed || retiringTarget.Retirement == nil {
+		t.Fatalf("begin resumable retirement = %+v/%t/%v", retiringTarget, changed, err)
+	}
+	retiringTargets, err := controlPlaneStore.ListRetiringRuntimeTargets(ctx, 10)
+	if err != nil || len(retiringTargets) != 1 ||
+		retiringTargets[0].ID != resumableTarget.ID ||
+		retiringTargets[0].Retirement == nil ||
+		retiringTargets[0].Retirement.RequestID != retirement.RequestID {
+		t.Fatalf("retiring runtime targets = %+v/%v", retiringTargets, err)
+	}
+	if err := controlPlaneStore.DeleteRetiringRuntimeTarget(
+		ctx, project.ID, resumableTarget.ID,
+	); err != nil {
+		t.Fatalf("delete resumable runtime target: %v", err)
+	}
 
 	if err := identityUseCase.Logout(ctx, loginPrincipal, "logout-request"); err != nil {
 		t.Fatalf("logout: %v", err)

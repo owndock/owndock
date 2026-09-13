@@ -1253,12 +1253,12 @@ paths:
       tags: [Runtime Targets]
       operationId: deleteRuntimeTarget
       summary: Retire a runtime target and its managed runtime resources
-      description: The first request atomically moves the target to retiring so new deployments are rejected. A 202 response means active deployments were moved to canceling and the same request should be retried. After all commands drain, the server removes exact stable runtime resources, releases Agent cutover watermarks, deletes target metadata, and returns 204. Repeating a completed deletion is idempotent.
+      description: The first request atomically moves the target to retiring so new deployments are rejected and persists the initiating audit context. A 202 response means the Server has accepted the durable retirement workflow and will continue it in the background; client retries are optional. After all commands drain, the Server removes exact stable runtime resources, releases Agent cutover watermarks, deletes target metadata, and records the final audit event. Repeating a completed deletion is idempotent.
       security:
         - bearerAuth: []
       responses:
         "202":
-          description: Retirement is fenced and waiting for deployment workers to drain.
+          description: Durable retirement is fenced and will continue in the background while deployment workers drain.
           headers:
             X-Request-ID:
               $ref: "#/components/headers/RequestID"
