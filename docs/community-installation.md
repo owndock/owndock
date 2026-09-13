@@ -31,6 +31,8 @@ tar -xzf "owndock-community_${tag#v}.tar.gz"
 
 解包后，继续按[社区版发布候选门禁](release-readiness.md)验证容器清单和目标镜像签名，再从清单复制 `ghcr.io/owndock/owndock@sha256:...`。不要把 SemVer tag 或 `latest` 写入实际部署配置。
 
+当前社区安装是联网 Registry 模式：首次安装和升级需要能够按 digest 访问 GHCR，并拉取 Compose 固定的 MongoDB 官方镜像。安装包不内嵌 OCI image layer；Sigstore 的离线验签只表示验证过程不访问签名服务，不等于可以在完全隔离网络中安装。受支持的私有镜像同步、签名重新绑定和完整 air-gapped 介质属于后续商业交付范围。在该能力正式发布前，不要手工改写镜像仓库后仍宣称符合社区兼容报告。
+
 ## 生成安装 Secret
 
 在只允许管理员访问的本机目录运行：

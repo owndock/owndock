@@ -77,7 +77,7 @@ sequenceDiagram
 - Chrome/Firefox/Safari 的登录、权限即时撤销、Terminal WSS、IME、resize、慢消费者与断网 E2E；
 - 客户选择的 Registry、私有 CA、代理、KMS 和隔离网络兼容矩阵；
 - 客户等价存储上的 MongoDB Primary 切换、加密备份异地取回和版本升级演练；
-- 首个受保护 Tag 的公开下载、在线/离线验签和安装验证。
+- 首个受保护 Tag 的公开下载、在线/离线验签和联网 Registry 安装验证；完全隔离安装不在当前社区支持范围。
 
 这些结果应绑定精确 Tag、commit、运行环境和时间，并在发布评审中逐项确认。缺少结果时只能发布 pre-release，不能标记为 production-ready。
 

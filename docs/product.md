@@ -121,7 +121,7 @@ Owner 是 Organization 全局角色并隐式访问全部 Project；受邀用户�
 
 OwnDock 采用 Open Core：
 
-- 社区核心：单 Organization、标准 Git HTTPS/SSH、Deploy Key/PAT、Dockerfile 单 Build Worker、外部 OCI 镜像、Docker 多目标部署、本地账号、基础 RBAC/审计和基础安全终端；
-- 商业扩展：GitHub/GitLab OAuth/App 仓库发现、分布式构建、审批与供应链治理、SSO/OIDC、自定义策略、终端录像/合规留存、高可用、灾备和企业支持。
+- 社区核心：单 Organization、标准 Git HTTPS/SSH、Deploy Key/PAT、Dockerfile 单 Build Worker、外部 OCI 镜像、Docker 多目标部署、本地账号、基础 RBAC/审计、基础安全终端，以及联网 Registry 的单节点安装；
+- 商业扩展：GitHub/GitLab OAuth/App 仓库发现、分布式构建、审批与供应链治理、SSO/OIDC、自定义策略、终端录像/合规留存、高可用、灾备、受支持的私有镜像同步/完全隔离安装包和企业支持。
 
 社区核心必须能够独立完成 Git-to-Deploy、外部镜像部署和受权限控制的基础终端用例，不能反向依赖商业模块。
