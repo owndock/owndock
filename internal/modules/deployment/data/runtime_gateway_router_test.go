@@ -28,6 +28,16 @@ func (g *gatewayProbe) Cancel(context.Context, biz.ExecutionPlan, biz.RuntimeCre
 	return nil
 }
 
+func (g *gatewayProbe) RemoveRuntime(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error {
+	g.called = "remove"
+	return nil
+}
+
+func (g *gatewayProbe) ReleaseCutoverWatermark(context.Context, biz.ExecutionPlan) error {
+	g.called = "release"
+	return nil
+}
+
 func TestRuntimeGatewayRouterDispatchesByConnectionMode(t *testing.T) {
 	direct := &gatewayProbe{}
 	router := NewRuntimeGatewayRouter(map[runtimeaccess.Mode]biz.RuntimeGateway{
@@ -49,6 +59,56 @@ func TestRuntimeGatewayRouterDispatchesByConnectionMode(t *testing.T) {
 	if direct.called != "deploy" {
 		t.Fatalf("called = %q", direct.called)
 	}
+}
+
+func TestRuntimeGatewayRouterDispatchesLifecycleOperations(t *testing.T) {
+	agent := &gatewayProbe{}
+	router := NewRuntimeGatewayRouter(map[runtimeaccess.Mode]biz.RuntimeGateway{
+		runtimeaccess.ModeAgent: agent,
+	})
+	connection, err := runtimeaccess.NewAgent("host-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := biz.ExecutionPlan{TargetConnection: connection}
+	if err := router.RemoveRuntime(
+		t.Context(), plan, biz.RuntimeCredential{},
+	); err != nil || agent.called != "remove" {
+		t.Fatalf("remove = %q, %v", agent.called, err)
+	}
+	if err := router.ReleaseCutoverWatermark(
+		t.Context(), plan,
+	); err != nil || agent.called != "release" {
+		t.Fatalf("release = %q, %v", agent.called, err)
+	}
+}
+
+func TestRuntimeGatewayRouterRejectsMissingLifecycleGateway(t *testing.T) {
+	connection, _ := runtimeaccess.NewAgent("host-1")
+	router := NewRuntimeGatewayRouter(map[runtimeaccess.Mode]biz.RuntimeGateway{
+		runtimeaccess.ModeAgent: runtimeOnlyGateway{},
+	})
+	err := router.RemoveRuntime(
+		t.Context(), biz.ExecutionPlan{TargetConnection: connection},
+		biz.RuntimeCredential{},
+	)
+	var executionError *biz.ExecutionError
+	if !errors.As(err, &executionError) ||
+		executionError.Category != biz.FailureUnsupportedTarget {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+type runtimeOnlyGateway struct{}
+
+func (runtimeOnlyGateway) Prepare(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error {
+	return nil
+}
+func (runtimeOnlyGateway) Deploy(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error {
+	return nil
+}
+func (runtimeOnlyGateway) Cancel(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error {
+	return nil
 }
 
 func TestRuntimeGatewayRouterRejectsUnavailableMode(t *testing.T) {

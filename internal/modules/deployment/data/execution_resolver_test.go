@@ -21,6 +21,18 @@ type fullExecutionReferenceStoreStub struct {
 	executionReferenceStoreStub
 }
 
+type cleanupExecutionReferenceStoreStub struct {
+	executionReferenceStoreStub
+	cleanupCalled *bool
+}
+
+func (s cleanupExecutionReferenceStoreStub) RuntimeTargetCleanupExecution(
+	context.Context, string, string,
+) (runtimeaccess.Connection, error) {
+	*s.cleanupCalled = true
+	return runtimeaccess.NewAgent("host-1")
+}
+
 func (fullExecutionReferenceStoreStub) ReleaseExecutionSpec(
 	context.Context, string, string, string,
 ) (string, string, string, string, runtimespec.Spec, error) {
@@ -90,5 +102,25 @@ func TestExecutionResolverBuildsStableRuntimePlan(t *testing.T) {
 		first.TargetConnection.DirectDocker == nil ||
 		first.TargetConnection.DirectDocker.CredentialRef != "secret://production" {
 		t.Fatalf("plans = %+v, %+v", first, second)
+	}
+}
+
+func TestExecutionResolverUsesRetiringTargetOnlyForCancellation(t *testing.T) {
+	cleanupCalled := false
+	resolver := NewExecutionResolver(cleanupExecutionReferenceStoreStub{
+		cleanupCalled: &cleanupCalled,
+	})
+	deployment := biz.Deployment{
+		ID: "deployment", ProjectID: "project", ApplicationID: "application",
+		EnvironmentID: "environment", RuntimeTargetID: "target", ReleaseID: "release",
+	}
+	plan, err := resolver.ResolveCancellation(t.Context(), deployment)
+	if err != nil || !cleanupCalled || plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
+		t.Fatalf("cancellation plan = %+v, cleanup = %t, error = %v", plan, cleanupCalled, err)
+	}
+	cleanupCalled = false
+	plan, err = resolver.ResolveExecution(t.Context(), deployment)
+	if err != nil || cleanupCalled || plan.TargetConnection.Mode != runtimeaccess.ModeDirectDocker {
+		t.Fatalf("normal plan = %+v, cleanup = %t, error = %v", plan, cleanupCalled, err)
 	}
 }

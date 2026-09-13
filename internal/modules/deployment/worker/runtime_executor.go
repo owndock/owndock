@@ -67,7 +67,11 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 }
 
 func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment) error {
-	return e.execute(ctx, deployment, e.gateway.Cancel)
+	resolver := e.executions.ResolveExecution
+	if cancellationResolver, ok := e.executions.(biz.CancellationExecutionResolver); ok {
+		resolver = cancellationResolver.ResolveCancellation
+	}
+	return e.executeWithResolver(ctx, deployment, resolver, e.gateway.Cancel)
 }
 
 func (e *RuntimeExecutor) execute(
@@ -75,7 +79,16 @@ func (e *RuntimeExecutor) execute(
 	deployment biz.Deployment,
 	run func(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error,
 ) error {
-	plan, err := e.executions.ResolveExecution(ctx, deployment)
+	return e.executeWithResolver(ctx, deployment, e.executions.ResolveExecution, run)
+}
+
+func (e *RuntimeExecutor) executeWithResolver(
+	ctx context.Context,
+	deployment biz.Deployment,
+	resolve func(context.Context, biz.Deployment) (biz.ExecutionPlan, error),
+	run func(context.Context, biz.ExecutionPlan, biz.RuntimeCredential) error,
+) error {
+	plan, err := resolve(ctx, deployment)
 	if err != nil {
 		return &biz.ExecutionError{Category: biz.FailureConfiguration, Cause: err}
 	}

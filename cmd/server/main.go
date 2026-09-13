@@ -680,19 +680,31 @@ func run() error {
 				runtimeGateways[runtimeaccess.ModeAgent] =
 					agentGateway
 			}
+			runtimeGateway := deploymentdata.NewRuntimeGatewayRouter(
+				runtimeGateways,
+			)
+			secretResolver := deploymentdata.NewEnvironmentSecretResolver()
 			executor, err := deploymentworker.NewRuntimeExecutor(
 				deploymentdata.NewExecutionResolver(controlPlaneStore),
-				deploymentdata.NewEnvironmentSecretResolver(),
-				deploymentdata.NewRuntimeGatewayRouter(
-					runtimeGateways,
-				),
+				secretResolver,
+				runtimeGateway,
 			)
 			if err != nil {
 				return fmt.Errorf("create deployment executor: %w", err)
 			}
-			executor.
-				WithRegistryCredentials(deploymentdata.NewEnvironmentSecretResolver()).
-				WithConfiguration(deploymentdata.NewEnvironmentSecretResolver())
+			executor.WithRegistryCredentials(secretResolver).
+				WithConfiguration(secretResolver)
+			retirement, retirementErr := deploymentbiz.NewRuntimeTargetRetirement(
+				deploymentStore, secretResolver, runtimeGateway,
+				mongoClient, auditStore, id.New, time.Now,
+			)
+			if retirementErr != nil {
+				return fmt.Errorf("create runtime target retirement: %w", retirementErr)
+			}
+			controlPlaneUseCase.WithRuntimeTargetRetirement(
+				controlPlaneStore,
+				deploymentdata.NewRuntimeTargetRetirementAdapter(retirement),
+			)
 			runner, err := deploymentworker.NewRunner(
 				deploymentStore, executor, instanceID, leaseDuration, time.Now,
 			)

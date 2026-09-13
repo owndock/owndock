@@ -43,6 +43,8 @@ type UseCase struct {
 	targets          RuntimeTargetRepository
 	targetProbes     RuntimeTargetProbeRepository
 	targetProber     RuntimeTargetProber
+	targetLifecycle  RuntimeTargetLifecycleRepository
+	targetRetirer    RuntimeTargetRetirer
 	managedHosts     ManagedHostLookup
 	registries       RegistryCredentialRepository
 	environments     EnvironmentRepository
@@ -52,6 +54,15 @@ type UseCase struct {
 	auditReader      sharedaudit.Reader
 	newID            IDGenerator
 	now              Clock
+}
+
+func (u *UseCase) WithRuntimeTargetRetirement(
+	repository RuntimeTargetLifecycleRepository,
+	retirer RuntimeTargetRetirer,
+) *UseCase {
+	u.targetLifecycle = repository
+	u.targetRetirer = retirer
+	return u
 }
 
 func (u *UseCase) WithProjectMembers(repository ProjectMemberRepository) *UseCase {
@@ -787,6 +798,80 @@ func (u *UseCase) ProbeRuntimeTarget(
 		)
 	})
 	return target, err
+}
+
+// DeleteRuntimeTarget is a retryable lifecycle operation. The first call
+// atomically moves the target out of ready, which closes deployment admission.
+// It returns completed=false while deployment workers drain cancellations.
+func (u *UseCase) DeleteRuntimeTarget(
+	ctx context.Context,
+	principal security.Principal,
+	projectID, targetID, requestID string,
+) (completed bool, err error) {
+	if u.targetLifecycle == nil || u.targetRetirer == nil {
+		return false, ErrRuntimeTargetRetirementUnavailable
+	}
+	if err := principal.Require(security.PermissionRuntimeTargetWrite); err != nil {
+		return false, err
+	}
+	if err := u.requireProject(ctx, principal, projectID); err != nil {
+		return false, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return false, err
+	}
+	now := u.now().UTC()
+	var target RuntimeTarget
+	found := true
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		var changed bool
+		var beginErr error
+		target, changed, beginErr = u.targetLifecycle.BeginRuntimeTargetRetirement(
+			transactionContext, projectID, targetID, now,
+		)
+		if errors.Is(beginErr, ErrNotFound) {
+			found = false
+			return nil
+		}
+		if beginErr != nil || !changed {
+			return beginErr
+		}
+		return u.record(
+			transactionContext, principal, auditID,
+			"runtime_target.retirement_started", "runtime_target",
+			targetID, projectID, requestID, now,
+		)
+	})
+	if err != nil || !found {
+		return !found, err
+	}
+	if err := u.targetRetirer.RetireRuntimeTarget(
+		ctx, target, principal, requestID,
+	); err != nil {
+		if errors.Is(err, ErrRuntimeTargetRetirementPending) {
+			return false, nil
+		}
+		return false, err
+	}
+	deleteAuditID, err := u.newID()
+	if err != nil {
+		return false, err
+	}
+	deletedAt := u.now().UTC()
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if deleteErr := u.targetLifecycle.DeleteRetiringRuntimeTarget(
+			transactionContext, projectID, targetID,
+		); deleteErr != nil {
+			return deleteErr
+		}
+		return u.record(
+			transactionContext, principal, deleteAuditID,
+			"runtime_target.delete", "runtime_target", targetID,
+			projectID, requestID, deletedAt,
+		)
+	})
+	return err == nil, err
 }
 
 func (u *UseCase) ListEnvironments(ctx context.Context, principal security.Principal, projectID string) ([]Environment, error) {

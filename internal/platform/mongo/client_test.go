@@ -63,6 +63,17 @@ const integrationImage = "mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea3
 
 type readyRuntimeTargetProber struct{}
 
+type completedRuntimeTargetRetirer struct{}
+
+func (completedRuntimeTargetRetirer) RetireRuntimeTarget(
+	context.Context,
+	controlplanebiz.RuntimeTarget,
+	security.Principal,
+	string,
+) error {
+	return nil
+}
+
 type staticAdmissionEvaluator struct{ stage string }
 
 func (e staticAdmissionEvaluator) EvaluateAdmission(_ context.Context,
@@ -704,7 +715,8 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	).WithManagedHosts(managedHostStore).
 		WithProjectMembers(controlPlaneStore).
 		WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
-		WithRuntimeTargetProbe(controlPlaneStore, readyRuntimeTargetProber{})
+		WithRuntimeTargetProbe(controlPlaneStore, readyRuntimeTargetProber{}).
+		WithRuntimeTargetRetirement(controlPlaneStore, completedRuntimeTargetRetirer{})
 	host, err := managedHostUseCase.Create(
 		ctx, principal, "Production Host", runtimeaccess.ModeDirectDocker,
 		managedhostbiz.DirectSSHConfiguration{}, "host-request",
@@ -1447,6 +1459,24 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		if item.Name == "Must Roll Back" {
 			t.Fatal("resource write committed despite audit failure")
 		}
+	}
+
+	targetDeleted, err := controlPlaneUseCase.DeleteRuntimeTarget(
+		ctx, principal, project.ID, target.ID, "target-delete-request",
+	)
+	if err != nil || !targetDeleted {
+		t.Fatalf("delete runtime target = %t, %v", targetDeleted, err)
+	}
+	targetDeleted, err = controlPlaneUseCase.DeleteRuntimeTarget(
+		ctx, principal, project.ID, target.ID, "target-delete-replay",
+	)
+	if err != nil || !targetDeleted {
+		t.Fatalf("replay runtime target delete = %t, %v", targetDeleted, err)
+	}
+	if _, err := controlPlaneStore.GetRuntimeTarget(
+		ctx, project.ID, target.ID,
+	); !errors.Is(err, controlplanebiz.ErrNotFound) {
+		t.Fatalf("deleted runtime target lookup = %v", err)
 	}
 
 	if err := identityUseCase.Logout(ctx, loginPrincipal, "logout-request"); err != nil {

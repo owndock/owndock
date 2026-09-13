@@ -613,6 +613,16 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
+			name: "begin runtime target retirement", method: http.MethodDelete,
+			target:  "/api/v1/projects/test-id/runtime-targets/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusAccepted,
+		},
+		{
+			name: "complete runtime target retirement", method: http.MethodDelete,
+			target:  "/api/v1/projects/test-id/runtime-targets/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
+		},
+		{
 			name: "logout", method: http.MethodPost, target: "/api/v1/auth/logout",
 			headers: bearerHeaders(), wantStatus: http.StatusNoContent,
 		},

@@ -82,7 +82,7 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
 - Agent `sequence` 必须为大于零的单调递增整数；
 - Server 使用独立的单调递增 `sequence`；
 - Agent 可以发送 `hello`、`heartbeat`、`command_result` 和 `terminal`；Server 可以发送确认、安全错误、严格类型化的 `command` 和 `terminal`；
-- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel`、`deployment.cutover.release` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
+- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel`、`deployment.runtime.remove`、`deployment.cutover.release` 和 `runtime.inventory.prepare/chunk/release/events`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
 - frame 中不能携带 Docker endpoint、Socket、SSH 地址、用户选择的 Shell 或任意宿主机命令；
 - 连接建立后的协议错误通过安全 `error` frame 返回，不透传数据库或证书错误。
 
@@ -106,6 +106,7 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
       "deployment.stage",
       "deployment.activate",
       "deployment.cancel",
+      "deployment.runtime.remove",
       "deployment.cutover.release",
       "runtime.inventory.prepare",
       "runtime.inventory.chunk",
@@ -369,17 +370,18 @@ sequenceDiagram
 
 ## Agent Deployment 两阶段契约
 
-Agent 部署不能简单地把现有 Server 直连 Docker 操作整体搬到远端。候选容器健康后，Server 必须重新验证 MongoDB 中当前 Deployment 的 worker owner、lease generation、状态、过期时间，以及它仍是部署槽位的当前序号，才能允许候选接管稳定容器名。每个命令还携带同一部署槽位内单调递增的 `cutover_sequence`：lease generation 区分同一 Deployment 的 Worker 尝试，cutover sequence 区分不同 Deployment 的新旧。内部 `v1` 契约使用下面五种类型化命令：
+Agent 部署不能简单地把现有 Server 直连 Docker 操作整体搬到远端。候选容器健康后，Server 必须重新验证 MongoDB 中当前 Deployment 的 worker owner、lease generation、状态、过期时间，以及它仍是部署槽位的当前序号，才能允许候选接管稳定容器名。每个命令还携带同一部署槽位内单调递增的 `cutover_sequence`：lease generation 区分同一 Deployment 的 Worker 尝试，cutover sequence 区分不同 Deployment 的新旧。内部 `v1` 契约使用下面六种类型化命令：
 
 - `deployment.prepare`：按不可变 digest 检查或拉取镜像；只有该命令可携带有界 Registry authorization；
 - `deployment.stage`：使用受约束的 Runtime Spec 和 Environment 创建候选容器并等待健康，但不切换稳定名称；
 - `deployment.activate`：Server 重新通过 lease fence 后下发，只负责进行幂等的最终名称切换；
 - `deployment.cancel`：只清理由同一 Deployment ID、fencing token 和 cutover sequence 拥有的候选、回退或稳定容器。
+- `deployment.runtime.remove`：产品资源进入 `retiring` 且在途命令排空后，只按稳定容器名、Deployment ID 和 cutover sequence 删除精确受管运行资源；持久水位必须足以拒绝所有延迟旧命令；
 - `deployment.cutover.release`：产品资源已进入不可恢复终态后，精确释放一个槽位水位；只携带 Deployment ID、cutover sequence、Runtime Target ID 和稳定容器名，不携带 Worker、凭据、运行规格或任意 Docker 参数。
 
 `prepare/stage/activate/cancel` 都固定 Deployment、Worker、generation、cutover sequence、Runtime Target 和稳定容器名，不能携带 Docker endpoint 或 Shell。`stage` 的 Environment 必须与 Release Runtime Spec 声明的键完全一致；`activate/cancel` 禁止携带 Registry、Environment 或镜像字段。Agent 会把 cutover sequence 写入候选和稳定容器标签，并在独立的本机文件中保存每个稳定容器槽位的最高 sequence 与 Deployment ID。该水位不随结果缓存淘汰；因此即使 Agent 重启或稳定容器被删除，延迟到达的旧 `prepare/stage/activate` 仍返回 `stale_execution`。较旧 `cancel` 仍可按完整执行身份清理自己的候选，不会删除新 Deployment。水位文件损坏、写入失败或达到配置上限时失败关闭。
 
-水位不能用 TTL 或“满了就删最旧记录”回收，因为旧命令可能在网络恢复后才到达。`deployment.cutover.release` 只提供安全的最后一步：Server 必须先把 Application/Environment/Runtime Target 等产品资源置为不再接受部署的终态，停止并等待该槽位所有在途命令，确认受管容器已经退出，再下发精确的当前 Deployment/sequence。Agent 仅在两个值都匹配当前水位时原子删除；不匹配返回 `cutover_conflict` 并保留记录，不存在则按已释放幂等成功。同一 release 的安全结果会持久化，所以响应丢失不会要求构造新的释放请求。当前共享协议、本机执行器和 Agent Gateway 边界已经完成，产品删除 API 的事务/任务编排尚未接入；两台真实主机、网络分区和网络层延迟命令的系统验收也仍未完成，因此当前不能据此宣称 Agent 模式生产就绪。
+水位不能用 TTL 或“满了就删最旧记录”回收，因为旧命令可能在网络恢复后才到达。Runtime Target `DELETE` 先原子写入 `retiring`，因此新 Deployment 失去 ready 门禁；非终态 Deployment 被置为 `canceling`，API 返回 `202`，由 Worker 使用只允许 ready/retiring 的清理解析器排空。重试删除时，Server 先用 `deployment.runtime.remove` 删除每个槽位最新成功 Deployment 的稳定容器；如果后续失败 Deployment 已推进水位，较新水位仍可保护较旧稳定容器。随后 Server 按 sequence 从高到低尝试 `deployment.cutover.release`，Agent 只在精确匹配当前水位时原子删除；不匹配返回 `cutover_conflict` 并保留记录，不存在则按已释放幂等成功。两步命令的安全结果都会持久化，响应丢失可重试。真实双主机、网络分区和网络层延迟命令的系统验收仍未完成，因此当前不能据此宣称 Agent 模式生产就绪。
 
 ```json
 {
@@ -465,7 +467,7 @@ sequenceDiagram
 
     P->>P: 资源进入 draining/deleted，禁止新 Deployment
     P->>Q: 等待槽位在途命令全部终止
-    P->>A: 删除精确受管运行资源
+    P->>A: deployment.runtime.remove(stable ID + sequence)
     A->>D: 核对并移除容器
     P->>A: deployment.cutover.release(exact ID + sequence)
     A->>W: compare exact current watermark

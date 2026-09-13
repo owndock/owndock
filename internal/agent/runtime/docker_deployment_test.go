@@ -251,6 +251,58 @@ func TestAgentCutoverReleaseIsExactDurableAndReclaimsCapacity(t *testing.T) {
 	}
 }
 
+func TestAgentRuntimeRemovalRequiresExactWatermarkAndKeepsIt(t *testing.T) {
+	executor, engine := newDeploymentExecutor(t)
+	const containerName = "owndock-project-1-app-1"
+	if _, err := executor.cutovers.Observe(containerName, "deployment-2", 2); err != nil {
+		t.Fatal(err)
+	}
+	addManagedContainer(
+		engine, containerName, containerName, "deployment-2", 7, 2, true,
+	)
+
+	mismatch := cutoverCommand(
+		"remove-mismatch", agentprotocol.AgentCommandRuntimeRemove,
+		"deployment-1", 2,
+	)
+	result, err := executor.Execute(t.Context(), mismatch)
+	if err != nil || result.Status != agentprotocol.AgentCommandFailed ||
+		result.ErrorCode != "cutover_conflict" {
+		t.Fatalf("mismatched removal = %+v, %v", result, err)
+	}
+	if _, err := engine.ContainerInspect(
+		t.Context(), containerName, mobyclient.ContainerInspectOptions{},
+	); err != nil {
+		t.Fatalf("mismatched removal touched container: %v", err)
+	}
+
+	remove := cutoverCommand(
+		"remove-exact", agentprotocol.AgentCommandRuntimeRemove,
+		"deployment-2", 2,
+	)
+	result, err = executor.Execute(t.Context(), remove)
+	if err != nil || result.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("exact removal = %+v, %v", result, err)
+	}
+	if _, err := engine.ContainerInspect(
+		t.Context(), containerName, mobyclient.ContainerInspectOptions{},
+	); !cerrdefs.IsNotFound(err) {
+		t.Fatalf("runtime container still exists: %v", err)
+	}
+	if err := executor.cutovers.ProtectsRemoval(containerName, "deployment-2", 2); err != nil {
+		t.Fatalf("removal released watermark early: %v", err)
+	}
+
+	release := cutoverCommand(
+		"release-after-remove", agentprotocol.AgentCommandCutoverRelease,
+		"deployment-2", 2,
+	)
+	result, err = executor.Execute(t.Context(), release)
+	if err != nil || result.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("release after removal = %+v, %v", result, err)
+	}
+}
+
 func TestAgentDockerDeploymentStagesAndActivatesCandidate(t *testing.T) {
 	executor, engine := newDeploymentExecutor(t)
 	stage := deploymentCommand(
@@ -637,9 +689,21 @@ func cutoverReleaseCommand(
 	commandID, deploymentID string,
 	sequence uint64,
 ) agentprotocol.AgentCommand {
+	return cutoverCommand(
+		commandID, agentprotocol.AgentCommandCutoverRelease,
+		deploymentID, sequence,
+	)
+}
+
+func cutoverCommand(
+	commandID string,
+	kind agentprotocol.AgentCommandKind,
+	deploymentID string,
+	sequence uint64,
+) agentprotocol.AgentCommand {
 	return agentprotocol.AgentCommand{
 		ID:       commandID,
-		Kind:     agentprotocol.AgentCommandCutoverRelease,
+		Kind:     kind,
 		Deadline: time.Now().Add(time.Minute),
 		Cutover: &agentprotocol.CutoverCommand{
 			DeploymentID:    deploymentID,

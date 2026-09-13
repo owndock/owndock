@@ -105,6 +105,7 @@
   "runtime_target_host_mismatch": "运行目标不属于所选受管主机",
   "runtime_target_not_ready": "运行目标尚未就绪",
   "runtime_target_probe_unavailable": "运行目标连接检查当前不可用",
+  "runtime_target_retirement_unavailable": "运行目标删除当前不可用",
   "source_repository_probe_unavailable": "Git 仓库连接检查当前不可用",
   "source_revision_unavailable": "源码版本当前不可用",
   "terminal_access_denied": "终端访问策略拒绝了此请求",

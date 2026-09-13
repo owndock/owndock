@@ -122,6 +122,7 @@ func StandardCapabilities(hostTerminal bool) []string {
 		agentprotocol.CapabilityDeploymentStage,
 		agentprotocol.CapabilityDeploymentActivate,
 		agentprotocol.CapabilityDeploymentCancel,
+		agentprotocol.CapabilityRuntimeRemove,
 		agentprotocol.CapabilityCutoverRelease,
 		agentprotocol.CapabilityInventoryPrepare,
 		agentprotocol.CapabilityInventoryChunk,

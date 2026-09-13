@@ -9,6 +9,8 @@ import (
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
+var ErrCutoverConflict = errors.New("runtime cutover watermark conflicts with lifecycle operation")
+
 type FailureCategory string
 
 const (
@@ -98,6 +100,10 @@ type ExecutionResolver interface {
 	ResolveExecution(context.Context, Deployment) (ExecutionPlan, error)
 }
 
+type CancellationExecutionResolver interface {
+	ResolveCancellation(context.Context, Deployment) (ExecutionPlan, error)
+}
+
 type CredentialResolver interface {
 	ResolveCredential(context.Context, runtimeaccess.Connection) (RuntimeCredential, error)
 }
@@ -130,6 +136,15 @@ type RuntimeGateway interface {
 	Prepare(context.Context, ExecutionPlan, RuntimeCredential) error
 	Deploy(context.Context, ExecutionPlan, RuntimeCredential) error
 	Cancel(context.Context, ExecutionPlan, RuntimeCredential) error
+}
+
+// RuntimeLifecycleGateway is intentionally separate from normal deployment
+// cancellation. A completed deployment no longer has an active worker lease;
+// lifecycle cleanup therefore matches the stable slot by deployment and
+// cutover sequence, then releases its Agent watermark as a distinct step.
+type RuntimeLifecycleGateway interface {
+	RemoveRuntime(context.Context, ExecutionPlan, RuntimeCredential) error
+	ReleaseCutoverWatermark(context.Context, ExecutionPlan) error
 }
 
 type Executor interface {

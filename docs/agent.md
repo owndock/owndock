@@ -76,6 +76,7 @@ control:
     - deployment.stage
     - deployment.activate
     - deployment.cancel
+    - deployment.runtime.remove
     - deployment.cutover.release
     - runtime.inventory.prepare
     - runtime.inventory.chunk
@@ -113,7 +114,7 @@ runtime:
 - 持久结果只保存 command kind、SHA-256 指纹和安全结果；Registry authorization、Environment 值、目标 ID 和原始 Docker 错误不会写入缓存；
 - Runtime Inventory manifest/chunk/release/events 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 和 Event poll 每批最多携带 64 条规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
 - 部署切换水位只保存稳定容器槽位、最高 cutover sequence 和对应 Deployment ID，不保存完整命令或秘密；它独立于可淘汰的结果缓存，因此 Agent 重启或容器缺失后仍能拒绝旧命令；
-- `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Agent 已支持精确、幂等的 `deployment.cutover.release`，但只有产品删除编排先停止该槽位的新任务、等待在途部署命令结束并移除运行资源后才能调用；Application/Environment/Runtime Target 删除 API 尚未接入这条编排；
+- `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Runtime Target `DELETE` 已接入 `retiring → canceling/drain → deployment.runtime.remove → deployment.cutover.release → 删除元数据` 的可重试链路；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
 - Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
@@ -225,11 +226,11 @@ Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell�
 - 首次私钥生成、enrollment 兑换和配置/身份材料安全落盘已经自动化，但仍需真实发行网络、私有 CA 和进程崩溃点系统验收；
 - 版本化包、systemd 安装和发行签名流水线已经实现；CI 已加入真实 Agent 进程的 mTLS hello/heartbeat/断线重连，以及真实 systemd 的启动、相邻测试版本升级、启动崩溃恢复、状态保留和回滚门禁，但 Linux 首次执行证据、正式相邻 Tag、真实 Agent 命令升级中断和多主机灰度/回滚验收仍未完成；
 - 自动证书轮换已经有代码级竞态和响应丢失恢复测试，但尚未完成真实双主机、跨控制面实例、进程崩溃点和升级/回滚系统验收；
-- 尚未完成产品删除 API 到 cutover release 的事务编排，以及双主机选址、断线、网络分区和旧命令延迟到达的系统验收；
+- 尚未完成 Application/Environment 级联删除，以及双主机选址、断线、网络分区和旧命令延迟到达的系统验收；Runtime Target 删除编排已经落地；
 - 容器和主机终端已支持 Agent 模式，但仍需真实远程 Linux、两主机和浏览器故障矩阵验收；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
 - Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标和两个 Runner 竞争；Project/Host 权限查询 API 已实现，真实双主机断线/洪峰系统验收尚未完成。
 
 Agent Control Server 启用时，Server 会同时注册 Agent probe 和部署路径；Host 在线且本机 Docker probe 成功后，Agent Runtime Target 可以进入 `ready`。多主机系统验收完成前，文档和 UI 仍需明确标注当前支持范围。
 
-部署协议和本机执行器已经完成 `deployment.prepare/stage/activate/cancel` 以及 `deployment.cutover.release` 的严格契约和 secret-safe 幂等指纹。候选容器先在 `stage` 阶段通过健康检查，Server 再验证 MongoDB lease 与槽位当前 cutover sequence，最后才发送不含秘密的 `activate`；Agent 会同时使用独立持久化最高水位和受管容器标签判断新旧，即使进程重启或稳定容器缺失，也不会让更早的 Deployment 再次变为当前部署。生命周期释放只接受精确的 Deployment ID、sequence、Runtime Target 和稳定容器槽位；不匹配时失败关闭，成功响应丢失后可重放同一命令。本机语义回归已经覆盖该乱序和释放场景，真实产品删除编排与网络故障验收仍属于上面的未完成项。详细时序见 [Agent Control Protocol v1](../api/agent-control.md#agent-deployment-两阶段契约)。
+部署协议和本机执行器已经完成 `deployment.prepare/stage/activate/cancel`、`deployment.runtime.remove` 以及 `deployment.cutover.release` 的严格契约和 secret-safe 幂等指纹。候选容器先在 `stage` 阶段通过健康检查，Server 再验证 MongoDB lease 与槽位当前 cutover sequence，最后才发送不含秘密的 `activate`；Agent 使用独立持久水位和受管容器标签拒绝延迟旧命令。Runtime Target 删除先进入 `retiring`、排空在途部署，再移除由当前或更高水位保护的精确稳定资源，最后精确释放水位；不匹配时保留水位并尝试该槽位下一个已知 sequence。真实网络故障验收仍属于上面的未完成项。详细时序见 [Agent Control Protocol v1](../api/agent-control.md#agent-deployment-两阶段契约)。

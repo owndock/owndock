@@ -39,6 +39,7 @@ type CutoverStore interface {
 		deploymentID string,
 		sequence uint64,
 	) (released bool, err error)
+	ProtectsRemoval(containerName string, deploymentID string, sequence uint64) error
 }
 
 type cutoverWatermark struct {
@@ -152,6 +153,28 @@ func (s *FileCutoverStore) Release(
 		return false, err
 	}
 	return true, nil
+}
+
+// ProtectsRemoval verifies that the durable watermark will reject every
+// delayed command which could recreate or replace the selected stable
+// runtime. A newer watermark safely protects an older stable container after
+// a later deployment failed; Release remains exact and separate.
+func (s *FileCutoverStore) ProtectsRemoval(
+	containerName string,
+	deploymentID string,
+	sequence uint64,
+) error {
+	if !validCutoverEntry(containerName, deploymentID, sequence) {
+		return ErrInvalidCutoverStore
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.entries[containerName]
+	if !exists || current.sequence < sequence ||
+		(current.sequence == sequence && current.deploymentID != deploymentID) {
+		return ErrCutoverConflict
+	}
+	return nil
 }
 
 func (s *FileCutoverStore) load() error {

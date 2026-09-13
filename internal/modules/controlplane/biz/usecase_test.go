@@ -74,6 +74,100 @@ func TestAcceptedProductResourceFlow(t *testing.T) {
 	}
 }
 
+type runtimeTargetRetirerProbe struct {
+	err   error
+	calls int
+}
+
+func (p *runtimeTargetRetirerProbe) RetireRuntimeTarget(
+	context.Context,
+	RuntimeTarget,
+	security.Principal,
+	string,
+) error {
+	p.calls++
+	return p.err
+}
+
+func TestDeleteRuntimeTargetFencesDrainsAndCompletesOnRetry(t *testing.T) {
+	store := &fakeStore{
+		projects: []Project{{ID: "project-1", OrganizationID: "organization-1"}},
+		targets: []RuntimeTarget{{
+			ID: "target-1", ProjectID: "project-1", Name: "production",
+			ManagedHostID: "host-1", ConnectionMode: runtimeaccess.ModeAgent,
+			Status: RuntimeTargetStatusReady,
+		}},
+	}
+	audits := &fakeAudits{}
+	retirer := &runtimeTargetRetirerProbe{err: ErrRuntimeTargetRetirementPending}
+	ids := 0
+	useCase := NewUseCase(
+		store, store, store, store, transaction.Passthrough{}, audits, audits,
+		func() (string, error) {
+			ids++
+			return fmt.Sprintf("id-%d", ids), nil
+		},
+		func() time.Time { return time.Unix(int64(100+ids), 0) },
+	).WithRuntimeTargetRetirement(store, retirer)
+	principal := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleOwner,
+	}
+	completed, err := useCase.DeleteRuntimeTarget(
+		t.Context(), principal, "project-1", "target-1", "request-1",
+	)
+	if err != nil || completed || store.targets[0].Status != RuntimeTargetStatusRetiring {
+		t.Fatalf("first delete = %v/%v, target = %+v", completed, err, store.targets)
+	}
+	retirer.err = nil
+	completed, err = useCase.DeleteRuntimeTarget(
+		t.Context(), principal, "project-1", "target-1", "request-2",
+	)
+	if err != nil || !completed || len(store.targets) != 0 || retirer.calls != 2 {
+		t.Fatalf("second delete = %v/%v, targets = %+v calls = %d", completed, err, store.targets, retirer.calls)
+	}
+	if len(audits.events) != 2 ||
+		audits.events[0].Action != "runtime_target.retirement_started" ||
+		audits.events[1].Action != "runtime_target.delete" {
+		t.Fatalf("audit events = %+v", audits.events)
+	}
+}
+
+func TestDeleteRuntimeTargetRequiresLifecyclePermissionAndProject(t *testing.T) {
+	store := &fakeStore{}
+	audits := &fakeAudits{}
+	newUseCase := func() *UseCase {
+		return NewUseCase(
+			store, store, store, store, transaction.Passthrough{}, audits, audits,
+			func() (string, error) { return "id-1", nil }, time.Now,
+		)
+	}
+	owner := security.Principal{
+		UserID: "owner-1", OrganizationID: "organization-1",
+		SessionID: "session-1", Role: security.RoleOwner,
+	}
+	if _, err := newUseCase().DeleteRuntimeTarget(
+		t.Context(), owner, "project-1", "target-1", "request-1",
+	); err != ErrRuntimeTargetRetirementUnavailable {
+		t.Fatalf("missing lifecycle error = %v", err)
+	}
+	configured := newUseCase().WithRuntimeTargetRetirement(
+		store, &runtimeTargetRetirerProbe{},
+	)
+	viewer := owner
+	viewer.Role = security.RoleViewer
+	if _, err := configured.DeleteRuntimeTarget(
+		t.Context(), viewer, "project-1", "target-1", "request-1",
+	); err != security.ErrForbidden {
+		t.Fatalf("viewer error = %v", err)
+	}
+	if _, err := configured.DeleteRuntimeTarget(
+		t.Context(), owner, "project-1", "target-1", "request-1",
+	); err != ErrNotFound {
+		t.Fatalf("missing project error = %v", err)
+	}
+}
+
 type templateCatalogStub struct {
 	item Template
 }
@@ -525,6 +619,35 @@ func (s *fakeStore) UpdateRuntimeTargetProbe(
 		}
 	}
 	return RuntimeTarget{}, ErrNotFound
+}
+
+func (s *fakeStore) BeginRuntimeTargetRetirement(
+	_ context.Context,
+	projectID, targetID string,
+	_ time.Time,
+) (RuntimeTarget, bool, error) {
+	for index := range s.targets {
+		if s.targets[index].ProjectID == projectID && s.targets[index].ID == targetID {
+			changed := s.targets[index].Status != RuntimeTargetStatusRetiring
+			s.targets[index].Status = RuntimeTargetStatusRetiring
+			return s.targets[index], changed, nil
+		}
+	}
+	return RuntimeTarget{}, false, ErrNotFound
+}
+
+func (s *fakeStore) DeleteRetiringRuntimeTarget(
+	_ context.Context,
+	projectID, targetID string,
+) error {
+	for index := range s.targets {
+		if s.targets[index].ProjectID == projectID && s.targets[index].ID == targetID &&
+			s.targets[index].Status == RuntimeTargetStatusRetiring {
+			s.targets = append(s.targets[:index], s.targets[index+1:]...)
+			return nil
+		}
+	}
+	return ErrNotFound
 }
 
 func (s *fakeStore) ListRegistryCredentials(_ context.Context, projectID string) ([]RegistryCredential, error) {

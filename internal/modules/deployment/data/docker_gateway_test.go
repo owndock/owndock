@@ -297,6 +297,32 @@ func TestDockerGatewayCancelDoesNotRemoveNewerDeployment(t *testing.T) {
 	}
 }
 
+func TestDockerGatewayRuntimeRemovalRequiresExactStableCutover(t *testing.T) {
+	plan := testExecutionPlan()
+	probe := &dockerEngineProbe{inspect: mobyclient.ContainerInspectResult{Container: container.InspectResponse{
+		ID: "stable",
+		Config: &container.Config{Labels: map[string]string{
+			deploymentLabel:      plan.DeploymentID,
+			cutoverSequenceLabel: strconv.FormatUint(plan.CutoverSequence+1, 10),
+		}},
+	}}}
+	gateway := &DockerGateway{newEngine: func(biz.ExecutionPlan, biz.RuntimeCredential) (dockerEngine, error) {
+		return probe, nil
+	}}
+	if err := gateway.RemoveRuntime(
+		t.Context(), plan, biz.RuntimeCredential{},
+	); err == nil || probe.removed {
+		t.Fatalf("mismatched removal = %v, removed = %t", err, probe.removed)
+	}
+	probe.inspect.Container.Config.Labels[cutoverSequenceLabel] =
+		strconv.FormatUint(plan.CutoverSequence, 10)
+	if err := gateway.RemoveRuntime(
+		t.Context(), plan, biz.RuntimeCredential{},
+	); err != nil || !probe.removed {
+		t.Fatalf("exact removal = %v, removed = %t", err, probe.removed)
+	}
+}
+
 func TestDockerGatewayDoesNotReplaceUnmanagedStableContainer(t *testing.T) {
 	plan := testExecutionPlan()
 	probe := &dockerEngineProbe{

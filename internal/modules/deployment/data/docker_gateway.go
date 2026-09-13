@@ -267,6 +267,47 @@ func (g *DockerGateway) Cancel(
 	return nil
 }
 
+func (g *DockerGateway) RemoveRuntime(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	credential biz.RuntimeCredential,
+) error {
+	engine, err := g.newEngine(plan, credential)
+	if err != nil {
+		return &biz.ExecutionError{Category: biz.FailureCredential, Cause: err}
+	}
+	defer func() { _ = engine.Close() }()
+	current, err := engine.ContainerInspect(
+		ctx, plan.ContainerName, mobyclient.ContainerInspectOptions{},
+	)
+	if cerrdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
+	}
+	if !managedContainer(current) ||
+		current.Container.Config.Labels[deploymentLabel] != plan.DeploymentID ||
+		cutoverSequence(current) != plan.CutoverSequence {
+		return runtimeConflictError()
+	}
+	if _, err := engine.ContainerRemove(
+		ctx,
+		current.Container.ID,
+		mobyclient.ContainerRemoveOptions{Force: true},
+	); err != nil && !cerrdefs.IsNotFound(err) {
+		return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
+	}
+	return nil
+}
+
+func (*DockerGateway) ReleaseCutoverWatermark(
+	context.Context,
+	biz.ExecutionPlan,
+) error {
+	return nil
+}
+
 func ownsDeployment(result mobyclient.ContainerInspectResult, deploymentID string) bool {
 	return managedContainer(result) &&
 		result.Container.Config.Labels[deploymentLabel] == deploymentID

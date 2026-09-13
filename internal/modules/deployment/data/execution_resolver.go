@@ -50,6 +50,14 @@ type environmentExecutionReferenceStore interface {
 	EnvironmentExecution(context.Context, string, string) (map[string]string, error)
 }
 
+type cleanupExecutionReferenceStore interface {
+	RuntimeTargetCleanupExecution(
+		context.Context,
+		string,
+		string,
+	) (runtimeaccess.Connection, error)
+}
+
 type ExecutionResolver struct {
 	store ExecutionReferenceStore
 }
@@ -61,6 +69,21 @@ func NewExecutionResolver(store ExecutionReferenceStore) *ExecutionResolver {
 func (r *ExecutionResolver) ResolveExecution(
 	ctx context.Context,
 	deployment biz.Deployment,
+) (biz.ExecutionPlan, error) {
+	return r.resolve(ctx, deployment, false)
+}
+
+func (r *ExecutionResolver) ResolveCancellation(
+	ctx context.Context,
+	deployment biz.Deployment,
+) (biz.ExecutionPlan, error) {
+	return r.resolve(ctx, deployment, true)
+}
+
+func (r *ExecutionResolver) resolve(
+	ctx context.Context,
+	deployment biz.Deployment,
+	cleanup bool,
 ) (biz.ExecutionPlan, error) {
 	var image, registryServer, registryUsername, registryPasswordRef string
 	var runtimeSpec runtimespec.Spec
@@ -103,9 +126,16 @@ func (r *ExecutionResolver) ResolveExecution(
 			environmentBindings[name] = variables[name]
 		}
 	}
-	targetConnection, err := r.store.RuntimeTargetExecution(
-		ctx, deployment.ProjectID, deployment.RuntimeTargetID,
-	)
+	var targetConnection runtimeaccess.Connection
+	if cleanupStore, ok := r.store.(cleanupExecutionReferenceStore); cleanup && ok {
+		targetConnection, err = cleanupStore.RuntimeTargetCleanupExecution(
+			ctx, deployment.ProjectID, deployment.RuntimeTargetID,
+		)
+	} else {
+		targetConnection, err = r.store.RuntimeTargetExecution(
+			ctx, deployment.ProjectID, deployment.RuntimeTargetID,
+		)
+	}
 	if err != nil {
 		return biz.ExecutionPlan{}, fmt.Errorf("resolve runtime target: %w", err)
 	}

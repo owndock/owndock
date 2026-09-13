@@ -278,6 +278,25 @@ func TestAgentDockerGatewayBuildsNarrowCutoverRelease(t *testing.T) {
 	}
 }
 
+func TestAgentDockerGatewayBuildsNarrowRuntimeRemoval(t *testing.T) {
+	dispatcher := &agentCommandDispatcherStub{}
+	gateway := newAgentGateway(t, dispatcher, &agentFenceStub{})
+	plan := testAgentExecutionPlan(t)
+	if err := gateway.RemoveRuntime(
+		t.Context(), plan, biz.RuntimeCredential{},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(dispatcher.commands) != 1 ||
+		dispatcher.commands[0].Kind != agentprotocol.AgentCommandRuntimeRemove ||
+		dispatcher.commands[0].Deployment != nil ||
+		dispatcher.commands[0].Cutover == nil ||
+		dispatcher.commands[0].Cutover.DeploymentID != plan.DeploymentID ||
+		dispatcher.commands[0].Cutover.CutoverSequence != plan.CutoverSequence {
+		t.Fatalf("commands = %+v", dispatcher.commands)
+	}
+}
+
 func TestAgentDockerGatewayRejectsDirectCutoverRelease(t *testing.T) {
 	gateway := newAgentGateway(
 		t,

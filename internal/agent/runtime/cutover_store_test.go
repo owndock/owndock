@@ -145,6 +145,32 @@ func TestFileCutoverStoreReleasesOnlyExactWatermark(t *testing.T) {
 	}
 }
 
+func TestFileCutoverStoreProtectsOlderStableRuntime(t *testing.T) {
+	store, err := NewFileCutoverStore(filepath.Join(t.TempDir(), "state"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Observe("owndock-slot", "deployment-new", 3); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ProtectsRemoval("owndock-slot", "deployment-stable", 2); err != nil {
+		t.Fatalf("newer watermark did not protect older stable runtime: %v", err)
+	}
+	for _, input := range []struct {
+		deploymentID string
+		sequence     uint64
+	}{
+		{deploymentID: "other-deployment", sequence: 3},
+		{deploymentID: "future-deployment", sequence: 4},
+	} {
+		if err := store.ProtectsRemoval(
+			"owndock-slot", input.deploymentID, input.sequence,
+		); !errors.Is(err, ErrCutoverConflict) {
+			t.Fatalf("unsafe removal %+v = %v", input, err)
+		}
+	}
+}
+
 func TestFileCutoverStoreRejectsInvalidRelease(t *testing.T) {
 	store, err := NewFileCutoverStore(
 		filepath.Join(t.TempDir(), "state"),

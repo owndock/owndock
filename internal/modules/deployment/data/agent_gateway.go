@@ -129,13 +129,29 @@ func (g *AgentDockerGateway) Cancel(
 	)
 }
 
-// ReleaseCutoverWatermark is the narrow Agent boundary used by future product
+func (g *AgentDockerGateway) RemoveRuntime(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	_ biz.RuntimeCredential,
+) error {
+	return g.dispatchCutover(ctx, plan, agentprotocol.AgentCommandRuntimeRemove)
+}
+
+// ReleaseCutoverWatermark is the narrow Agent boundary used by product
 // deletion orchestration. The caller must first prevent new work for the slot,
 // wait for every in-flight Deployment command, and remove the managed runtime
 // resource. The Agent then releases only this exact Deployment/sequence pair.
 func (g *AgentDockerGateway) ReleaseCutoverWatermark(
 	ctx context.Context,
 	plan biz.ExecutionPlan,
+) error {
+	return g.dispatchCutover(ctx, plan, agentprotocol.AgentCommandCutoverRelease)
+}
+
+func (g *AgentDockerGateway) dispatchCutover(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	kind agentprotocol.AgentCommandKind,
 ) error {
 	if err := plan.TargetConnection.Validate(); err != nil ||
 		plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
@@ -156,7 +172,7 @@ func (g *AgentDockerGateway) ReleaseCutoverWatermark(
 		plan.TargetConnection.ManagedHostID,
 		managedhostbiz.AgentCommand{
 			ID:       commandID,
-			Kind:     agentprotocol.AgentCommandCutoverRelease,
+			Kind:     kind,
 			Deadline: g.commandDeadline(ctx),
 			Cutover: &agentprotocol.CutoverCommand{
 				DeploymentID:    plan.DeploymentID,
@@ -314,6 +330,8 @@ func agentResultError(code string) error {
 		)
 	case "stale_execution":
 		return staleExecutionError()
+	case "cutover_conflict":
+		return executionError(biz.FailureRuntime, biz.ErrCutoverConflict)
 	default:
 		return executionError(
 			biz.FailureRuntime,

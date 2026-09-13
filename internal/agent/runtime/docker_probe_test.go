@@ -26,6 +26,8 @@ func (noopCutoverStore) Release(string, string, uint64) (bool, error) {
 	return false, nil
 }
 
+func (noopCutoverStore) ProtectsRemoval(string, string, uint64) error { return nil }
+
 func (e dockerProbeEngineStub) Ping(
 	ctx context.Context,
 	_ client.PingOptions,

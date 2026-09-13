@@ -40,6 +40,7 @@ const (
 	AgentCommandDeploymentStage    = agentprotocol.AgentCommandDeploymentStage
 	AgentCommandDeploymentActivate = agentprotocol.AgentCommandDeploymentActivate
 	AgentCommandDeploymentCancel   = agentprotocol.AgentCommandDeploymentCancel
+	AgentCommandRuntimeRemove      = agentprotocol.AgentCommandRuntimeRemove
 	AgentCommandCutoverRelease     = agentprotocol.AgentCommandCutoverRelease
 	AgentCommandInventoryPrepare   = agentprotocol.AgentCommandInventoryPrepare
 	AgentCommandInventoryChunk     = agentprotocol.AgentCommandInventoryChunk

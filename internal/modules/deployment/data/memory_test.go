@@ -1,6 +1,7 @@
 package data
 
 import (
+	"context"
 	"errors"
 	"sync"
 	"testing"
@@ -51,6 +52,32 @@ func TestClaimNextIsAtomic(t *testing.T) {
 	wait.Wait()
 	if claimed != 1 {
 		t.Fatalf("claimed = %d, want 1", claimed)
+	}
+}
+
+func TestListForRuntimeTargetIsProjectScoped(t *testing.T) {
+	repository := NewMemoryRepository()
+	for _, item := range []biz.Deployment{
+		{ID: "one", ProjectID: "project-1", ApplicationID: "app-1", EnvironmentID: "env-1", RuntimeTargetID: "target-1", Version: 1},
+		{ID: "two", ProjectID: "project-1", ApplicationID: "app-1", EnvironmentID: "env-1", RuntimeTargetID: "target-2", Version: 1},
+		{ID: "three", ProjectID: "project-2", ApplicationID: "app-1", EnvironmentID: "env-1", RuntimeTargetID: "target-1", Version: 1},
+	} {
+		if _, err := repository.Create(t.Context(), item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, err := repository.ListForRuntimeTarget(
+		t.Context(), "project-1", "target-1",
+	)
+	if err != nil || len(items) != 1 || items[0].ID != "one" {
+		t.Fatalf("items = %+v, %v", items, err)
+	}
+	canceledContext, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := repository.ListForRuntimeTarget(
+		canceledContext, "project-1", "target-1",
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled list error = %v", err)
 	}
 }
 

@@ -14,6 +14,20 @@ type executionResolverStub struct {
 	err  error
 }
 
+type cancellationExecutionResolverStub struct {
+	executionResolverStub
+	cancellationPlan biz.ExecutionPlan
+	called           *bool
+}
+
+func (s cancellationExecutionResolverStub) ResolveCancellation(
+	context.Context,
+	biz.Deployment,
+) (biz.ExecutionPlan, error) {
+	*s.called = true
+	return s.cancellationPlan, nil
+}
+
 func (s executionResolverStub) ResolveExecution(context.Context, biz.Deployment) (biz.ExecutionPlan, error) {
 	return s.plan, s.err
 }
@@ -147,6 +161,27 @@ func TestRuntimeExecutorResolvesPlanAndCredentialForEveryOperation(t *testing.T)
 	}
 	if !gateway.prepared || !gateway.deployed || !gateway.canceled {
 		t.Fatalf("gateway calls = %+v", gateway)
+	}
+}
+
+func TestRuntimeExecutorUsesCancellationResolver(t *testing.T) {
+	called := false
+	gateway := &runtimeGatewayPlanProbe{}
+	resolver := cancellationExecutionResolverStub{
+		executionResolverStub: executionResolverStub{err: errors.New("normal resolution must not run")},
+		cancellationPlan:      biz.ExecutionPlan{TargetConnection: testDirectConnection(t)},
+		called:                &called,
+	}
+	executor, err := NewRuntimeExecutor(
+		resolver,
+		credentialResolverStub{credential: testDirectCredential()},
+		gateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.Cancel(t.Context(), biz.Deployment{}); err != nil || !called {
+		t.Fatalf("cancel = %v, cancellation resolver called = %t", err, called)
 	}
 }
 

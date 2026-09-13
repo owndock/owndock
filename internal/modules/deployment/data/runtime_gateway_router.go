@@ -64,6 +64,46 @@ func (r *RuntimeGatewayRouter) Cancel(
 	return gateway.Cancel(ctx, plan, credential)
 }
 
+func (r *RuntimeGatewayRouter) RemoveRuntime(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	credential biz.RuntimeCredential,
+) error {
+	gateway, err := r.lifecycleGateway(plan)
+	if err != nil {
+		return err
+	}
+	return gateway.RemoveRuntime(ctx, plan, credential)
+}
+
+func (r *RuntimeGatewayRouter) ReleaseCutoverWatermark(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
+	gateway, err := r.lifecycleGateway(plan)
+	if err != nil {
+		return err
+	}
+	return gateway.ReleaseCutoverWatermark(ctx, plan)
+}
+
+func (r *RuntimeGatewayRouter) lifecycleGateway(
+	plan biz.ExecutionPlan,
+) (biz.RuntimeLifecycleGateway, error) {
+	gateway, err := r.gateway(plan)
+	if err != nil {
+		return nil, err
+	}
+	lifecycle, ok := gateway.(biz.RuntimeLifecycleGateway)
+	if !ok {
+		return nil, &biz.ExecutionError{
+			Category: biz.FailureUnsupportedTarget,
+			Cause:    ErrRuntimeModeUnavailable,
+		}
+	}
+	return lifecycle, nil
+}
+
 func (r *RuntimeGatewayRouter) gateway(
 	plan biz.ExecutionPlan,
 ) (biz.RuntimeGateway, error) {

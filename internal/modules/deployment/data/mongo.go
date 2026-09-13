@@ -54,6 +54,32 @@ func (r *MongoRepository) List(ctx context.Context, projectID, applicationID, en
 	return items, nil
 }
 
+func (r *MongoRepository) ListForRuntimeTarget(
+	ctx context.Context,
+	projectID, runtimeTargetID string,
+) ([]biz.Deployment, error) {
+	cursor, err := r.deployments.Find(ctx, bson.D{
+		{Key: "project_id", Value: projectID},
+		{Key: "runtime_target_id", Value: runtimeTargetID},
+	}, options.Find().SetSort(bson.D{{Key: "cutover_sequence", Value: -1}}))
+	if err != nil {
+		return nil, fmt.Errorf("find runtime target deployments: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []deploymentDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode runtime target deployments: %w", err)
+	}
+	items := make([]biz.Deployment, len(documents))
+	for index := range documents {
+		items[index], err = documents[index].domain()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
 func (r *MongoRepository) GetByIdempotency(ctx context.Context, projectID, key string) (biz.Deployment, error) {
 	var doc deploymentDocument
 	err := r.deployments.FindOne(ctx, bson.D{{Key: "project_id", Value: projectID}, {Key: "idempotency_key", Value: key}}).Decode(&doc)

@@ -356,6 +356,49 @@ func cancelDeployment(
 	return nil
 }
 
+func (e *DockerExecutor) removeRuntime(
+	ctx context.Context,
+	command agentprotocol.AgentCommand,
+) (agentprotocol.AgentCommandResult, error) {
+	cutover := command.Cutover
+	if err := e.cutovers.ProtectsRemoval(
+		cutover.ContainerName,
+		cutover.DeploymentID,
+		cutover.CutoverSequence,
+	); err != nil {
+		code := "runtime_configuration"
+		if errors.Is(err, ErrCutoverConflict) {
+			code = "cutover_conflict"
+		}
+		return deploymentResult(command.ID, code), nil
+	}
+	engine, err := e.newDeploymentEngine(e.socketPath)
+	if err != nil {
+		return deploymentResult(command.ID, "runtime_configuration"), nil
+	}
+	defer func() { _ = engine.Close() }()
+	current, err := inspectContainer(ctx, engine, cutover.ContainerName)
+	if cerrdefs.IsNotFound(err) {
+		return deploymentResult(command.ID, ""), nil
+	}
+	if err != nil {
+		return deploymentResult(command.ID, "runtime_error"), nil
+	}
+	if !managedContainer(current) ||
+		current.Container.Config.Labels[deploymentLabel] != cutover.DeploymentID ||
+		cutoverSequence(current) != cutover.CutoverSequence {
+		return deploymentResult(command.ID, "cutover_conflict"), nil
+	}
+	if _, err := engine.ContainerRemove(
+		ctx,
+		current.Container.ID,
+		mobyclient.ContainerRemoveOptions{Force: true},
+	); err != nil && !cerrdefs.IsNotFound(err) {
+		return deploymentResult(command.ID, "runtime_error"), nil
+	}
+	return deploymentResult(command.ID, ""), nil
+}
+
 func inspectContainer(
 	ctx context.Context,
 	engine dockerDeploymentEngine,

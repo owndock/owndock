@@ -105,6 +105,7 @@
   "runtime_target_host_mismatch": "runtime target does not belong to the selected managed host",
   "runtime_target_not_ready": "runtime target is not ready",
   "runtime_target_probe_unavailable": "runtime target connectivity check is not currently available",
+  "runtime_target_retirement_unavailable": "runtime target retirement is not currently available",
   "source_repository_probe_unavailable": "source repository connectivity check is not currently available",
   "source_revision_unavailable": "source revision is not currently available",
   "terminal_access_denied": "terminal access policy denied the request",

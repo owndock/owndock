@@ -38,6 +38,24 @@ func (r *MemoryRepository) List(ctx context.Context, projectID, applicationID, e
 	return items, nil
 }
 
+func (r *MemoryRepository) ListForRuntimeTarget(
+	ctx context.Context,
+	projectID, runtimeTargetID string,
+) ([]biz.Deployment, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	items := make([]biz.Deployment, 0)
+	for _, item := range r.items {
+		if item.ProjectID == projectID && item.RuntimeTargetID == runtimeTargetID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
 func (r *MemoryRepository) GetByIdempotency(ctx context.Context, projectID, key string) (biz.Deployment, error) {
 	if err := ctx.Err(); err != nil {
 		return biz.Deployment{}, err

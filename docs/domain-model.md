@@ -78,7 +78,7 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Build Hook 绑定一个平台和 Build Configuration，Webhook Secret 与 Repository Credential 分离；原始 body 验签后才解析，provider + Hook + delivery ID 唯一，合法但不适用的事件记录为 ignored；
 - Artifact 位于 Project/Application 下，来源固定为 `owndock_build` 或 `external`。外部登记只接受完整 OCI SHA-256 digest，先用所选 Registry Credential 回读并验证 manifest，再在同一事务中保存 Artifact、审计和 Evidence Jobs；登记幂等键不公开，外部 Artifact 没有 Build/Build Configuration ID，也不会生成 OwnDock Build Provenance 或由平台自动补签；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
-- Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式 direct 探测只公开 `ready`、`unreachable` 或 `credential_error` 安全状态；
+- Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式探测只公开安全状态；删除先写入 `retiring` 关闭 ready 门禁，再排空 Deployment、删除精确运行资源并回收 Agent 水位；
 - Environment 内部保存运行变量绑定，但公开 API 只返回排序后的 `variable_keys`，不回传明文值或 `secret://` 引用；
 - Deployment 位于 Project 下，支持创建、查询、取消、失败重试和回滚；`trigger_source` 区分 manual/automatic，自动记录来源 Artifact、Build 和 Build Configuration；受管 Worker 使用原子领取、租约 heartbeat、同 Deployment generation fence、跨 Deployment cutover sequence 和安全失败分类；
 - Session 只保存 access token 的单向哈希；每个用户的活跃 Session 数有配置上限，用户可治理自己的 Session，Owner 可治理同一 Organization 成员的 Session；删除与 Audit Event 在同一 MongoDB 事务中提交，所有列表都排除 Token/hash；
@@ -95,7 +95,7 @@ Deployment 权限独立于 Runtime Target：Developer 可创建、重试和取�
 
 - Source Repository 自建 CA/代理兼容矩阵；
 - Docker Runtime Inventory 的持续 Event 双主机/容量/秘密泄漏安全验收；
-- Agent 自动安装、部署/取消执行、证书安全轮换和 Agent Runtime Gateway；
+- Agent 自动安装和证书安全轮换的真实发行/故障验收；
 - 多主机部署选址系统验收；
 - Terminal 真实远程 Linux/SSH、多主机故障和浏览器安全 E2E；
 - 完整安全运维（安全告警、凭据轮换和发布前入口压力/故障验收）。

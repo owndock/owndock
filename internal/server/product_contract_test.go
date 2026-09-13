@@ -140,13 +140,15 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		Email: "member@example.com", Role: security.RoleViewer,
 	}}}
 	managedHostStore := &contractManagedHostStore{}
+	runtimeTargetRetirer := &contractRuntimeTargetRetirer{}
 	controlUseCase := controlplanebiz.NewUseCaseWithResources(
 		controlStore, controlStore, controlStore, controlStore, controlStore, controlStore,
 		transaction.Passthrough{}, audits, audits, newID, now,
 	).WithManagedHosts(managedHostStore).
 		WithProjectMembers(controlStore).
 		WithTemplates(controlplanedata.NewBuiltInTemplateCatalog()).
-		WithRuntimeTargetProbe(controlStore, contractRuntimeTargetProber{})
+		WithRuntimeTargetProbe(controlStore, contractRuntimeTargetProber{}).
+		WithRuntimeTargetRetirement(controlStore, runtimeTargetRetirer)
 	controlHTTP := controlplaneservice.NewHTTP(controlUseCase)
 	managedHostHTTP := managedhostservice.NewHTTP(managedhostbiz.NewUseCase(
 		managedHostStore, transaction.Passthrough{}, audits, newID, now,
@@ -721,6 +723,21 @@ type contractControlStore struct {
 
 type contractRuntimeTargetProber struct{}
 
+type contractRuntimeTargetRetirer struct{ calls int }
+
+func (r *contractRuntimeTargetRetirer) RetireRuntimeTarget(
+	context.Context,
+	controlplanebiz.RuntimeTarget,
+	security.Principal,
+	string,
+) error {
+	r.calls++
+	if r.calls == 1 {
+		return controlplanebiz.ErrRuntimeTargetRetirementPending
+	}
+	return nil
+}
+
 type contractManagedHostStore struct {
 	items []managedhostbiz.ManagedHost
 }
@@ -1006,6 +1023,35 @@ func (s *contractControlStore) UpdateRuntimeTargetProbe(
 		}
 	}
 	return controlplanebiz.RuntimeTarget{}, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) BeginRuntimeTargetRetirement(
+	_ context.Context,
+	projectID, targetID string,
+	_ time.Time,
+) (controlplanebiz.RuntimeTarget, bool, error) {
+	for index := range s.targets {
+		if s.targets[index].ID == targetID && s.targets[index].ProjectID == projectID {
+			changed := s.targets[index].Status != controlplanebiz.RuntimeTargetStatusRetiring
+			s.targets[index].Status = controlplanebiz.RuntimeTargetStatusRetiring
+			return s.targets[index], changed, nil
+		}
+	}
+	return controlplanebiz.RuntimeTarget{}, false, controlplanebiz.ErrNotFound
+}
+
+func (s *contractControlStore) DeleteRetiringRuntimeTarget(
+	_ context.Context,
+	projectID, targetID string,
+) error {
+	for index := range s.targets {
+		if s.targets[index].ID == targetID && s.targets[index].ProjectID == projectID &&
+			s.targets[index].Status == controlplanebiz.RuntimeTargetStatusRetiring {
+			s.targets = append(s.targets[:index], s.targets[index+1:]...)
+			return nil
+		}
+	}
+	return controlplanebiz.ErrNotFound
 }
 
 func (s *contractControlStore) ListRegistryCredentials(

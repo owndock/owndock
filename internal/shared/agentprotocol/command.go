@@ -37,6 +37,7 @@ const (
 	AgentCommandDeploymentStage    AgentCommandKind = "deployment.stage"
 	AgentCommandDeploymentActivate AgentCommandKind = "deployment.activate"
 	AgentCommandDeploymentCancel   AgentCommandKind = "deployment.cancel"
+	AgentCommandRuntimeRemove      AgentCommandKind = "deployment.runtime.remove"
 	AgentCommandCutoverRelease     AgentCommandKind = "deployment.cutover.release"
 	AgentCommandInventoryPrepare   AgentCommandKind = "runtime.inventory.prepare"
 	AgentCommandInventoryChunk     AgentCommandKind = "runtime.inventory.chunk"
@@ -51,6 +52,7 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
 		AgentCommandDeploymentCancel,
+		AgentCommandRuntimeRemove,
 		AgentCommandCutoverRelease,
 		AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
@@ -136,7 +138,7 @@ func (c AgentCommand) Validate() error {
 			!validDeploymentCommand(c.Kind, *c.Deployment) {
 			return ErrCommandInvalid
 		}
-	case AgentCommandCutoverRelease:
+	case AgentCommandRuntimeRemove, AgentCommandCutoverRelease:
 		if c.RuntimeProbe != nil || c.Deployment != nil || c.Inventory != nil ||
 			c.Cutover == nil || !validCutoverCommand(*c.Cutover) {
 			return ErrCommandInvalid
@@ -324,6 +326,7 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 			AgentCommandDeploymentStage,
 			AgentCommandDeploymentActivate,
 			AgentCommandDeploymentCancel,
+			AgentCommandRuntimeRemove,
 			AgentCommandCutoverRelease:
 			if r.RuntimeProbe != nil || r.Inventory != nil {
 				return ErrResultInvalid

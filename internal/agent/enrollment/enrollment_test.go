@@ -49,7 +49,7 @@ func TestProvisionExchangesTokenAndCommitsValidatedFiles(t *testing.T) {
 		config.Control.ManagedHostID != result.ManagedHostID ||
 		config.Control.IdentityID != result.IdentityID ||
 		config.Control.InstanceID != result.InstanceID ||
-		config.HostTerminal.Enabled || len(config.Control.Capabilities) != 11 {
+		config.HostTerminal.Enabled || len(config.Control.Capabilities) != 12 {
 		t.Fatalf("config = %+v", config)
 	}
 	assertMode(t, paths.Config, 0o640)

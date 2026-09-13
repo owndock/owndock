@@ -1244,6 +1244,47 @@ paths:
           $ref: "#/components/responses/APIError"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/projects/{project_id}/runtime-targets/{runtime_target_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - $ref: "#/components/parameters/RuntimeTargetID"
+    delete:
+      tags: [Runtime Targets]
+      operationId: deleteRuntimeTarget
+      summary: Retire a runtime target and its managed runtime resources
+      description: The first request atomically moves the target to retiring so new deployments are rejected. A 202 response means active deployments were moved to canceling and the same request should be retried. After all commands drain, the server removes exact stable runtime resources, releases Agent cutover watermarks, deletes target metadata, and returns 204. Repeating a completed deletion is idempotent.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Retirement is fenced and waiting for deployment workers to drain.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [status]
+                properties:
+                  status:
+                    type: string
+                    enum: [retiring]
+        "204":
+          description: Runtime target and managed runtime resources are deleted.
+          headers:
+            X-Request-ID:
+              $ref: "#/components/headers/RequestID"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/projects/{project_id}/registry-credentials:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -6378,7 +6419,7 @@ components:
           readOnly: true
         status:
           type: string
-          enum: [pending, ready, unreachable, credential_error]
+          enum: [pending, ready, unreachable, credential_error, retiring]
         last_probed_at:
           type: string
           format: date-time

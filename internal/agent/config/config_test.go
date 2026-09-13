@@ -29,7 +29,7 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 	}
 	if config.Control.MaxFrameBytes != 65536 ||
 		config.Control.MaxConcurrentCommands != 4 ||
-		len(config.Control.Capabilities) != 12 ||
+		len(config.Control.Capabilities) != 13 ||
 		config.Runtime.ResultCacheSize != 256 ||
 		config.Runtime.CutoverWatermarkSize != 16384 ||
 		!config.HostTerminal.Enabled ||
@@ -150,10 +150,13 @@ runtime: {}
 	}
 	if config.Control.BootIDFile != defaultBootIDFile ||
 		len(config.Control.Capabilities) != len(baselineCapabilities()) ||
-		capabilityEnabled(
+		!capabilityEnabled(
 			config.Control.Capabilities,
 			agentprotocol.CapabilityCutoverRelease,
-		) ||
+		) || !capabilityEnabled(
+		config.Control.Capabilities,
+		agentprotocol.CapabilityRuntimeRemove,
+	) ||
 		config.Runtime.DockerSocket != defaultDockerSocket ||
 		config.Runtime.StateDirectory != defaultStateDirectory ||
 		config.Runtime.ResultCacheSize != defaultResultCacheSize ||

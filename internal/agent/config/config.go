@@ -291,6 +291,8 @@ func baselineCapabilities() []string {
 		agentprotocol.CapabilityDeploymentStage,
 		agentprotocol.CapabilityDeploymentActivate,
 		agentprotocol.CapabilityDeploymentCancel,
+		agentprotocol.CapabilityRuntimeRemove,
+		agentprotocol.CapabilityCutoverRelease,
 	}
 }
 

@@ -70,6 +70,9 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		case len(segments) == 5 && segments[4] == "runtime-targets":
 			s.runtimeTargets(w, r, principal, projectID)
 			return
+		case len(segments) == 6 && segments[4] == "runtime-targets":
+			s.runtimeTarget(w, r, principal, projectID, segments[5])
+			return
 		case len(segments) == 7 && segments[4] == "runtime-targets" && segments[6] == "probe":
 			s.probeRuntimeTarget(w, r, principal, projectID, segments[5])
 			return
@@ -82,6 +85,30 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
+}
+
+func (s *HTTP) runtimeTarget(
+	w http.ResponseWriter,
+	r *http.Request,
+	principal security.Principal,
+	projectID, targetID string,
+) {
+	if r.Method != http.MethodDelete {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	completed, err := s.useCase.DeleteRuntimeTarget(
+		r.Context(), principal, projectID, targetID,
+		httpx.RequestIDFromContext(r.Context()),
+	)
+	if writeError(w, r, err) {
+		return
+	}
+	if !completed {
+		httpx.JSON(w, http.StatusAccepted, map[string]string{"status": "retiring"})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *HTTP) projectMembers(
@@ -516,6 +543,8 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "runtime_target_host_mismatch")
 	case errors.Is(err, biz.ErrRuntimeTargetProbeUnavailable):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "runtime_target_probe_unavailable")
+	case errors.Is(err, biz.ErrRuntimeTargetRetirementUnavailable):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "runtime_target_retirement_unavailable")
 	case errors.Is(err, biz.ErrInvalidRegistry):
 		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "invalid_registry_credential")
 	case errors.Is(err, biz.ErrInvalidRuntimeSpec):

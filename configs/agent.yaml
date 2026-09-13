@@ -21,6 +21,7 @@ control:
     - deployment.stage
     - deployment.activate
     - deployment.cancel
+    - deployment.runtime.remove
     - deployment.cutover.release
     - runtime.inventory.prepare
     - runtime.inventory.chunk

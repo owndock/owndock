@@ -129,6 +129,8 @@ func (e *DockerExecutor) execute(
 			commandContext,
 			command,
 		)
+	case agentprotocol.AgentCommandRuntimeRemove:
+		result, executeError = e.removeRuntime(commandContext, command)
 	case agentprotocol.AgentCommandCutoverRelease:
 		result, executeError = e.releaseCutover(command)
 	case agentprotocol.AgentCommandInventoryPrepare,

@@ -427,7 +427,14 @@ func (s *MongoStore) RuntimeTargetExecution(
 	if err != nil {
 		return runtimeaccess.Connection{}, fmt.Errorf("find runtime target execution data: %w", err)
 	}
+	return runtimeTargetConnection(document)
+}
+
+func runtimeTargetConnection(
+	document runtimeTargetDocument,
+) (runtimeaccess.Connection, error) {
 	var connection runtimeaccess.Connection
+	var err error
 	switch document.ConnectionMode {
 	case runtimeaccess.ModeDirectDocker:
 		connection, err = runtimeaccess.NewDirectDocker(
@@ -445,6 +452,31 @@ func (s *MongoStore) RuntimeTargetExecution(
 		return runtimeaccess.Connection{}, fmt.Errorf("decode runtime target connection: %w", err)
 	}
 	return connection, nil
+}
+
+// RuntimeTargetCleanupExecution allows only ready or retiring targets. Normal
+// prepare/deploy resolution remains ready-only, while a worker can finish a
+// cancellation requested by the retirement state machine.
+func (s *MongoStore) RuntimeTargetCleanupExecution(
+	ctx context.Context,
+	projectID, targetID string,
+) (runtimeaccess.Connection, error) {
+	var document runtimeTargetDocument
+	err := s.targets.FindOne(ctx, bson.D{
+		{Key: "_id", Value: targetID},
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
+			biz.RuntimeTargetStatusReady,
+			biz.RuntimeTargetStatusRetiring,
+		}}}},
+	}).Decode(&document)
+	if err == mongo.ErrNoDocuments {
+		return runtimeaccess.Connection{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return runtimeaccess.Connection{}, fmt.Errorf("find runtime target cleanup data: %w", err)
+	}
+	return runtimeTargetConnection(document)
 }
 
 func (s *MongoStore) EnvironmentExists(ctx context.Context, projectID, environmentID string) (bool, error) {
@@ -716,7 +748,11 @@ func (s *MongoStore) UpdateRuntimeTargetProbe(
 	var document runtimeTargetDocument
 	err := s.targets.FindOneAndUpdate(
 		ctx,
-		bson.D{{Key: "_id", Value: targetID}, {Key: "project_id", Value: projectID}},
+		bson.D{
+			{Key: "_id", Value: targetID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.RuntimeTargetStatusRetiring}}},
+		},
 		bson.D{{Key: "$set", Value: bson.D{
 			{Key: "status", Value: status},
 			{Key: "last_probed_at", Value: probedAt.UTC()},
@@ -730,6 +766,59 @@ func (s *MongoStore) UpdateRuntimeTargetProbe(
 		return biz.RuntimeTarget{}, fmt.Errorf("update runtime target probe: %w", err)
 	}
 	return document.domain(), nil
+}
+
+func (s *MongoStore) BeginRuntimeTargetRetirement(
+	ctx context.Context,
+	projectID, targetID string,
+	now time.Time,
+) (biz.RuntimeTarget, bool, error) {
+	var document runtimeTargetDocument
+	err := s.targets.FindOneAndUpdate(
+		ctx,
+		bson.D{
+			{Key: "_id", Value: targetID},
+			{Key: "project_id", Value: projectID},
+			{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.RuntimeTargetStatusRetiring}}},
+		},
+		bson.D{{Key: "$set", Value: bson.D{
+			{Key: "status", Value: biz.RuntimeTargetStatusRetiring},
+			{Key: "retirement_started_at", Value: now.UTC()},
+		}}},
+		options.FindOneAndUpdate().SetReturnDocument(options.After),
+	).Decode(&document)
+	if err == nil {
+		return document.domain(), true, nil
+	}
+	if err != mongo.ErrNoDocuments {
+		return biz.RuntimeTarget{}, false, fmt.Errorf("begin runtime target retirement: %w", err)
+	}
+	target, findErr := s.GetRuntimeTarget(ctx, projectID, targetID)
+	if findErr != nil {
+		return biz.RuntimeTarget{}, false, findErr
+	}
+	if target.Status != biz.RuntimeTargetStatusRetiring {
+		return biz.RuntimeTarget{}, false, biz.ErrNotFound
+	}
+	return target, false, nil
+}
+
+func (s *MongoStore) DeleteRetiringRuntimeTarget(
+	ctx context.Context,
+	projectID, targetID string,
+) error {
+	result, err := s.targets.DeleteOne(ctx, bson.D{
+		{Key: "_id", Value: targetID},
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: biz.RuntimeTargetStatusRetiring},
+	})
+	if err != nil {
+		return fmt.Errorf("delete retiring runtime target: %w", err)
+	}
+	if result.DeletedCount != 1 {
+		return biz.ErrNotFound
+	}
+	return nil
 }
 
 func (s *MongoStore) ListEnvironments(ctx context.Context, projectID string) ([]biz.Environment, error) {

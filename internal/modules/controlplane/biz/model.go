@@ -20,21 +20,23 @@ import (
 )
 
 var (
-	ErrDuplicateName                 = errors.New("resource name already exists")
-	ErrDuplicateRelease              = errors.New("release already exists")
-	ErrInvalidImage                  = errors.New("image must be pinned by a sha256 digest")
-	ErrInvalidName                   = errors.New("resource name is invalid")
-	ErrInvalidRegistry               = errors.New("registry credential is invalid")
-	ErrInvalidRuntimeSpec            = errors.New("release runtime specification is invalid")
-	ErrInvalidRuntimeTarget          = errors.New("runtime target is invalid")
-	ErrManagedHostNotFound           = errors.New("managed host was not found")
-	ErrInvalidProjectMember          = errors.New("project member is invalid")
-	ErrProjectMemberConflict         = errors.New("project member already exists or has changed")
-	ErrCannotModifySelf              = errors.New("project member cannot modify their own membership")
-	ErrRuntimeTargetHostMismatch     = errors.New("runtime target connection mode does not match managed host")
-	ErrRuntimeTargetProbeUnavailable = errors.New("runtime target probe is unavailable")
-	ErrNotFound                      = errors.New("resource was not found")
-	ErrInvalidTemplate               = errors.New("template is invalid")
+	ErrDuplicateName                      = errors.New("resource name already exists")
+	ErrDuplicateRelease                   = errors.New("release already exists")
+	ErrInvalidImage                       = errors.New("image must be pinned by a sha256 digest")
+	ErrInvalidName                        = errors.New("resource name is invalid")
+	ErrInvalidRegistry                    = errors.New("registry credential is invalid")
+	ErrInvalidRuntimeSpec                 = errors.New("release runtime specification is invalid")
+	ErrInvalidRuntimeTarget               = errors.New("runtime target is invalid")
+	ErrManagedHostNotFound                = errors.New("managed host was not found")
+	ErrInvalidProjectMember               = errors.New("project member is invalid")
+	ErrProjectMemberConflict              = errors.New("project member already exists or has changed")
+	ErrCannotModifySelf                   = errors.New("project member cannot modify their own membership")
+	ErrRuntimeTargetHostMismatch          = errors.New("runtime target connection mode does not match managed host")
+	ErrRuntimeTargetProbeUnavailable      = errors.New("runtime target probe is unavailable")
+	ErrRuntimeTargetRetirementUnavailable = errors.New("runtime target retirement is unavailable")
+	ErrRuntimeTargetRetirementPending     = errors.New("runtime target retirement is pending")
+	ErrNotFound                           = errors.New("resource was not found")
+	ErrInvalidTemplate                    = errors.New("template is invalid")
 )
 
 type Project struct {
@@ -149,6 +151,7 @@ const (
 	RuntimeTargetStatusReady           RuntimeTargetStatus = "ready"
 	RuntimeTargetStatusUnreachable     RuntimeTargetStatus = "unreachable"
 	RuntimeTargetStatusCredentialError RuntimeTargetStatus = "credential_error"
+	RuntimeTargetStatusRetiring        RuntimeTargetStatus = "retiring"
 )
 
 type RuntimeTarget struct {
@@ -267,6 +270,25 @@ type RuntimeTargetProbeRepository interface {
 		RuntimeTargetStatus,
 		time.Time,
 	) (RuntimeTarget, error)
+}
+
+type RuntimeTargetLifecycleRepository interface {
+	BeginRuntimeTargetRetirement(
+		context.Context,
+		string,
+		string,
+		time.Time,
+	) (RuntimeTarget, bool, error)
+	DeleteRetiringRuntimeTarget(context.Context, string, string) error
+}
+
+type RuntimeTargetRetirer interface {
+	RetireRuntimeTarget(
+		context.Context,
+		RuntimeTarget,
+		security.Principal,
+		string,
+	) error
 }
 
 type RuntimeTargetProber interface {
