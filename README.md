@@ -66,7 +66,7 @@ make run
 
 随后调用 `POST /api/v1/auth/bootstrap` 创建首个 Organization 和 Owner。Bootstrap、登录、资源写入和部署流程见 [docs/flows.md](docs/flows.md)，部署前的镜像证据门禁见 [docs/deployment-policies.md](docs/deployment-policies.md)，Agent 首次安全接入见 [docs/agent-enrollment.md](docs/agent-enrollment.md)，完整请求契约见 [api/openapi.yaml](api/openapi.yaml)。
 
-`make build` 会同时生成 `bin/owndock`、`bin/owndock-agent`、`bin/owndock-build-worker`、`bin/owndock-evidence-worker` 和一次性 `bin/owndock-vulnerability-db-updater`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)，正式发布身份与客户离线验签见 [docs/release-security.md](docs/release-security.md)；Build Worker 见 [docs/build-worker.md](docs/build-worker.md)，Evidence Worker 见 [docs/artifact-evidence.md](docs/artifact-evidence.md)，漏洞库更新与恢复见 [docs/vulnerability-database.md](docs/vulnerability-database.md)，限时风险接受见 [docs/vulnerability-waivers.md](docs/vulnerability-waivers.md)。提交的配置文件只是非敏感模板，不能直接用于生产。
+`make build` 会同时生成 `bin/owndock`、`bin/owndock-agent`、`bin/owndock-build-worker`、`bin/owndock-egress-gateway`、`bin/owndock-evidence-worker` 和一次性 `bin/owndock-vulnerability-db-updater`。Agent 构建、证书文件、配置与当前开放边界见 [docs/agent.md](docs/agent.md)，正式发布身份与客户离线验签见 [docs/release-security.md](docs/release-security.md)；Build Worker 见 [docs/build-worker.md](docs/build-worker.md)，Evidence Worker 见 [docs/artifact-evidence.md](docs/artifact-evidence.md)，漏洞库更新与恢复见 [docs/vulnerability-database.md](docs/vulnerability-database.md)，限时风险接受见 [docs/vulnerability-waivers.md](docs/vulnerability-waivers.md)。提交的配置文件只是非敏感模板，不能直接用于生产。
 
 如需启用链路追踪，将 `observability.tracing.enabled` 设为 `true`，并将 `endpoint` 配置为 OTLP/HTTP Collector 的 `host:port`（通常为 `localhost:4318`）。`sample_ratio` 取值为 `0` 到 `1`，默认配置为 `1`；设为 `0` 时不采样新的根 Span，无需追踪时应直接关闭 tracing。生产环境建议由应用发送至 OpenTelemetry Collector，再由 Collector 转发到后端。
 

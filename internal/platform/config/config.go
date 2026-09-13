@@ -177,12 +177,13 @@ type Product struct {
 }
 
 type Runtime struct {
-	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
-	InventoryWorker  InventoryWorker  `json:"inventory_worker"`
-	BuildWorker      BuildWorker      `json:"build_worker"`
-	BuildEgress      EgressGateway    `json:"build_egress_gateway"`
-	EvidenceEgress   EgressGateway    `json:"evidence_egress_gateway"`
-	EvidenceWorker   EvidenceWorker   `json:"evidence_worker"`
+	DeploymentWorker      DeploymentWorker `json:"deployment_worker"`
+	InventoryWorker       InventoryWorker  `json:"inventory_worker"`
+	BuildWorker           BuildWorker      `json:"build_worker"`
+	BuildEgress           EgressGateway    `json:"build_egress_gateway"`
+	EvidenceEgress        EgressGateway    `json:"evidence_egress_gateway"`
+	VulnerabilityDBEgress EgressGateway    `json:"vulnerability_database_egress_gateway"`
+	EvidenceWorker        EvidenceWorker   `json:"evidence_worker"`
 }
 
 type BuildWorker struct {
@@ -392,6 +393,10 @@ func Load(path string) (Config, error) {
 				Address: defaultBuildEgressAddress, DialTimeout: defaultBuildEgressDial.String(),
 				IdleTimeout: defaultBuildEgressIdle.String(), MaximumConnections: defaultBuildEgressConcurrent,
 			},
+			VulnerabilityDBEgress: EgressGateway{
+				Address: defaultBuildEgressAddress, DialTimeout: defaultBuildEgressDial.String(),
+				IdleTimeout: defaultBuildEgressIdle.String(), MaximumConnections: defaultBuildEgressConcurrent,
+			},
 			EvidenceWorker: EvidenceWorker{
 				PollInterval: defaultEvidenceWorkerPoll.String(), LeaseDuration: defaultEvidenceWorkerLease.String(),
 				OperationTimeout: defaultEvidenceOperation.String(), SyftExecutable: defaultEvidenceSyftPath,
@@ -477,6 +482,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Runtime.EvidenceEgress.Validate(); err != nil {
 		return fmt.Errorf("runtime.evidence_egress_gateway: %w", err)
+	}
+	if err := c.Runtime.VulnerabilityDBEgress.Validate(); err != nil {
+		return fmt.Errorf("runtime.vulnerability_database_egress_gateway: %w", err)
 	}
 	if err := c.Runtime.EvidenceWorker.Validate(c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.evidence_worker: %w", err)

@@ -13,9 +13,9 @@ import (
 
 const pinnedEgressBusyBoxImage = "busybox:1.37.0@sha256:9db7b59979c38555a39def84a31fb98b5296952f9e3afd4f6f11f05b07adfab0"
 
-func TestEvidenceEgressGatewayDockerIntegration(t *testing.T) {
-	if os.Getenv("OWNDOCK_RUN_EVIDENCE_EGRESS_INTEGRATION") != "1" {
-		t.Skip("set OWNDOCK_RUN_EVIDENCE_EGRESS_INTEGRATION=1 to run the Evidence egress integration")
+func TestIsolatedEgressGatewayDockerIntegration(t *testing.T) {
+	if os.Getenv("OWNDOCK_RUN_ISOLATED_EGRESS_INTEGRATION") != "1" {
+		t.Skip("set OWNDOCK_RUN_ISOLATED_EGRESS_INTEGRATION=1 to run the isolated egress integration")
 	}
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("Docker CLI is unavailable")
@@ -23,14 +23,21 @@ func TestEvidenceEgressGatewayDockerIntegration(t *testing.T) {
 	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
 		t.Skip("the first release supports linux/amd64 and linux/arm64")
 	}
+	for _, scope := range []string{"evidence", "vulnerability-db"} {
+		t.Run(scope, func(t *testing.T) { runIsolatedEgressGatewayDockerIntegration(t, scope) })
+	}
+}
 
+func runIsolatedEgressGatewayDockerIntegration(t *testing.T, scope string) {
+	t.Helper()
 	root := t.TempDir()
 	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
-	boundary := "owndock-evidence-boundary-test-" + suffix
-	uplink := "owndock-evidence-uplink-test-" + suffix
-	gateway := "owndock-evidence-egress-test-" + suffix
-	worker := "owndock-evidence-worker-test-" + suffix
-	target := "owndock-evidence-target-test-" + suffix
+	boundary := "owndock-" + scope + "-boundary-test-" + suffix
+	uplink := "owndock-" + scope + "-uplink-test-" + suffix
+	gateway := "owndock-" + scope + "-egress-test-" + suffix
+	worker := "owndock-" + scope + "-workload-test-" + suffix
+	target := "owndock-" + scope + "-target-test-" + suffix
+	gatewayAlias := scope + "-egress-gateway"
 
 	runEgressDocker(t, "network", "create", "--internal", boundary)
 	t.Cleanup(func() { _ = egressDockerCommand("network", "rm", boundary).Run() })
@@ -42,23 +49,23 @@ func TestEvidenceEgressGatewayDockerIntegration(t *testing.T) {
 		"mkdir -p /www && printf 'approved evidence dependency\\n' >/www/dependency && exec httpd -f -p 8080 -h /www")
 	t.Cleanup(func() { _ = egressDockerCommand("rm", "--force", target).Run() })
 
-	binary, config := evidenceEgressFixture(t, root)
+	binary, config := isolatedEgressFixture(t, root, scope)
 	runEgressDocker(t, "run", "--detach", "--name", gateway, "--network", boundary,
-		"--network-alias", "evidence-egress-gateway", "--read-only", "--cap-drop", "ALL",
+		"--network-alias", gatewayAlias, "--read-only", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
 		"--volume", binary+":/usr/local/bin/owndock-egress-gateway:ro",
 		"--volume", config+":/etc/owndock/config.yaml:ro", pinnedEgressBusyBoxImage,
-		"/usr/local/bin/owndock-egress-gateway", "-scope", "evidence", "-conf", "/etc/owndock/config.yaml")
+		"/usr/local/bin/owndock-egress-gateway", "-scope", scope, "-conf", "/etc/owndock/config.yaml")
 	t.Cleanup(func() { _ = egressDockerCommand("rm", "--force", gateway).Run() })
 	runEgressDocker(t, "network", "connect", uplink, gateway)
-	waitForEvidenceEgressGateway(t, gateway)
+	waitForIsolatedEgressGateway(t, gateway, scope)
 
 	runEgressDocker(t, "run", "--detach", "--name", worker, "--network", boundary,
 		"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
 		pinnedEgressBusyBoxImage, "sleep", "300")
 	t.Cleanup(func() { _ = egressDockerCommand("rm", "--force", worker).Run() })
 
-	proxy := "http://evidence-egress-gateway:3128"
+	proxy := "http://" + gatewayAlias + ":3128"
 	output := runEgressDocker(t, "exec", worker, "sh", "-c",
 		"http_proxy="+proxy+" wget -qO- http://allowed-egress:8080/dependency")
 	if strings.TrimSpace(output) != "approved evidence dependency" {
@@ -79,8 +86,8 @@ func TestEvidenceEgressGatewayDockerIntegration(t *testing.T) {
 	runEgressDocker(t, "network", "disconnect", boundary, gateway)
 	assertEgressDockerFails(t, "gateway outage", "exec", worker, "sh", "-c",
 		"http_proxy="+proxy+" wget -T 2 -qO- http://allowed-egress:8080/dependency")
-	runEgressDocker(t, "network", "connect", "--ip", gatewayIP, "--alias", "evidence-egress-gateway", boundary, gateway)
-	waitForEvidenceEgressGateway(t, gateway)
+	runEgressDocker(t, "network", "connect", "--ip", gatewayIP, "--alias", gatewayAlias, boundary, gateway)
+	waitForIsolatedEgressGateway(t, gateway, scope)
 	output = runEgressDocker(t, "exec", worker, "sh", "-c",
 		"http_proxy="+proxy+" wget -qO- http://allowed-egress:8080/dependency")
 	if strings.TrimSpace(output) != "approved evidence dependency" {
@@ -91,7 +98,7 @@ func TestEvidenceEgressGatewayDockerIntegration(t *testing.T) {
 	}
 }
 
-func evidenceEgressFixture(t *testing.T, root string) (string, string) {
+func isolatedEgressFixture(t *testing.T, root, scope string) (string, string) {
 	t.Helper()
 	projectRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -105,12 +112,18 @@ func evidenceEgressFixture(t *testing.T, root string) (string, string) {
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("build egress gateway fixture: %v\n%s", err, output)
 	}
-	configPath := filepath.Join(root, "evidence-egress-gateway.yaml")
+	configKey := map[string]string{
+		"evidence": "evidence_egress_gateway", "vulnerability-db": "vulnerability_database_egress_gateway",
+	}[scope]
+	if configKey == "" {
+		t.Fatalf("unsupported test scope %q", scope)
+	}
+	configPath := filepath.Join(root, scope+"-egress-gateway.yaml")
 	config := `server:
   http:
     address: 127.0.0.1:8000
 runtime:
-  evidence_egress_gateway:
+  ` + configKey + `:
     enabled: true
     address: 0.0.0.0:3128
     dial_timeout: 10s
@@ -126,17 +139,17 @@ runtime:
 	return binary, configPath
 }
 
-func waitForEvidenceEgressGateway(t *testing.T, container string) {
+func waitForIsolatedEgressGateway(t *testing.T, container, scope string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if egressDockerCommand("exec", container, "/usr/local/bin/owndock-egress-gateway",
-			"-scope", "evidence", "-conf", "/etc/owndock/config.yaml", "-healthcheck").Run() == nil {
+			"-scope", scope, "-conf", "/etc/owndock/config.yaml", "-healthcheck").Run() == nil {
 			return
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	t.Fatalf("Evidence egress gateway did not become ready:\n%s", runEgressDocker(t, "logs", container))
+	t.Fatalf("%s egress gateway did not become ready:\n%s", scope, runEgressDocker(t, "logs", container))
 }
 
 func egressDockerAddress(t *testing.T, container, network string) string {

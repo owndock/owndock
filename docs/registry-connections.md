@@ -113,7 +113,7 @@ sequenceDiagram
 
 - BuildKit 拉取 frontend/base image 和推送构建结果，使用 Build Boundary 的 `build_egress_proxy_url` 与 BuildKit 自己的 Registry 信任；
 - Docker Engine 或 Agent 目标主机拉取 Release 镜像，使用 Docker daemon 自身的代理和 CA；
-- Trivy 漏洞库更新器只使用独立的 `OWNDOCK_TRIVY_DB_HTTPS_PROXY`。
+- Trivy 漏洞库更新器只使用独立 Vulnerability DB Boundary 中的网关地址和 `runtime.vulnerability_database_egress_gateway` allowlist。
 
 这些边界不能通过给 OwnDock 进程设置环境变量代替。不同 Registry 品牌、中国大陆网络和完全离线的客户等价矩阵仍属于生产验收范围。
 

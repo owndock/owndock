@@ -14,9 +14,13 @@ func TestSelectGatewayConfigKeepsScopesIndependent(t *testing.T) {
 		EvidenceEgress: platformconfig.EgressGateway{
 			Enabled: true, AllowedDestinations: []platformconfig.EgressDestination{{Authority: "registry.example:443"}},
 		},
+		VulnerabilityDBEgress: platformconfig.EgressGateway{
+			Enabled: true, AllowedDestinations: []platformconfig.EgressDestination{{Authority: "database.example:443"}},
+		},
 	}}
 	for scope, authority := range map[string]string{
 		"build": "build.example:443", "evidence": "registry.example:443",
+		"vulnerability-db": "database.example:443",
 	} {
 		selected, err := selectGatewayConfig(config, scope)
 		if err != nil || len(selected.AllowedDestinations) != 1 ||

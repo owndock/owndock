@@ -308,7 +308,7 @@ runtime:
 
 Worker 同时加入命名的内部 `data` 网络和 `internal: true` 的 Evidence Boundary，但不加入 uplink。MongoDB 只走 `data` 网络；只有不持有任何业务秘密的 `owndock-egress-gateway -scope evidence` 同时加入 Boundary 与 uplink。即使工具清空代理变量或尝试 metadata/raw TCP，也没有直接路由；网关停止时任务失败关闭，恢复后由 Job lease/retry 机制重新执行。
 
-仓库内 `make test-evidence-egress` 使用真实 Docker 双网络与完整 Linux 网关二进制验证：允许目标可达，未授权 authority、raw TCP 和 metadata 地址不可达；断开网关后失败关闭，按同一内部地址恢复后相邻请求成功，且网关日志不包含请求秘密。该门禁进入定时/手动双架构安全 Job；首次远程结果和客户防火墙/DNS 等价矩阵仍需单独归档。
+仓库内 `make test-isolated-egress` 使用真实 Docker 双网络与完整 Linux 网关二进制验证：允许目标可达，未授权 authority、raw TCP 和 metadata 地址不可达；断开网关后失败关闭，按同一内部地址恢复后相邻请求成功，且网关日志不包含请求秘密。该门禁进入定时/手动双架构安全 Job；首次远程结果和客户防火墙/DNS 等价矩阵仍需单独归档。
 
 ```mermaid
 sequenceDiagram

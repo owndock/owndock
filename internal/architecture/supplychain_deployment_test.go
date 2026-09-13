@@ -65,6 +65,36 @@ func TestVulnerabilityDatabaseUpdaterImagePinsToolAndNonRootIdentity(t *testing.
 	}
 }
 
+func TestVulnerabilityDatabaseUpdaterComposeHasNoDirectEgressRoute(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(repositoryRoot(t), "deploy", "vulnerability-db-updater.compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(content)
+	for _, required := range []string{
+		`command: ["-scope", "vulnerability-db", "-conf", "/etc/owndock/config.yaml"]`,
+		`image: ${OWNDOCK_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}`,
+		`- http://${OWNDOCK_VULNERABILITY_DB_EGRESS_GATEWAY_IP:-172.31.242.2}:3128`,
+		"vulnerability-db-boundary:\n",
+		"    internal: true\n",
+		"      vulnerability-db-egress-uplink:\n",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("updater Compose is missing %q", required)
+		}
+	}
+	updaterStart := strings.Index(compose, "  vulnerability-db-updater:\n")
+	networkStart := strings.Index(compose, "\nnetworks:\n")
+	if updaterStart < 0 || networkStart <= updaterStart {
+		t.Fatal("updater Compose service boundaries are invalid")
+	}
+	updaterService := compose[updaterStart:networkStart]
+	if strings.Contains(updaterService, "vulnerability-db-egress-uplink") ||
+		strings.Contains(updaterService, "OWNDOCK_TRIVY_DB_NO_PROXY") {
+		t.Fatal("updater must not join the uplink or accept an ambient bypass list")
+	}
+}
+
 func readComposeSecurityContract(t *testing.T, path string) composeSecurityContract {
 	t.Helper()
 	content, err := os.ReadFile(path)

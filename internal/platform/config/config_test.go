@@ -30,6 +30,11 @@ func TestConfigValidate(t *testing.T) {
 	if err := invalid.Validate(); err == nil {
 		t.Fatal("Config accepted an enabled Evidence egress gateway without destinations")
 	}
+	invalid = cfg
+	invalid.Runtime.VulnerabilityDBEgress = EgressGateway{Enabled: true}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("Config accepted an enabled Vulnerability DB egress gateway without destinations")
+	}
 }
 
 func TestConfigRejectsInvalidDuration(t *testing.T) {

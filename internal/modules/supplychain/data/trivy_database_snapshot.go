@@ -35,6 +35,7 @@ type TrivyDatabaseSnapshotOptions struct {
 	ExpectedVersion  string
 	RootDirectory    string
 	Repositories     []string
+	HTTPSProxy       string
 	RetainSnapshots  int
 	MinimumRetention time.Duration
 	Now              func() time.Time
@@ -53,6 +54,7 @@ type TrivyDatabaseSnapshotManager struct {
 	expectedVersion  string
 	rootDirectory    string
 	repositories     []string
+	httpsProxy       string
 	retainSnapshots  int
 	minimumRetention time.Duration
 	now              func() time.Time
@@ -70,12 +72,15 @@ func NewTrivyDatabaseSnapshotManager(options TrivyDatabaseSnapshotOptions) (
 		options.MinimumRetention < time.Hour || options.MinimumRetention > 30*24*time.Hour || err != nil {
 		return nil, ErrTrivyDatabaseUpdate
 	}
+	if !validRegistryHTTPSProxy(options.HTTPSProxy) {
+		return nil, ErrTrivyDatabaseUpdate
+	}
 	if options.Now == nil {
 		options.Now = time.Now
 	}
 	return &TrivyDatabaseSnapshotManager{
 		executable: executable, expectedVersion: expectedVersion, rootDirectory: rootDirectory,
-		repositories:    repositories,
+		repositories: repositories, httpsProxy: options.HTTPSProxy,
 		retainSnapshots: options.RetainSnapshots, minimumRetention: options.MinimumRetention,
 		now: options.Now,
 	}, nil
@@ -159,7 +164,7 @@ func (m *TrivyDatabaseSnapshotManager) download(ctx context.Context, staging str
 	}
 	arguments = append(arguments, "--cache-dir", staging, "--no-progress")
 	command := exec.CommandContext(ctx, m.executable, arguments...)
-	command.Env = trivyDatabaseUpdateEnvironment(staging)
+	command.Env = trivyDatabaseUpdateEnvironment(staging, m.httpsProxy)
 	output := &boundedBuffer{maximum: 4096}
 	command.Stdout, command.Stderr = output, output
 	if err := command.Run(); err != nil {
@@ -193,16 +198,10 @@ func validateTrivyDatabaseRepositories(values []string) ([]string, error) {
 	return result, nil
 }
 
-func trivyDatabaseUpdateEnvironment(cacheDirectory string) []string {
+func trivyDatabaseUpdateEnvironment(cacheDirectory, httpsProxy string) []string {
 	values := []string{"HOME=/tmp", "TRIVY_CACHE_DIR=" + cacheDirectory,
 		"TRIVY_NO_PROGRESS=true", "TRIVY_CHECK_FOR_APP_UPDATE=false"}
-	for _, key := range []string{"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
-		"SSL_CERT_FILE", "SSL_CERT_DIR"} {
-		if value, ok := os.LookupEnv(key); ok && strings.TrimSpace(value) != "" {
-			values = append(values, key+"="+value)
-		}
-	}
-	return values
+	return registryProxyEnvironment(values, httpsProxy)
 }
 
 func hashTrivyDatabase(path string) (string, error) {

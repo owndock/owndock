@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-evidence-egress test-terminal-security test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
+.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-isolated-egress test-terminal-security test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -105,7 +105,7 @@ test-build-security:
 	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test ./internal/platform/mongo \
 		-run TestMongoReplicaSetIntegration -count=1 -timeout=5m
 	$(MAKE) test-supply-chain-integration
-	$(MAKE) test-evidence-egress
+	$(MAKE) test-isolated-egress
 	$(MAKE) test-vulnerability-integration
 	$(MAKE) test-vulnerability-db-updater-image
 	OWNDOCK_RUN_SERVER_INGRESS_INTEGRATION=1 go test ./cmd/server \
@@ -113,9 +113,9 @@ test-build-security:
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \
 		-run TestBuildKitRootlessMTLSRegistryIntegration -count=1 -timeout=5m
 
-test-evidence-egress:
-	OWNDOCK_RUN_EVIDENCE_EGRESS_INTEGRATION=1 go test ./cmd/egress-gateway \
-		-run TestEvidenceEgressGatewayDockerIntegration -count=1 -timeout=2m
+test-isolated-egress:
+	OWNDOCK_RUN_ISOLATED_EGRESS_INTEGRATION=1 go test ./cmd/egress-gateway \
+		-run TestIsolatedEgressGatewayDockerIntegration -count=1 -timeout=2m
 
 test-terminal-security:
 	go test -race ./internal/modules/terminal/... ./internal/shared/terminalprotocol \
@@ -152,6 +152,11 @@ test-community-deployment:
 		OWNDOCK_TRUSTED_ROOTS_DIRECTORY=/dev/null \
 		OWNDOCK_TRIVY_DATABASE_ROOT=/dev/null \
 		docker compose -f deploy/evidence-worker.compose.yaml config --quiet
+	@OWNDOCK_EGRESS_GATEWAY_IMAGE=ghcr.io/owndock/owndock-egress-gateway@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+		OWNDOCK_VULNERABILITY_DB_UPDATER_IMAGE=ghcr.io/owndock/owndock-vulnerability-db-updater@sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd \
+		OWNDOCK_CONFIG_FILE=/dev/null \
+		OWNDOCK_TRIVY_DATABASE_ROOT=/dev/null \
+		docker compose -f deploy/vulnerability-db-updater.compose.yaml config --quiet
 
 test-community-integration:
 	docker build \

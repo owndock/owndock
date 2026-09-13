@@ -27,7 +27,7 @@ func main() {
 	var scope string
 	var healthcheck bool
 	flag.StringVar(&configPath, "conf", "configs/config.yaml", "configuration file or directory")
-	flag.StringVar(&scope, "scope", "", "isolated gateway scope: build or evidence")
+	flag.StringVar(&scope, "scope", "", "isolated gateway scope: build, evidence, or vulnerability-db")
 	flag.BoolVar(&healthcheck, "healthcheck", false, "check the configured local gateway listener")
 	flag.Parse()
 	if healthcheck {
@@ -134,7 +134,11 @@ func selectGatewayConfig(cfg platformconfig.Config, scope string) (platformconfi
 		return cfg.Runtime.BuildEgress, nil
 	case "evidence":
 		return cfg.Runtime.EvidenceEgress, nil
+	case "vulnerability-db":
+		return cfg.Runtime.VulnerabilityDBEgress, nil
 	default:
-		return platformconfig.EgressGateway{}, errors.New("egress gateway scope must be build or evidence")
+		return platformconfig.EgressGateway{}, errors.New(
+			"egress gateway scope must be build, evidence, or vulnerability-db",
+		)
 	}
 }

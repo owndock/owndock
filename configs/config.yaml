@@ -97,6 +97,15 @@ runtime:
     # Exact Registry and KMS host:port entries only. Private destinations need
     # allow_private; loopback, link-local and multicast are never valid.
     allowed_destinations: []
+  vulnerability_database_egress_gateway:
+    enabled: false
+    address: 0.0.0.0:3128
+    dial_timeout: 10s
+    idle_timeout: 2m
+    maximum_connections: 32
+    # Exact Trivy DB Registry host:port entries only. Private mirrors need
+    # allow_private; loopback, link-local and multicast are never valid.
+    allowed_destinations: []
   evidence_worker:
     enabled: false
     poll_interval: 2s
