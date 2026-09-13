@@ -180,7 +180,8 @@ type Runtime struct {
 	DeploymentWorker DeploymentWorker `json:"deployment_worker"`
 	InventoryWorker  InventoryWorker  `json:"inventory_worker"`
 	BuildWorker      BuildWorker      `json:"build_worker"`
-	BuildEgress      BuildEgress      `json:"build_egress_gateway"`
+	BuildEgress      EgressGateway    `json:"build_egress_gateway"`
+	EvidenceEgress   EgressGateway    `json:"evidence_egress_gateway"`
 	EvidenceWorker   EvidenceWorker   `json:"evidence_worker"`
 }
 
@@ -210,16 +211,16 @@ type BuildWorker struct {
 	MetricsAddress         string `json:"metrics_address"`
 }
 
-type BuildEgress struct {
-	Enabled             bool                     `json:"enabled"`
-	Address             string                   `json:"address"`
-	DialTimeout         string                   `json:"dial_timeout"`
-	IdleTimeout         string                   `json:"idle_timeout"`
-	MaximumConnections  int                      `json:"maximum_connections"`
-	AllowedDestinations []BuildEgressDestination `json:"allowed_destinations"`
+type EgressGateway struct {
+	Enabled             bool                `json:"enabled"`
+	Address             string              `json:"address"`
+	DialTimeout         string              `json:"dial_timeout"`
+	IdleTimeout         string              `json:"idle_timeout"`
+	MaximumConnections  int                 `json:"maximum_connections"`
+	AllowedDestinations []EgressDestination `json:"allowed_destinations"`
 }
 
-type BuildEgressDestination struct {
+type EgressDestination struct {
 	Authority    string `json:"authority"`
 	AllowPrivate bool   `json:"allow_private"`
 }
@@ -383,7 +384,11 @@ func Load(path string) (Config, error) {
 				LogRetention:     defaultBuildLogRetention.String(), LogMaxBytes: defaultBuildLogMaxBytes,
 				LogChunkBytes: defaultBuildLogChunkBytes, MetricsAddress: defaultBuildMetricsAddress,
 			},
-			BuildEgress: BuildEgress{
+			BuildEgress: EgressGateway{
+				Address: defaultBuildEgressAddress, DialTimeout: defaultBuildEgressDial.String(),
+				IdleTimeout: defaultBuildEgressIdle.String(), MaximumConnections: defaultBuildEgressConcurrent,
+			},
+			EvidenceEgress: EgressGateway{
 				Address: defaultBuildEgressAddress, DialTimeout: defaultBuildEgressDial.String(),
 				IdleTimeout: defaultBuildEgressIdle.String(), MaximumConnections: defaultBuildEgressConcurrent,
 			},
@@ -469,6 +474,9 @@ func (c Config) Validate() error {
 	}
 	if err := c.Runtime.BuildEgress.Validate(); err != nil {
 		return fmt.Errorf("runtime.build_egress_gateway: %w", err)
+	}
+	if err := c.Runtime.EvidenceEgress.Validate(); err != nil {
+		return fmt.Errorf("runtime.evidence_egress_gateway: %w", err)
 	}
 	if err := c.Runtime.EvidenceWorker.Validate(c.Database.Mongo.Enabled); err != nil {
 		return fmt.Errorf("runtime.evidence_worker: %w", err)
@@ -844,7 +852,7 @@ func validBuildEgressProxyURL(value string) bool {
 	return err == nil && portNumber >= 1 && portNumber <= 65535
 }
 
-func (g BuildEgress) Validate() error {
+func (g EgressGateway) Validate() error {
 	if !g.Enabled {
 		return nil
 	}
@@ -921,22 +929,22 @@ func prohibitedBuildEgressIP(ip net.IP, allowPrivate bool) bool {
 	return !allowPrivate && ip.IsPrivate()
 }
 
-func (g BuildEgress) AddressValue() string {
+func (g EgressGateway) AddressValue() string {
 	if strings.TrimSpace(g.Address) == "" {
 		return defaultBuildEgressAddress
 	}
 	return strings.TrimSpace(g.Address)
 }
 
-func (g BuildEgress) DialTimeoutDuration() (time.Duration, error) {
+func (g EgressGateway) DialTimeoutDuration() (time.Duration, error) {
 	return parseDuration(g.DialTimeout, defaultBuildEgressDial)
 }
 
-func (g BuildEgress) IdleTimeoutDuration() (time.Duration, error) {
+func (g EgressGateway) IdleTimeoutDuration() (time.Duration, error) {
 	return parseDuration(g.IdleTimeout, defaultBuildEgressIdle)
 }
 
-func (g BuildEgress) MaximumConnectionsValue() int {
+func (g EgressGateway) MaximumConnectionsValue() int {
 	if g.MaximumConnections == 0 {
 		return defaultBuildEgressConcurrent
 	}

@@ -24,6 +24,12 @@ func TestConfigValidate(t *testing.T) {
 	if timeout != 5*time.Second {
 		t.Fatalf("TimeoutDuration() = %v, want %v", timeout, 5*time.Second)
 	}
+
+	invalid := cfg
+	invalid.Runtime.EvidenceEgress = EgressGateway{Enabled: true}
+	if err := invalid.Validate(); err == nil {
+		t.Fatal("Config accepted an enabled Evidence egress gateway without destinations")
+	}
 }
 
 func TestConfigRejectsInvalidDuration(t *testing.T) {
@@ -440,10 +446,10 @@ func TestBuildWorkerRequiresDedicatedBuildKitEndpoint(t *testing.T) {
 }
 
 func TestBuildEgressGatewayRequiresExplicitSafeDestinations(t *testing.T) {
-	gateway := BuildEgress{
+	gateway := EgressGateway{
 		Enabled: true, Address: "0.0.0.0:3128", DialTimeout: "10s", IdleTimeout: "2m",
 		MaximumConnections: 128,
-		AllowedDestinations: []BuildEgressDestination{
+		AllowedDestinations: []EgressDestination{
 			{Authority: "registry-1.docker.io:443"},
 			{Authority: "registry.internal:5000", AllowPrivate: true},
 		},
@@ -451,31 +457,31 @@ func TestBuildEgressGatewayRequiresExplicitSafeDestinations(t *testing.T) {
 	if err := gateway.Validate(); err != nil {
 		t.Fatalf("valid Build egress gateway error = %v", err)
 	}
-	for name, mutate := range map[string]func(*BuildEgress){
-		"empty": func(item *BuildEgress) { item.AllowedDestinations = nil },
-		"duplicate": func(item *BuildEgress) {
+	for name, mutate := range map[string]func(*EgressGateway){
+		"empty": func(item *EgressGateway) { item.AllowedDestinations = nil },
+		"duplicate": func(item *EgressGateway) {
 			item.AllowedDestinations = append(item.AllowedDestinations, item.AllowedDestinations[0])
 		},
-		"uppercase": func(item *BuildEgress) {
-			item.AllowedDestinations = []BuildEgressDestination{{Authority: "Registry.Example:443"}}
+		"uppercase": func(item *EgressGateway) {
+			item.AllowedDestinations = []EgressDestination{{Authority: "Registry.Example:443"}}
 		},
-		"userinfo": func(item *BuildEgress) {
-			item.AllowedDestinations = []BuildEgressDestination{{Authority: "user@registry.example:443"}}
+		"userinfo": func(item *EgressGateway) {
+			item.AllowedDestinations = []EgressDestination{{Authority: "user@registry.example:443"}}
 		},
-		"private without opt in": func(item *BuildEgress) {
-			item.AllowedDestinations = []BuildEgressDestination{{Authority: "10.0.0.1:443"}}
+		"private without opt in": func(item *EgressGateway) {
+			item.AllowedDestinations = []EgressDestination{{Authority: "10.0.0.1:443"}}
 		},
-		"loopback with opt in": func(item *BuildEgress) {
-			item.AllowedDestinations = []BuildEgressDestination{{Authority: "127.0.0.1:443", AllowPrivate: true}}
+		"loopback with opt in": func(item *EgressGateway) {
+			item.AllowedDestinations = []EgressDestination{{Authority: "127.0.0.1:443", AllowPrivate: true}}
 		},
-		"link local with opt in": func(item *BuildEgress) {
-			item.AllowedDestinations = []BuildEgressDestination{{Authority: "169.254.169.254:80", AllowPrivate: true}}
+		"link local with opt in": func(item *EgressGateway) {
+			item.AllowedDestinations = []EgressDestination{{Authority: "169.254.169.254:80", AllowPrivate: true}}
 		},
-		"hostname bind": func(item *BuildEgress) { item.Address = "gateway:3128" },
+		"hostname bind": func(item *EgressGateway) { item.Address = "gateway:3128" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			invalid := gateway
-			invalid.AllowedDestinations = append([]BuildEgressDestination(nil), gateway.AllowedDestinations...)
+			invalid.AllowedDestinations = append([]EgressDestination(nil), gateway.AllowedDestinations...)
 			mutate(&invalid)
 			if err := invalid.Validate(); err == nil {
 				t.Fatal("unsafe Build egress gateway configuration accepted")

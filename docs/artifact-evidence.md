@@ -285,13 +285,57 @@ Registry Credential 仍只在 MongoDB 保存 `secret://production` 这样的引�
 
 自建 Registry 使用企业 CA 时，通过 `product.registry_ca_cert_file` 给 Server、Build Worker 和 Evidence Worker 挂载同一份只读 PEM。Worker 启动时固定经过校验的内容，再用私有 `0600` 快照向 Syft、Trivy 和 Cosign 提供 `SSL_CERT_FILE`；不会关闭 TLS 或主机名校验。完整文件规则及 BuildKit/Docker daemon 的独立信任边界见 [Registry 连接与认证](registry-connections.md#自建-registry-的私有-ca)。
 
-需要经过企业出口访问 Registry 时，设置无凭据的 `product.registry_https_proxy`。Server/Build Worker 的内置 OCI 客户端以及 Evidence Worker 的 ORAS、Syft、Trivy、Cosign 都只使用这个显式代理，不继承宿主环境代理；工具进程的 `NO_PROXY` 会被清空，Registry 凭据不会成为代理凭据。BuildKit、Docker daemon 和漏洞库 Updater 是独立网络边界，必须分别配置，详见 [Registry 显式代理](registry-connections.md#显式-registry-https-代理)。
+需要经过企业出口访问 Registry 时，设置无凭据的 `product.registry_https_proxy`。生产 Evidence Worker Compose 应把它设为内部固定网关地址 `http://172.31.241.2:3128`，并在 `runtime.evidence_egress_gateway.allowed_destinations` 中逐项列出 Registry 与实际启用的 KMS `host:port`。Server/Build Worker 的内置 OCI 客户端以及 Evidence Worker 的 ORAS、Syft、Trivy、Cosign 都不继承宿主环境代理；工具进程的 `NO_PROXY` 会被清空，Registry 凭据不会成为代理凭据。BuildKit、Docker daemon 和漏洞库 Updater 是独立网络边界，必须分别配置，详见 [Registry 显式代理](registry-connections.md#显式-registry-https-代理)。
+
+```yaml
+product:
+  registry_https_proxy: http://172.31.241.2:3128
+runtime:
+  evidence_egress_gateway:
+    enabled: true
+    address: 0.0.0.0:3128
+    dial_timeout: 10s
+    idle_timeout: 2m
+    maximum_connections: 128
+    allowed_destinations:
+      - authority: registry.example.com:443
+      # 私有 Registry/KMS 必须逐项显式授权。
+      - authority: vault.internal:8200
+        allow_private: true
+  evidence_worker:
+    enabled: true
+```
+
+Worker 同时加入命名的内部 `data` 网络和 `internal: true` 的 Evidence Boundary，但不加入 uplink。MongoDB 只走 `data` 网络；只有不持有任何业务秘密的 `owndock-egress-gateway -scope evidence` 同时加入 Boundary 与 uplink。即使工具清空代理变量或尝试 metadata/raw TCP，也没有直接路由；网关停止时任务失败关闭，恢复后由 Job lease/retry 机制重新执行。
+
+仓库内 `make test-evidence-egress` 使用真实 Docker 双网络与完整 Linux 网关二进制验证：允许目标可达，未授权 authority、raw TCP 和 metadata 地址不可达；断开网关后失败关闭，按同一内部地址恢复后相邻请求成功，且网关日志不包含请求秘密。该门禁进入定时/手动双架构安全 Job；首次远程结果和客户防火墙/DNS 等价矩阵仍需单独归档。
+
+```mermaid
+sequenceDiagram
+    participant EW as Evidence Worker / 固定工具
+    participant DB as MongoDB（内部 data 网络）
+    participant X as Evidence Egress Gateway
+    participant R as 允许的 Registry / KMS
+    EW->>DB: claim Job / heartbeat（不经过代理）
+    EW->>X: CONNECT 精确 host:port
+    X->>X: allowlist + DNS 后 IP 复核
+    alt 目标已授权
+        X->>R: 建立 TCP；Worker 在隧道内执行 TLS
+        R-->>EW: digest-bound 响应
+    else 未授权、raw TCP、metadata 或网关中断
+        X--xEW: 拒绝或不可达
+        EW->>DB: 稳定失败；不发布证据
+    end
+```
 
 ```bash
 make docker-evidence-worker VERSION=dev
+make docker-egress-gateway VERSION=dev
 
 OWNDOCK_EVIDENCE_WORKER_IMAGE='registry.example.com/owndock/evidence-worker@sha256:...' \
+OWNDOCK_EGRESS_GATEWAY_IMAGE='registry.example.com/owndock/egress-gateway@sha256:...' \
 OWNDOCK_MONGODB_URI='mongodb://...' \
+OWNDOCK_DATA_NETWORK_NAME='owndock-data' \
 OWNDOCK_CONFIG_FILE='/etc/owndock/config.yaml' \
 OWNDOCK_EVIDENCE_SECRET_ENV_FILE='/etc/owndock/evidence-secrets.env' \
 OWNDOCK_TRUSTED_ROOTS_DIRECTORY='/etc/owndock/trusted-roots' \
@@ -301,7 +345,7 @@ docker compose -f deploy/evidence-worker.compose.yaml up -d
 
 `evidence-secrets.env` 可以同时包含 `OWNDOCK_REGISTRY_<ALIAS>_PASSWORD` 和当前启用 provider 所需的 KMS 环境变量，但文件本身必须在仓库外由部署系统管理。trusted root 目录中的文件必须是非符号链接普通文件，名称等于策略的 `trusted_root_id`，内容 SHA-256 必须等于策略冻结的 digest。GCP/AWS Web Identity/Azure Federated/Kubernetes/Vault CA 等文件型凭据需要通过客户自己的 Compose override 或编排清单只读挂载，并让环境变量指向容器内绝对路径。
 
-容器使用固定非 root UID/GID `65532`、只读根文件系统、无 Linux capabilities、`no-new-privileges`、128 PID、1 CPU、1 GiB 内存和 512 MiB 临时目录。Compose 不能表达“只允许访问某个 Registry 或 KMS 域名”的出口策略，因此生产环境还必须通过主机防火墙或编排平台 NetworkPolicy，只放行 MongoDB、目标 Registry、所选 KMS/签名服务和必要 DNS。
+Worker 容器使用固定非 root UID/GID `65532`、只读根文件系统、无 Linux capabilities、`no-new-privileges`、128 PID、1 CPU、1 GiB 内存和 512 MiB 临时目录。Compose 双网络拓扑负责阻断 Worker 直连，网关负责应用层精确目标放行与解析后 IP 复核；生产主机仍应以防火墙限制网关 uplink，并保证命名 `data` 网络只连接 MongoDB 和需要数据库访问的 OwnDock 进程。Kubernetes 不是首发支持运行时，部署在其他编排平台时应实现等价的默认拒绝出口策略。
 
 ## 后续阶段
 

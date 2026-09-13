@@ -24,7 +24,7 @@ make test-release-candidate
 
 - `ghcr.io/owndock/owndock`；
 - `ghcr.io/owndock/owndock-build-worker`；
-- `ghcr.io/owndock/owndock-build-egress-gateway`；
+- `ghcr.io/owndock/owndock-egress-gateway`；
 - `ghcr.io/owndock/owndock-evidence-worker`；
 - `ghcr.io/owndock/owndock-vulnerability-db-updater`。
 

@@ -1,4 +1,33 @@
 services:
+  evidence-egress-gateway:
+    # The gateway is the only container attached to both the isolated Evidence
+    # Boundary and an uplink. It receives no MongoDB, Registry, or KMS secret.
+    image: ${OWNDOCK_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}
+    command: ["-scope", "evidence", "-conf", "/etc/owndock/config.yaml"]
+    volumes:
+      - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16777216,mode=1777
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 128m
+    cpus: 0.5
+    restart: unless-stopped
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/owndock-egress-gateway", "-scope", "evidence", "-conf", "/etc/owndock/config.yaml", "-healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      evidence-boundary:
+        ipv4_address: ${OWNDOCK_EVIDENCE_EGRESS_GATEWAY_IP:-172.31.241.2}
+      evidence-egress-uplink:
+
   evidence-worker:
     # Build and publish Dockerfile.evidence-worker first, then use only the
     # immutable image digest here. A mutable tag is intentionally rejected by
@@ -32,12 +61,25 @@ services:
       - 127.0.0.1:${OWNDOCK_EVIDENCE_METRICS_PORT:-9092}:9092
     restart: unless-stopped
     stop_grace_period: 30s
+    depends_on:
+      evidence-egress-gateway:
+        condition: service_healthy
     networks:
-      - evidence-egress
+      - data
+      - evidence-boundary
 
 networks:
-  evidence-egress:
-    # Compose cannot express destination/FQDN egress policy. Production must
-    # additionally allow only MongoDB, the selected OCI Registry, and required
-    # DNS through the host firewall or orchestrator NetworkPolicy.
+  data:
+    # MongoDB must be attached to this named internal network by the base
+    # deployment. Evidence Worker never reaches it through the egress gateway.
+    external: true
+    name: ${OWNDOCK_DATA_NETWORK_NAME:?set the existing internal MongoDB network name}
+  evidence-boundary:
+    # Worker and tool subprocesses have no direct default route. The configured
+    # Registry HTTPS proxy must be the fixed gateway address on this network.
+    internal: true
+    ipam:
+      config:
+        - subnet: ${OWNDOCK_EVIDENCE_BOUNDARY_SUBNET:-172.31.241.0/24}
+  evidence-egress-uplink:
     driver: bridge

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-var ErrInvalidConfiguration = errors.New("build egress gateway configuration is invalid")
+var ErrInvalidConfiguration = errors.New("egress gateway configuration is invalid")
 
 type Destination struct {
 	Authority    string
@@ -284,8 +284,8 @@ func validHost(host string) bool {
 func proxyStatus(err error) int {
 	if errors.Is(err, errDestinationDenied) || errors.Is(err, ErrInvalidConfiguration) {
 		// 451 is an internal transport marker that survives common command output
-		// without reflecting the denied destination. The Build Worker maps it to
-		// the stable build_network_policy category; it is not a public API status.
+		// without reflecting the denied destination. Callers may map it to a stable
+		// network-policy failure category; it is not a public API status.
 		return http.StatusUnavailableForLegalReasons
 	}
 	return http.StatusBadGateway

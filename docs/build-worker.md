@@ -76,7 +76,7 @@ sequenceDiagram
 
 ## 构建出口网关
 
-BuildKit 和 Dockerfile `RUN` 位于 `internal: true` 的 Build Boundary，没有直接外网路由。`owndock-build-egress-gateway` 是唯一同时连接 Build Boundary 与出口网络的容器，只接受 HTTP `GET`/`HEAD` 和 HTTPS `CONNECT`，并按精确的小写 `host:port` 允许列表转发。DNS 解析后还会逐个复核 IP，再连接已复核的地址，避免域名重绑定绕过；loopback、link-local、multicast 和 metadata 地址始终拒绝，RFC1918 私网目标必须逐项设置 `allow_private: true`。
+BuildKit 和 Dockerfile `RUN` 位于 `internal: true` 的 Build Boundary，没有直接外网路由。以 `-scope build` 启动的 `owndock-egress-gateway` 是唯一同时连接 Build Boundary 与出口网络的容器，只接受 HTTP `GET`/`HEAD` 和 HTTPS `CONNECT`，并按精确的小写 `host:port` 允许列表转发。DNS 解析后还会逐个复核 IP，再连接已复核的地址，避免域名重绑定绕过；loopback、link-local、multicast 和 metadata 地址始终拒绝，RFC1918 私网目标必须逐项设置 `allow_private: true`。
 
 这不是 Webhook。Webhook 是 Git 平台主动通知 OwnDock“代码发生变化”；出口网关则是构建过程中 BuildKit 主动访问 Registry 或依赖源时经过的受控通道。用户 Dockerfile 清空代理变量、填写目标 IP 或使用原始 TCP，也不能获得直连路由。未授权目标在 API 中表现为稳定的 `build_network_policy`，不会回显目标或底层网络错误；网关断开时构建失败关闭且不产生镜像 manifest。
 
@@ -169,7 +169,7 @@ BuildKit 会从自己的私有 cache 执行固定 digest 的 Dockerfile frontend
 
 ```bash
 make docker-build-worker VERSION=dev
-make docker-build-egress-gateway VERSION=dev
+make docker-egress-gateway VERSION=dev
 docker run --rm --entrypoint git owndock-build-worker:dev --version
 make test-git-compatibility
 make test-build-integration
@@ -178,7 +178,7 @@ make test-build-security
 
 `test-build-security` 额外运行竞态、MongoDB 恢复、真实 Server 入口黑盒、工作区与 BuildKit cache 的内核硬配额耗尽、恶意 Dockerfile、容器网络故障和 OCI 制品秘密扫描。定时/手动 CI 会在原生 Ubuntu 24.04 amd64 和 arm64 Runner 上执行同一命令，并在日志中记录内核、cgroup、文件系统和 Docker 环境；当前证据与尚未完成的发布阻断项见 [Git-to-Deploy 安全验收](build-security-acceptance.md)。
 
-生产部署必须把 Worker 与出口网关镜像发布到受控 Registry，并分别以 `image@sha256:...` 的不可变引用设置 `OWNDOCK_BUILD_WORKER_IMAGE`、`OWNDOCK_BUILD_EGRESS_GATEWAY_IMAGE`；不要部署浮动 tag。BuildKit 镜像和 Dockerfile frontend 已在仓库中固定不可变 digest。先生成专用 mTLS 材料，并把配置中的 endpoint 与证书路径改成上面的 TCP 示例：
+生产部署必须把 Worker 与出口网关镜像发布到受控 Registry，并分别以 `image@sha256:...` 的不可变引用设置 `OWNDOCK_BUILD_WORKER_IMAGE`、`OWNDOCK_EGRESS_GATEWAY_IMAGE`；不要部署浮动 tag。同一个无秘密网关镜像按 scope 分别读取 Build 或 Evidence 允许列表，两个实例不共享网络。BuildKit 镜像和 Dockerfile frontend 已在仓库中固定不可变 digest。先生成专用 mTLS 材料，并把配置中的 endpoint 与证书路径改成上面的 TCP 示例：
 
 ```bash
 ./deploy/generate-buildkit-certs.sh /srv/owndock-buildkit-certs buildkit
@@ -188,7 +188,7 @@ CA 私钥只用于后续签发和轮换，不能挂载进容器；Compose 只挂
 
 ```bash
 OWNDOCK_BUILD_WORKER_IMAGE='registry.example.com/owndock/build-worker@sha256:...' \
-OWNDOCK_BUILD_EGRESS_GATEWAY_IMAGE='registry.example.com/owndock/build-egress-gateway@sha256:...' \
+OWNDOCK_EGRESS_GATEWAY_IMAGE='registry.example.com/owndock/egress-gateway@sha256:...' \
 OWNDOCK_MONGODB_URI='mongodb://...' \
 OWNDOCK_CONFIG_FILE="$PWD/configs/config.yaml" \
 OWNDOCK_BUILD_WORKSPACE='/srv/owndock-builds' \

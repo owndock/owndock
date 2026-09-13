@@ -65,6 +65,19 @@ func TestGatewayAllowsOnlyConfiguredHTTPDestination(t *testing.T) {
 	}
 }
 
+func TestGatewayRejectsWhenConnectionLimitIsExhausted(t *testing.T) {
+	gateway := &Gateway{permits: make(chan struct{}, 1)}
+	if !gateway.acquire() {
+		t.Fatal("first connection permit was rejected")
+	}
+	response := httptest.NewRecorder()
+	gateway.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "http://allowed.example", nil))
+	if response.Code != http.StatusServiceUnavailable || response.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("response = %d, headers = %v", response.Code, response.Header())
+	}
+	gateway.release()
+}
+
 func TestGatewayAllowsConfiguredConnectAndRejectsOtherTLSAuthority(t *testing.T) {
 	allowed := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(w, "tls dependency")

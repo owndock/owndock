@@ -94,6 +94,8 @@ product:
 
 OwnDock 的 Registry HTTP 客户端不会继承进程环境中的 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。配置代理后，Server 的 Artifact 探测和 Evidence 下载、Build Worker 的 Evidence 回读，以及 Evidence Worker 的 ORAS/Syft/Trivy/Cosign Registry 操作都只使用这个显式地址。子进程同时收到大小写代理变量，并强制空 `NO_PROXY`，避免客户环境中的旁路规则让流量绕过已选择的出口；Registry Basic 凭据仍只发送给隧道内的目标 Registry，不作为 `Proxy-Authorization` 发送。
 
+生产 Evidence Worker Compose 把这个值指向 Evidence Boundary 内的固定 `owndock-egress-gateway` 地址，并由独立的 `runtime.evidence_egress_gateway.allowed_destinations` 精确允许 Registry/KMS。Worker 不加入 gateway 的 uplink 网络，因此清空代理变量后的 raw TCP、metadata 地址和未授权目标没有直接路由。Build Boundary 使用同一个无秘密网关镜像的独立实例和 `runtime.build_egress_gateway` 允许列表；两种 scope 不共享网络或允许列表。配置和故障时序见 [Artifact Evidence](artifact-evidence.md#运行-evidence-worker)。
+
 ```mermaid
 sequenceDiagram
     participant P as OwnDock 进程或固定工具

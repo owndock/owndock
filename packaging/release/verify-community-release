@@ -73,7 +73,7 @@ awk '
 BEGIN {
     allowed["ghcr.io/owndock/owndock"] = 1
     allowed["ghcr.io/owndock/owndock-build-worker"] = 1
-    allowed["ghcr.io/owndock/owndock-build-egress-gateway"] = 1
+    allowed["ghcr.io/owndock/owndock-egress-gateway"] = 1
     allowed["ghcr.io/owndock/owndock-evidence-worker"] = 1
     allowed["ghcr.io/owndock/owndock-vulnerability-db-updater"] = 1
 }

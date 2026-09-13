@@ -146,8 +146,8 @@ jobs:
             dockerfile: Dockerfile
           - image: owndock-build-worker
             dockerfile: Dockerfile.build-worker
-          - image: owndock-build-egress-gateway
-            dockerfile: Dockerfile.build-egress-gateway
+          - image: owndock-egress-gateway
+            dockerfile: Dockerfile.egress-gateway
           - image: owndock-evidence-worker
             dockerfile: Dockerfile.evidence-worker
           - image: owndock-vulnerability-db-updater

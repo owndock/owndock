@@ -6,6 +6,7 @@ internal/tools/	2027-01-31	Repository-only fixtures and release tooling use dedi
 packaging/agent/testdata/	2027-01-31	Fake Agent source is a packaging fixture exercised as a built subprocess; it is never shipped as a production process.
 cmd/server/main.go	2027-01-31	Composition root is covered by build, startup, lifecycle, and HTTP integration gates.
 cmd/build-worker/main.go	2027-01-31	Composition root is covered by build-worker lifecycle and process integration gates.
+cmd/egress-gateway/	2027-01-31	Composition root is covered by scope unit tests plus real BuildKit and Evidence Boundary process gates.
 cmd/evidence-worker/main.go	2027-01-31	Composition root is covered by evidence-worker lifecycle and OCI integration gates.
 cmd/agent/main.go	2027-01-31	Composition root is covered by real Agent control, enrollment, rotation, dual-host, and systemd process gates.
 cmd/agent/enroll.go	2027-01-31	Enrollment CLI binding is covered by command tests and the real root-path enrollment process gate; domain logic remains measured.

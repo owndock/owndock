@@ -105,6 +105,36 @@ func TestCommunityMongoInitializationPinsFeatureCompatibilityVersion(t *testing.
 	}
 }
 
+func TestEvidenceWorkerComposeHasNoDirectEgressRoute(t *testing.T) {
+	contents, err := os.ReadFile("evidence-worker.compose.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	compose := string(contents)
+	for _, required := range []string{
+		`image: ${OWNDOCK_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}`,
+		`command: ["-scope", "evidence", "-conf", "/etc/owndock/config.yaml"]`,
+		`ipv4_address: ${OWNDOCK_EVIDENCE_EGRESS_GATEWAY_IP:-172.31.241.2}`,
+		"evidence-boundary:\n",
+		"    internal: true\n",
+		"      - data\n      - evidence-boundary\n",
+		"      evidence-egress-uplink:\n",
+	} {
+		if !strings.Contains(compose, required) {
+			t.Fatalf("Evidence Worker Compose is missing %q", required)
+		}
+	}
+	workerStart := strings.Index(compose, "  evidence-worker:\n")
+	networkStart := strings.Index(compose, "\nnetworks:\n")
+	if workerStart < 0 || networkStart <= workerStart {
+		t.Fatal("Evidence Worker Compose service boundaries are invalid")
+	}
+	workerService := compose[workerStart:networkStart]
+	if strings.Contains(workerService, "evidence-egress-uplink") {
+		t.Fatal("Evidence Worker must not join the uplink network")
+	}
+}
+
 func TestCommunityBackupAndRestoreSafety(t *testing.T) {
 	fixture := []byte("compressed-mongodb-archive-fixture")
 	directory := t.TempDir()

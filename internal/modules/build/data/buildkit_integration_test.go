@@ -119,9 +119,9 @@ func TestBuildKitRootlessMTLSRegistryIntegration(t *testing.T) {
 	runDocker(t, "run", "--detach", "--name", egressName, "--network", networkName,
 		"--network-alias", "build-egress-gateway", "--read-only", "--cap-drop", "ALL",
 		"--security-opt", "no-new-privileges", "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16777216",
-		"--volume", egressBinary+":/usr/local/bin/owndock-build-egress-gateway:ro",
+		"--volume", egressBinary+":/usr/local/bin/owndock-egress-gateway:ro",
 		"--volume", egressConfig+":/etc/owndock/config.yaml:ro", pinnedBusyBoxIntegrationImage,
-		"/usr/local/bin/owndock-build-egress-gateway", "-conf", "/etc/owndock/config.yaml")
+		"/usr/local/bin/owndock-egress-gateway", "-scope", "build", "-conf", "/etc/owndock/config.yaml")
 	t.Cleanup(func() { _ = dockerCommand("rm", "--force", egressName) })
 	runDocker(t, "network", "connect", uplinkName, egressName)
 	waitForBuildEgressGateway(t, egressName)
@@ -572,8 +572,8 @@ func buildEgressGatewayFixture(t *testing.T, root string) (string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	binary := filepath.Join(root, "owndock-build-egress-gateway")
-	command := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/build-egress-gateway")
+	binary := filepath.Join(root, "owndock-egress-gateway")
+	command := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/egress-gateway")
 	command.Dir = projectRoot
 	command.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH="+runtime.GOARCH,
 		"GOCACHE=/tmp/owndock-go-cache")
@@ -612,8 +612,8 @@ func waitForBuildEgressGateway(t *testing.T, containerName string) {
 	t.Helper()
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
-		if dockerCommand("exec", containerName, "/usr/local/bin/owndock-build-egress-gateway",
-			"-conf", "/etc/owndock/config.yaml", "-healthcheck") == nil {
+		if dockerCommand("exec", containerName, "/usr/local/bin/owndock-egress-gateway",
+			"-scope", "build", "-conf", "/etc/owndock/config.yaml", "-healthcheck") == nil {
 			return
 		}
 		time.Sleep(250 * time.Millisecond)

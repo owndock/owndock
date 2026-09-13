@@ -19,11 +19,11 @@ services:
     network_mode: none
 
   build-egress-gateway:
-    # Publish Dockerfile.build-egress-gateway first and provide only an
+    # Publish Dockerfile.egress-gateway first and provide only an
     # immutable image@sha256 reference. This process receives no MongoDB,
     # Registry password, Git credential, Docker socket, or BuildKit mTLS key.
-    image: ${OWNDOCK_BUILD_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}
-    command: ["-conf", "/etc/owndock/config.yaml"]
+    image: ${OWNDOCK_EGRESS_GATEWAY_IMAGE:?set an immutable image digest}
+    command: ["-scope", "build", "-conf", "/etc/owndock/config.yaml"]
     volumes:
       - ${OWNDOCK_CONFIG_FILE:?required}:/etc/owndock/config.yaml:ro
     read_only: true
@@ -38,7 +38,7 @@ services:
     restart: unless-stopped
     stop_grace_period: 15s
     healthcheck:
-      test: ["CMD", "/usr/local/bin/owndock-build-egress-gateway", "-conf", "/etc/owndock/config.yaml", "-healthcheck"]
+      test: ["CMD", "/usr/local/bin/owndock-egress-gateway", "-scope", "build", "-conf", "/etc/owndock/config.yaml", "-healthcheck"]
       interval: 5s
       timeout: 3s
       retries: 12
