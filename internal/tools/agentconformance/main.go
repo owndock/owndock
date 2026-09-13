@@ -79,9 +79,10 @@ func newFixtureIdentity(host, identity, instance string) (fixtureIdentity, error
 }
 
 type agentFrame struct {
-	Type     string      `json:"type"`
-	Sequence uint64      `json:"sequence"`
-	Hello    *agentHello `json:"hello,omitempty"`
+	Type          string              `json:"type"`
+	Sequence      uint64              `json:"sequence"`
+	Hello         *agentHello         `json:"hello,omitempty"`
+	CommandResult *agentCommandResult `json:"command_result,omitempty"`
 }
 
 type agentHello struct {
@@ -95,15 +96,28 @@ type agentHello struct {
 	Capabilities    []string `json:"capabilities"`
 }
 
+type agentCommandResult struct {
+	CommandID    string                           `json:"command_id"`
+	Status       agentprotocol.AgentCommandStatus `json:"status"`
+	ErrorCode    string                           `json:"error_code,omitempty"`
+	RuntimeProbe *agentRuntimeProbeResult         `json:"runtime_probe,omitempty"`
+}
+
+type agentRuntimeProbeResult struct {
+	Status agentprotocol.RuntimeProbeStatus `json:"status"`
+}
+
 type serverFrame struct {
-	Type                     string    `json:"type"`
-	Sequence                 uint64    `json:"sequence"`
-	SessionID                string    `json:"session_id,omitempty"`
-	ProtocolVersion          string    `json:"protocol_version,omitempty"`
-	HeartbeatIntervalSeconds int64     `json:"heartbeat_interval_seconds,omitempty"`
-	MaxFrameBytes            int       `json:"max_frame_bytes,omitempty"`
-	AcknowledgedSequence     uint64    `json:"acknowledged_sequence,omitempty"`
-	ServerTime               time.Time `json:"server_time,omitzero"`
+	Type                     string                         `json:"type"`
+	Sequence                 uint64                         `json:"sequence"`
+	SessionID                string                         `json:"session_id,omitempty"`
+	ProtocolVersion          string                         `json:"protocol_version,omitempty"`
+	HeartbeatIntervalSeconds int64                          `json:"heartbeat_interval_seconds,omitempty"`
+	MaxFrameBytes            int                            `json:"max_frame_bytes,omitempty"`
+	AcknowledgedSequence     uint64                         `json:"acknowledged_sequence,omitempty"`
+	ServerTime               time.Time                      `json:"server_time,omitzero"`
+	CommandID                string                         `json:"command_id,omitempty"`
+	Command                  *agentprotocol.CommandDocument `json:"command,omitempty"`
 }
 
 func main() {
@@ -529,8 +543,7 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		return
 	}
 	if handler.onlyHost != "" && host != handler.onlyHost {
-		child := &conformanceHandler{resultFile: handler.results[host], identity: identity}
-		if err := child.handle(writer, request); err != nil {
+		if err := rejectAgentStream(writer, request, identity); err != nil {
 			handler.once.Do(func() { handler.completed <- err })
 		}
 		return
@@ -565,6 +578,37 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 	if finished {
 		handler.once.Do(func() { handler.completed <- nil })
 	}
+}
+
+func rejectAgentStream(
+	writer http.ResponseWriter,
+	request *http.Request,
+	identity fixtureIdentity,
+) error {
+	if request.Method != http.MethodPost || request.URL.Path != "/api/v1/agent/connect" ||
+		request.Header.Get("Content-Type") != contentType {
+		return errors.New("invalid partitioned Agent request")
+	}
+	controller := http.NewResponseController(writer)
+	if err := controller.EnableFullDuplex(); err != nil {
+		return err
+	}
+	scanner := bufio.NewScanner(request.Body)
+	scanner.Buffer(make([]byte, 4096), 64*1024)
+	if !scanner.Scan() {
+		return errors.New("partitioned Agent hello is missing")
+	}
+	var frame agentFrame
+	if err := decodeStrict(scanner.Bytes(), &frame); err != nil ||
+		frame.Type != "hello" || frame.Sequence != 1 || frame.Hello == nil ||
+		frame.Hello.OrganizationID != identity.organizationID ||
+		frame.Hello.ManagedHostID != identity.hostID ||
+		frame.Hello.AgentIdentityID != identity.identityID ||
+		frame.Hello.InstanceID != identity.instanceID {
+		return errors.New("partitioned Agent hello identity is invalid")
+	}
+	http.Error(writer, "Agent temporarily unavailable", http.StatusServiceUnavailable)
+	return controller.Flush()
 }
 
 func (handler *dualConformanceHandler) matchIdentity(request *http.Request) (string, fixtureIdentity) {
@@ -939,33 +983,98 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	if err := controller.Flush(); err != nil {
 		return err
 	}
-	if !scanner.Scan() {
-		return errors.New("Agent heartbeat is missing")
+	command := agentprotocol.AgentCommand{
+		ID:       "conformance-probe-" + h.identity.hostID,
+		Kind:     agentprotocol.AgentCommandRuntimeProbe,
+		Deadline: time.Unix(1, 0).UTC(),
+		RuntimeProbe: &agentprotocol.RuntimeProbeCommand{
+			RuntimeTargetID: "conformance-target-" + h.identity.hostID,
+		},
 	}
-	var heartbeat agentFrame
-	if err := decodeStrict(scanner.Bytes(), &heartbeat); err != nil {
-		return fmt.Errorf("decode Agent heartbeat: %w", err)
+	if err := command.Validate(); err != nil {
+		return fmt.Errorf("create Agent conformance command: %w", err)
 	}
-	if heartbeat.Type != "heartbeat" || heartbeat.Sequence <= helloFrame.Sequence ||
-		heartbeat.Hello != nil {
-		return errors.New("Agent heartbeat shape is invalid")
-	}
+	serverSequence := uint64(2)
 	if err := encoder.Encode(serverFrame{
-		Type: "heartbeat_ack", Sequence: 2,
-		AcknowledgedSequence: heartbeat.Sequence,
-		ServerTime:           time.Now().UTC(),
+		Type: "command", Sequence: serverSequence,
+		Command: agentprotocol.NewCommandDocument(command),
 	}); err != nil {
 		return err
 	}
 	if err := controller.Flush(); err != nil {
 		return err
 	}
+	lastAgentSequence := helloFrame.Sequence
+	heartbeatReceived := false
+	commandResultReceived := false
+	for !heartbeatReceived || !commandResultReceived {
+		if !scanner.Scan() {
+			return errors.New("Agent heartbeat or command result is missing")
+		}
+		var frame agentFrame
+		if err := decodeStrict(scanner.Bytes(), &frame); err != nil {
+			return fmt.Errorf("decode Agent frame: %w", err)
+		}
+		if frame.Sequence <= lastAgentSequence || frame.Hello != nil {
+			return errors.New("Agent frame sequence or shape is invalid")
+		}
+		lastAgentSequence = frame.Sequence
+		serverSequence++
+		switch frame.Type {
+		case "heartbeat":
+			if frame.CommandResult != nil || heartbeatReceived {
+				return errors.New("Agent heartbeat shape is invalid")
+			}
+			heartbeatReceived = true
+			if err := encoder.Encode(serverFrame{
+				Type: "heartbeat_ack", Sequence: serverSequence,
+				AcknowledgedSequence: frame.Sequence,
+				ServerTime:           time.Now().UTC(),
+			}); err != nil {
+				return err
+			}
+		case "command_result":
+			if frame.CommandResult == nil || commandResultReceived {
+				return errors.New("Agent command result shape is invalid")
+			}
+			result := agentprotocol.AgentCommandResult{
+				CommandID: frame.CommandResult.CommandID,
+				Status:    frame.CommandResult.Status,
+				ErrorCode: frame.CommandResult.ErrorCode,
+			}
+			if frame.CommandResult.RuntimeProbe != nil {
+				result.RuntimeProbe = &agentprotocol.RuntimeProbeResult{
+					Status: frame.CommandResult.RuntimeProbe.Status,
+				}
+			}
+			if err := result.Validate(command); err != nil ||
+				result.Status != agentprotocol.AgentCommandFailed ||
+				result.ErrorCode != "command_expired" {
+				return errors.New("Agent conformance command result is invalid")
+			}
+			commandResultReceived = true
+			if err := encoder.Encode(serverFrame{
+				Type: "command_result_ack", Sequence: serverSequence,
+				AcknowledgedSequence: frame.Sequence,
+				CommandID:            command.ID,
+				ServerTime:           time.Now().UTC(),
+			}); err != nil {
+				return err
+			}
+		default:
+			return errors.New("Agent conformance frame type is invalid")
+		}
+		if err := controller.Flush(); err != nil {
+			return err
+		}
+	}
 	result := fmt.Sprintf(
-		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\nstatus=passed\n",
+		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\ncommand_id=%s\ncommand_status=command_expired\nstatus=passed\n",
 		hello.AgentVersion,
 		hello.ProtocolVersion,
 		hello.ManagedHostID,
 		peer.SerialNumber.String(),
+		command.ID,
 	)
 	return writeFile(h.resultFile, []byte(result), 0o600)
 }

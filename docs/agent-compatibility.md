@@ -28,7 +28,7 @@
 
 | 组合 | 目标 | 当前证据 |
 | --- | --- | --- |
-| 当前 Server + 当前 Agent | 必须通过 | 源码级双端与外部真实 Agent 进程 mTLS/重连 conformance 已通过 |
+| 当前 Server + 当前 Agent | 必须通过 | 源码级双端与外部真实 Agent 进程 mTLS、命令路由及重连 conformance 已通过 |
 | 当前 Server + 上一正式 Agent | 支持 Server 先升级 | 等首两个正式 Tag 后执行 |
 | 上一正式 Server + 当前 Agent | 支持 Agent 灰度及 Server 回滚 | 等首两个正式 Tag 后执行 |
 | 当前 Server + 更早 Agent | 不默认承诺 | 需要单独维护/商业支持决定 |
@@ -59,6 +59,6 @@ Patch 版本不得故意破坏相同协议下的兼容性。Minor 版本只有�
 - 两台 Host 混合版本期间不串目标、断线隔离、部署 cutover 水位和证书轮换；
 - 失败时的安全错误、日志/指标和实际回滚耗时。
 
-当前仓库没有正式 Tag 可作为“上一版本”，因此 CI 先运行同源码双端 conformance、真实 Agent 进程的 mTLS/监听器重启恢复、同一控制面入口下两个不同 Managed Host Agent 的身份隔离与单 Host 会话恢复，以及真实 systemd 测试版本升级和坏版本恢复。双 Agent 门禁证明共享 CA、入口、进程、证书和重连状态不会造成跨 Host 串线，但不替代真实 Docker 部署。`agent-release-compatibility` 工作流会在首个正式 Tag 发布后只记录基线；从第二个已发布 Tag 开始，它会下载当前与上一 Release 的双架构包，分别核验精确 Tag 的 Sigstore 身份，再用 amd64 真二进制执行离线旧版安装→新版升级→旧版回滚并确认状态保留。
+当前仓库没有正式 Tag 可作为“上一版本”，因此 CI 先运行同源码双端 conformance、真实 Agent 进程的 mTLS/监听器重启恢复、同一控制面入口下两个不同 Managed Host Agent 的身份隔离、确定性类型化命令路由与单 Host 会话恢复，以及真实 systemd 测试版本升级和坏版本恢复。双 Agent 门禁证明共享 CA、入口、进程、证书、命令结果缓存和重连状态不会造成跨 Host 串线，但其固定过期命令不替代真实 Docker 部署。`agent-release-compatibility` 工作流会在首个正式 Tag 发布后只记录基线；从第二个已发布 Tag 开始，它会下载当前与上一 Release 的双架构包，分别核验精确 Tag 的 Sigstore 身份，再用 amd64 真二进制执行离线旧版安装→新版升级→旧版回滚并确认状态保留。
 
-发布后工作流还会从两份已验签 `RELEASE.txt` 固定的 commit 构建各自的 one-shot conformance Server：上一版 Agent 连接当前 fixture、当前 Agent 连接上一版 fixture；两边都必须完成精确证书身份、`v1` hello、heartbeat、监听器中断和自动重连。这个轻量 live wire 门禁不依赖 Mongo 或 Docker，适合每个 Release 强制执行；真实命令、双主机和证书轮换矩阵仍需生产等价系统验收，完成前本页状态保持 provisional。
+发布后工作流还会从两份已验签 `RELEASE.txt` 固定的 commit 构建各自的 one-shot conformance Server：上一版 Agent 连接当前 fixture、当前 Agent 连接上一版 fixture；两边都必须完成精确证书身份、`v1` hello、heartbeat、监听器中断和自动重连。这个轻量 live wire 门禁不依赖 Mongo 或 Docker，适合每个 Release 强制执行；真实 Docker 命令、双主机和证书轮换矩阵仍需生产等价系统验收，完成前本页状态保持 provisional。

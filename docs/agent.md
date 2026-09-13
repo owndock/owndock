@@ -221,6 +221,8 @@ sequenceDiagram
 
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)，产品版本、控制协议和相邻版本升级规则见[Agent 与 Server 版本兼容策略](agent-compatibility.md)。
 
+双 Agent 进程门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；命令故意使用固定的过期 deadline，因此不依赖测试机 Docker Engine，同时会验证重连时“同 ID、同完整命令”可安全重放。随后控制面只服务 Host B，Host A 必须收到临时不可用、保持进程存活且不能生成成功结果；恢复同一入口后 Host A 必须重新完成自己的命令链。该门禁证明真实进程的身份、命令和重连状态不串 Host，但不替代两台客户主机上的真实 Docker 部署与网络层乱序测试。
+
 ## 当前不能做什么
 
 - 首次私钥生成、enrollment 兑换和配置/身份材料安全落盘已经自动化，但仍需真实发行网络、私有 CA 和进程崩溃点系统验收；

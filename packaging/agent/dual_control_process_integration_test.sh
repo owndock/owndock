@@ -74,6 +74,12 @@ wait "$server_pid" || fail "shared control server failed the initial dual handsh
 server_pid=
 grep -qx 'managed_host_id=conformance-host-a' "$result_a_one" || fail "Host A identity crossed routes"
 grep -qx 'managed_host_id=conformance-host-b' "$result_b_one" || fail "Host B identity crossed routes"
+grep -qx 'command_id=conformance-probe-conformance-host-a' "$result_a_one" || \
+    fail "Host A received another Host's command"
+grep -qx 'command_id=conformance-probe-conformance-host-b' "$result_b_one" || \
+    fail "Host B received another Host's command"
+grep -qx 'command_status=command_expired' "$result_a_one" || fail "Host A command result is missing"
+grep -qx 'command_status=command_expired' "$result_b_one" || fail "Host B command result is missing"
 
 # The same shared endpoint now rejects Host A while accepting Host B. Host A's
 # process must remain alive without preventing Host B from reconnecting.
@@ -90,7 +96,10 @@ wait "$server_pid" || fail "Host B did not reconnect while Host A was rejected"
 server_pid=
 kill -0 "$agent_a_pid" >/dev/null 2>&1 || fail "Host A Agent exited during its partition"
 kill -0 "$agent_b_pid" >/dev/null 2>&1 || fail "Host B Agent exited after reconnect"
+[ ! -e "$workspace/unused-a-two" ] || fail "partitioned Host A completed a control session"
 grep -qx 'managed_host_id=conformance-host-b' "$result_b_two" || fail "Host B reconnected as the wrong Host"
+grep -qx 'command_id=conformance-probe-conformance-host-b' "$result_b_two" || \
+    fail "Host B reconnect received another Host's command"
 
 ready_three=$workspace/ready-three
 result_a_three=$workspace/result-a-three
@@ -104,6 +113,8 @@ wait_for_file "$result_a_three"
 wait "$server_pid" || fail "Host A did not recover through the shared endpoint"
 server_pid=
 grep -qx 'managed_host_id=conformance-host-a' "$result_a_three" || fail "Host A recovered as the wrong Host"
+grep -qx 'command_id=conformance-probe-conformance-host-a' "$result_a_three" || \
+    fail "Host A recovery received another Host's command"
 
 kill -TERM "$agent_a_pid"
 wait "$agent_a_pid" || fail "Host A Agent did not stop cleanly"
