@@ -1,0 +1,193 @@
+name: community-release-compatibility
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      current_tag:
+        description: Published release tag to validate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: community-release-compatibility-${{ github.event.release.tag_name || inputs.current_tag }}
+  cancel-in-progress: false
+
+jobs:
+  adjacent-community:
+    if: github.repository == 'owndock/owndock'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.release.tag_name || inputs.current_tag }}
+      - name: Resolve adjacent published releases
+        id: releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.current_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          current_tag=${EVENT_TAG:-${INPUT_TAG:-}}
+          if [[ ! "${current_tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "current release tag is not valid SemVer: ${current_tag}" >&2
+            exit 2
+          fi
+          gh release view "${current_tag}" --json isDraft --jq \
+            'select(.isDraft == false) | true' | grep -qx true || {
+              echo "current tag is not a published release" >&2
+              exit 2
+            }
+          previous_tag=
+          found_current=false
+          while IFS= read -r candidate; do
+            if [[ "${candidate}" == "${current_tag}" ]]; then
+              found_current=true
+              continue
+            fi
+            if [[ "${found_current}" == true ]] && \
+               [[ "${candidate}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+              previous_tag=${candidate}
+              break
+            fi
+          done < <(gh release list --limit 100 --exclude-drafts --json tagName \
+            --jq '.[].tagName')
+          if [[ "${found_current}" != true ]]; then
+            echo "current tag is not present in the published release list" >&2
+            exit 2
+          fi
+          printf 'current_tag=%s\n' "${current_tag}" >> "${GITHUB_OUTPUT}"
+          printf 'current_version=%s\n' "${current_tag#v}" >> "${GITHUB_OUTPUT}"
+          if [[ -z "${previous_tag}" ]]; then
+            printf 'has_previous=false\n' >> "${GITHUB_OUTPUT}"
+            printf '### Community adjacent release matrix\n\n%s\n' \
+              "${current_tag} is the first published baseline; no previous release exists." \
+              >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          printf 'has_previous=true\n' >> "${GITHUB_OUTPUT}"
+          printf 'previous_tag=%s\n' "${previous_tag}" >> "${GITHUB_OUTPUT}"
+          printf 'previous_version=%s\n' "${previous_tag#v}" >> "${GITHUB_OUTPUT}"
+      - name: Install fixed Cosign release
+        if: steps.releases.outputs.has_previous == 'true'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v3.0.6
+      - name: Download exact signed community assets
+        if: steps.releases.outputs.has_previous == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CURRENT_TAG: ${{ steps.releases.outputs.current_tag }}
+          PREVIOUS_TAG: ${{ steps.releases.outputs.previous_tag }}
+          CURRENT_VERSION: ${{ steps.releases.outputs.current_version }}
+          PREVIOUS_VERSION: ${{ steps.releases.outputs.previous_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p compatibility/current compatibility/previous
+          gh release download "${CURRENT_TAG}" --dir compatibility/current \
+            --pattern "owndock-community_${CURRENT_VERSION}.tar.gz" \
+            --pattern COMMUNITY_SHA256SUMS \
+            --pattern COMMUNITY_SHA256SUMS.sigstore.json \
+            --pattern CONTAINER_IMAGES.txt \
+            --pattern CONTAINER_IMAGES.sigstore.json
+          gh release download "${PREVIOUS_TAG}" --dir compatibility/previous \
+            --pattern "owndock-community_${PREVIOUS_VERSION}.tar.gz" \
+            --pattern COMMUNITY_SHA256SUMS \
+            --pattern COMMUNITY_SHA256SUMS.sigstore.json \
+            --pattern CONTAINER_IMAGES.txt \
+            --pattern CONTAINER_IMAGES.sigstore.json
+      - name: Verify release identities, bundles, and immutable Server images
+        if: steps.releases.outputs.has_previous == 'true'
+        env:
+          CURRENT_TAG: ${{ steps.releases.outputs.current_tag }}
+          PREVIOUS_TAG: ${{ steps.releases.outputs.previous_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          verify_release() {
+            directory=$1
+            tag=$2
+            identity="https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${tag}"
+            cosign verify-blob "${directory}/COMMUNITY_SHA256SUMS" \
+              --bundle "${directory}/COMMUNITY_SHA256SUMS.sigstore.json" \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --offline
+            cosign verify-blob "${directory}/CONTAINER_IMAGES.txt" \
+              --bundle "${directory}/CONTAINER_IMAGES.sigstore.json" \
+              --certificate-identity "${identity}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              --offline
+            (cd "${directory}" && sha256sum --check COMMUNITY_SHA256SUMS)
+          }
+          verify_release compatibility/current "${CURRENT_TAG}"
+          verify_release compatibility/previous "${PREVIOUS_TAG}"
+
+          resolve_server_image() {
+            manifest=$1
+            mapfile -t references < <(
+              grep -E '^ghcr\.io/owndock/owndock@sha256:[0-9a-f]{64}$' "${manifest}" || true
+            )
+            if [[ "${#references[@]}" -ne 1 ]]; then
+              echo "container manifest must contain exactly one immutable Server image" >&2
+              return 1
+            fi
+            printf '%s\n' "${references[0]}"
+          }
+          printf 'current_image=%s\n' \
+            "$(resolve_server_image compatibility/current/CONTAINER_IMAGES.txt)" \
+            >> "${GITHUB_OUTPUT}"
+          printf 'previous_image=%s\n' \
+            "$(resolve_server_image compatibility/previous/CONTAINER_IMAGES.txt)" \
+            >> "${GITHUB_OUTPUT}"
+        id: images
+      - name: Login to GitHub Container Registry
+        if: steps.releases.outputs.has_previous == 'true'
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Exercise signed adjacent upgrade, rollback, and recovery
+        if: steps.releases.outputs.has_previous == 'true'
+        env:
+          CURRENT_IMAGE: ${{ steps.images.outputs.current_image }}
+          PREVIOUS_IMAGE: ${{ steps.images.outputs.previous_image }}
+          CURRENT_TAG: ${{ steps.releases.outputs.current_tag }}
+          PREVIOUS_TAG: ${{ steps.releases.outputs.previous_tag }}
+          CURRENT_VERSION: ${{ steps.releases.outputs.current_version }}
+          PREVIOUS_VERSION: ${{ steps.releases.outputs.previous_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull "${PREVIOUS_IMAGE}"
+          docker pull "${CURRENT_IMAGE}"
+          cosign verify "${PREVIOUS_IMAGE}" \
+            --certificate-identity \
+              "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${PREVIOUS_TAG}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          cosign verify "${CURRENT_IMAGE}" \
+            --certificate-identity \
+              "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${CURRENT_TAG}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          deploy/community_process_integration_test.sh \
+            "${PREVIOUS_IMAGE}" "${PREVIOUS_VERSION}" \
+            "${CURRENT_IMAGE}" "${CURRENT_VERSION}"
+          {
+            printf '### Community adjacent release matrix\n\n'
+            printf -- '- Previous: `%s`\n' "${PREVIOUS_TAG}"
+            printf -- '- Current: `%s`\n' "${CURRENT_TAG}"
+            printf -- '- Release manifests verified offline; both Server digest signatures verified\n'
+            printf -- '- Lifecycle: previous start → current upgrade → previous rollback passed\n'
+            printf -- '- Persistence: login, backup, empty-volume restore, and secret scan passed\n'
+          } >> "${GITHUB_STEP_SUMMARY}"

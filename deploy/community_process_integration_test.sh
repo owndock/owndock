@@ -1,20 +1,40 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
-  echo "usage: $0 BASELINE_SERVER_IMAGE CANDIDATE_SERVER_IMAGE" >&2
+if [ "$#" -ne 4 ] || [ -z "$1" ] || [ -z "$2" ] || [ -z "$3" ] || [ -z "$4" ]; then
+  echo "usage: $0 BASELINE_SERVER_IMAGE BASELINE_VERSION CANDIDATE_SERVER_IMAGE CANDIDATE_VERSION" >&2
   exit 2
 fi
 baseline_image=$1
-candidate_image=$2
+baseline_version=$2
+candidate_image=$3
+candidate_version=$4
 for server_image in "$baseline_image" "$candidate_image"; do
   case "$server_image" in
     owndock-community-integration:*) ;;
-    *) echo "integration images must use the isolated owndock-community-integration repository" >&2; exit 2 ;;
+    ghcr.io/owndock/owndock@sha256:*)
+      digest=${server_image#ghcr.io/owndock/owndock@sha256:}
+      printf '%s\n' "$digest" | grep -Eq '^[0-9a-f]{64}$' || {
+        echo "published integration images must use an exact SHA-256 digest" >&2
+        exit 2
+      }
+      ;;
+    *) echo "integration images must use the isolated local repository or the exact published OwnDock digest" >&2; exit 2 ;;
   esac
 done
 [ "$baseline_image" != "$candidate_image" ] || {
   echo "baseline and candidate images must be different" >&2
+  exit 2
+}
+for server_version in "$baseline_version" "$candidate_version"; do
+  printf '%s\n' "$server_version" |
+    grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$' || {
+      echo "integration versions must use SemVer without a v prefix" >&2
+      exit 2
+    }
+done
+[ "$baseline_version" != "$candidate_version" ] || {
+  echo "baseline and candidate versions must be different" >&2
   exit 2
 }
 
@@ -128,7 +148,7 @@ case "$port_bindings" in
   null|'{}') ;;
   *) echo "MongoDB unexpectedly exposes a host port: $port_bindings" >&2; exit 1 ;;
 esac
-assert_version 0.0.0-community-baseline
+assert_version "$baseline_version"
 assert_server_hardening
 
 bootstrap_header=$test_directory/bootstrap-header
@@ -165,13 +185,13 @@ status=$(curl --silent --show-error --output "$test_directory/login-response.jso
   "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
 test "$status" = 200
 
-recreate_server "$candidate_image" 0.0.1-community-candidate
+recreate_server "$candidate_image" "$candidate_version"
 status=$(curl --silent --show-error --output "$test_directory/upgraded-login-response.json" --write-out '%{http_code}' \
   --request POST --header 'Content-Type: application/json' --data-binary "@$login_body" \
   "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
 test "$status" = 200
 
-recreate_server "$baseline_image" 0.0.0-community-baseline
+recreate_server "$baseline_image" "$baseline_version"
 status=$(curl --silent --show-error --output "$test_directory/rollback-login-response.json" --write-out '%{http_code}' \
   --request POST --header 'Content-Type: application/json' --data-binary "@$login_body" \
   "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
@@ -211,7 +231,7 @@ OWNDOCK_RESTORE_CONFIRM=empty-owndock-database \
     }
 docker compose -f "$compose_file" up -d --no-deps server
 wait_ready
-assert_version 0.0.0-community-baseline
+assert_version "$baseline_version"
 assert_server_hardening
 
 status=$(curl --silent --show-error --output "$test_directory/restored-login-response.json" --write-out '%{http_code}' \

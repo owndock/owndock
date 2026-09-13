@@ -191,3 +191,41 @@ esac
 		t.Fatalf("restore consumed archive for non-empty database: %v", err)
 	}
 }
+
+func TestCommunityProcessIntegrationRequiresImmutableDistinctReleases(t *testing.T) {
+	validDigest := strings.Repeat("a", 64)
+	validPrevious := "ghcr.io/owndock/owndock@sha256:" + validDigest
+	validCurrent := "ghcr.io/owndock/owndock@sha256:" + strings.Repeat("b", 64)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing arguments", args: nil},
+		{name: "mutable published tag", args: []string{
+			"ghcr.io/owndock/owndock:1.0.0", "1.0.0", validCurrent, "1.1.0",
+		}},
+		{name: "short digest", args: []string{
+			"ghcr.io/owndock/owndock@sha256:abcd", "1.0.0", validCurrent, "1.1.0",
+		}},
+		{name: "same image", args: []string{
+			validPrevious, "1.0.0", validPrevious, "1.1.0",
+		}},
+		{name: "version prefix", args: []string{
+			validPrevious, "v1.0.0", validCurrent, "1.1.0",
+		}},
+		{name: "same version", args: []string{
+			validPrevious, "1.0.0", validCurrent, "1.0.0",
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command("sh", append(
+				[]string{"community_process_integration_test.sh"},
+				test.args...,
+			)...)
+			if output, err := command.CombinedOutput(); err == nil {
+				t.Fatalf("unsafe integration input succeeded: %s", output)
+			}
+		})
+	}
+}

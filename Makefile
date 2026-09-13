@@ -149,8 +149,8 @@ test-community-integration:
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
 		--tag owndock-community-integration:$(COMMIT)-candidate .
 	sh deploy/community_process_integration_test.sh \
-		owndock-community-integration:$(COMMIT)-baseline \
-		owndock-community-integration:$(COMMIT)-candidate
+		owndock-community-integration:$(COMMIT)-baseline 0.0.0-community-baseline \
+		owndock-community-integration:$(COMMIT)-candidate 0.0.1-community-candidate
 
 test-release-candidate: check test-community-deployment
 	go test -race ./... -count=1

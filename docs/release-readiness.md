@@ -30,6 +30,15 @@ make test-release-candidate
 
 工作流为每个 manifest digest 生成 SBOM、Provenance 和 Sigstore keyless 签名，并把五个不可变引用写入签名的 `CONTAINER_IMAGES.txt`。全部镜像构建成功后才提升精确 SemVer tag；重跑只接受 tag 已指向相同 digest 的情况，任何不同 digest 都拒绝覆盖。部署配置应使用清单中的 `image@sha256:digest`，不能仅依赖 tag。
 
+正式 Release 发布后，`community-release-compatibility` 工作流会自动选择上一条已发布的 SemVer Release。首个版本只建立基线；从第二个版本开始，它会下载两版社区安装包、容器清单及 Sigstore bundle，离线验证两版清单身份和校验和，再验证两个 Server image digest 的签名并执行：
+
+- 上一版启动、Bootstrap 和持久化重启；
+- 升级到当前版并验证版本、登录与数据保持；
+- 回滚到上一版并再次验证版本、登录与数据保持；
+- 停写备份、创建新空卷、恢复、恢复后登录和全程秘密日志扫描。
+
+该发布后矩阵失败意味着新版本尚未取得相邻版本兼容支持证据，不能对客户宣称可安全升级。工作流支持指定已发布 Tag 手动重跑，但不接受未发布 Tag、可变镜像 tag 或未签名的 Server digest。
+
 ```mermaid
 sequenceDiagram
     autonumber
