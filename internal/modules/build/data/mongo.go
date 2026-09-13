@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/owndock/owndock/internal/modules/build/biz"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
@@ -115,7 +116,7 @@ func (r *MongoRepository) appendBuildLogChunk(ctx context.Context, item biz.Buil
 		var transactionErr error
 		appended, transactionErr = r.appendBuildLogChunkTransaction(transactionContext, item, message, expiresAt)
 		return nil, transactionErr
-	})
+	}, mongotx.Options())
 	return appended, err
 }
 

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/supplychain/biz"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -83,7 +84,7 @@ func (r *MongoRepository) PublishClaimedSignatureVerification(ctx context.Contex
 			return nil, biz.ErrEvidenceLeaseExpired
 		}
 		return nil, nil
-	})
+	}, mongotx.Options())
 	if err != nil {
 		return biz.EvidenceJob{}, biz.EvidenceVerification{}, err
 	}

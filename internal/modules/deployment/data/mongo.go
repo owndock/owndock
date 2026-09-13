@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -182,6 +183,7 @@ func (r *MongoRepository) Create(ctx context.Context, item biz.Deployment) (biz.
 			)
 			return nil, createErr
 		},
+		mongotx.Options(),
 	)
 	if err != nil {
 		return biz.Deployment{}, err

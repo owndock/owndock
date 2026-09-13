@@ -46,6 +46,7 @@ import (
 	"github.com/owndock/owndock/internal/platform/id"
 	platformingress "github.com/owndock/owndock/internal/platform/ingress"
 	"github.com/owndock/owndock/internal/platform/migration"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"github.com/owndock/owndock/internal/server"
 	sharedaudit "github.com/owndock/owndock/internal/shared/audit"
 	"github.com/owndock/owndock/internal/shared/registryauth"
@@ -57,7 +58,6 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	drivermongo "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 )
 
 const integrationImage = "mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3"
@@ -133,24 +133,6 @@ func TestOpenRejectsDisabledConfig(t *testing.T) {
 	}
 }
 
-func TestProductTransactionsUseDurableReplicaSetSemantics(t *testing.T) {
-	configured := &options.TransactionOptions{}
-	for _, apply := range productTransactionOptions().List() {
-		if err := apply(configured); err != nil {
-			t.Fatalf("apply transaction option: %v", err)
-		}
-	}
-	if configured.ReadConcern == nil || configured.ReadConcern.Level != "snapshot" {
-		t.Fatalf("read concern = %+v, want snapshot", configured.ReadConcern)
-	}
-	if configured.ReadPreference == nil || configured.ReadPreference.Mode() != readpref.PrimaryMode {
-		t.Fatalf("read preference = %+v, want primary", configured.ReadPreference)
-	}
-	if configured.WriteConcern == nil || configured.WriteConcern.W != "majority" {
-		t.Fatalf("write concern = %+v, want majority", configured.WriteConcern)
-	}
-}
-
 func TestMongoReplicaSetIntegration(t *testing.T) {
 	if os.Getenv("OWNDOCK_RUN_MONGO_INTEGRATION") != "1" {
 		t.Skip("set OWNDOCK_RUN_MONGO_INTEGRATION=1 to run the MongoDB integration test")
@@ -219,7 +201,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 			transactionContext,
 			bson.D{{Key: "probe", Value: "transaction"}},
 		)
-	}); err != nil {
+	}, mongotx.Options()); err != nil {
 		t.Fatalf("transaction: %v", err)
 	}
 	count, err := client.Database().Collection("platform_probe").CountDocuments(ctx, bson.D{})

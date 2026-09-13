@@ -11,11 +11,10 @@ import (
 	"time"
 
 	platformconfig "github.com/owndock/owndock/internal/platform/config"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	drivermongo "go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
-	"go.mongodb.org/mongo-driver/v2/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
-	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 )
 
 type Client struct {
@@ -96,18 +95,11 @@ func (c *Client) WithinTransaction(ctx context.Context, fn func(context.Context)
 			return nil, err
 		}
 		return nil, nil
-	}, productTransactionOptions())
+	}, mongotx.Options())
 	if err != nil {
 		return fmt.Errorf("run MongoDB transaction: %w", err)
 	}
 	return nil
-}
-
-func productTransactionOptions() *options.TransactionOptionsBuilder {
-	return options.Transaction().
-		SetReadConcern(readconcern.Snapshot()).
-		SetReadPreference(readpref.Primary()).
-		SetWriteConcern(writeconcern.Majority())
 }
 
 func (c *Client) Ping(ctx context.Context) error {

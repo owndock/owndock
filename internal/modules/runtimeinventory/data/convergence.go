@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -72,6 +73,7 @@ func (c *RuntimeTargetConvergence) ConvergeRuntimeTarget(
 			)
 			return nil, convergeErr
 		},
+		mongotx.Options(),
 	)
 	if err != nil {
 		return false, fmt.Errorf("converge runtime inventory target: %w", err)

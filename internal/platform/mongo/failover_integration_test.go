@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	runtimeinventorybiz "github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	runtimeinventorydata "github.com/owndock/owndock/internal/modules/runtimeinventory/data"
 	"github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -163,6 +165,7 @@ func TestMongoPrimaryFailoverIntegration(t *testing.T) {
 	firstPrimary := waitForMongoPrimary(t, ctx, wrapper, "")
 	waitForMongoReplicaSetMembers(t, ctx, wrapper, 1, 2)
 	insertTransactionalProbe(t, ctx, wrapper, "before-failover")
+	inventoryRepository, inventoryObservation, inventoryChunk := beginRuntimeInventoryFailoverProbe(t, ctx, wrapper)
 
 	primaryAlias, err := aliasFromMongoAddress(firstPrimary)
 	if err != nil {
@@ -178,6 +181,30 @@ func TestMongoPrimaryFailoverIntegration(t *testing.T) {
 		t.Fatalf("primary after failover = %q, want a different member", secondPrimary)
 	}
 	insertTransactionalProbe(t, ctx, wrapper, "after-failover")
+	if err := inventoryRepository.Append(ctx, inventoryChunk); err != nil {
+		t.Fatalf("append runtime inventory after failover: %v", err)
+	}
+	if err := inventoryRepository.Complete(
+		ctx,
+		inventoryObservation.ID,
+		inventoryObservation.RuntimeTargetID,
+		time.Now().UTC(),
+	); err != nil {
+		t.Fatalf("complete runtime inventory after failover: %v", err)
+	}
+	page, err := runtimeinventorydata.NewMongoViewRepository(wrapper.Database()).ListHost(
+		ctx,
+		inventoryObservation.OrganizationID,
+		inventoryObservation.ManagedHostID,
+		runtimeinventorybiz.ViewQuery{Limit: 10},
+	)
+	if err != nil {
+		t.Fatalf("read runtime inventory after failover: %v", err)
+	}
+	if len(page.Items) != 1 || page.Items[0].RuntimeID != "failover-container" ||
+		page.Items[0].Presence != runtimeinventorybiz.PresencePresent {
+		t.Fatalf("runtime inventory after failover = %+v, want one present container", page)
+	}
 
 	count, err := wrapper.Database().Collection("failover_probe").CountDocuments(ctx, bson.D{})
 	if err != nil {
@@ -186,6 +213,72 @@ func TestMongoPrimaryFailoverIntegration(t *testing.T) {
 	if count != 2 {
 		t.Fatalf("failover probe count = %d, want 2", count)
 	}
+}
+
+func beginRuntimeInventoryFailoverProbe(
+	t *testing.T,
+	ctx context.Context,
+	client *Client,
+) (*runtimeinventorydata.MongoRepository, runtimeinventorybiz.Observation, runtimeinventorybiz.Chunk) {
+	t.Helper()
+	const (
+		organizationID = "failover-organization"
+		projectID      = "failover-project"
+		hostID         = "failover-host"
+		targetID       = "failover-target"
+	)
+	if _, err := client.Database().Collection("managed_hosts").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: hostID},
+		{Key: "organization_id", Value: organizationID},
+	}); err != nil {
+		t.Fatalf("seed managed host for failover: %v", err)
+	}
+	if _, err := client.Database().Collection("runtime_targets").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: targetID},
+		{Key: "organization_id", Value: organizationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "managed_host_id", Value: hostID},
+		{Key: "status", Value: "ready"},
+	}); err != nil {
+		t.Fatalf("seed runtime target for failover: %v", err)
+	}
+	startedAt := time.Now().UTC()
+	observation, err := runtimeinventorybiz.NewObservation(
+		"failover-observation",
+		organizationID,
+		hostID,
+		targetID,
+		1,
+		1,
+		startedAt,
+	)
+	if err != nil {
+		t.Fatalf("create failover observation: %v", err)
+	}
+	resource, err := runtimeinventorybiz.NewResource(
+		observation,
+		runtimeinventorybiz.KindContainer,
+		"failover-container",
+		"api",
+		startedAt,
+	)
+	if err != nil {
+		t.Fatalf("create failover inventory resource: %v", err)
+	}
+	resource.Container = &runtimeinventorybiz.ContainerSummary{State: "running"}
+	chunk, err := runtimeinventorybiz.NewChunk(
+		observation,
+		0,
+		[]runtimeinventorybiz.Resource{resource},
+	)
+	if err != nil {
+		t.Fatalf("create failover inventory chunk: %v", err)
+	}
+	repository := runtimeinventorydata.NewMongoRepository(client.Database())
+	if err := repository.Begin(ctx, observation); err != nil {
+		t.Fatalf("begin runtime inventory before failover: %v", err)
+	}
+	return repository, observation, chunk
 }
 
 func waitForMongoPrimary(t *testing.T, ctx context.Context, client *Client, previous string) string {

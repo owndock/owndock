@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/modules/runtimeinventory/biz"
+	"github.com/owndock/owndock/internal/platform/mongotx"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -82,6 +83,7 @@ func (r *MongoRepository) Begin(
 		func(transactionContext context.Context) (any, error) {
 			return nil, r.begin(transactionContext, observation)
 		},
+		mongotx.Options(),
 	)
 	if err != nil {
 		return fmt.Errorf("begin runtime inventory observation: %w", err)
@@ -171,6 +173,7 @@ func (r *MongoRepository) Append(ctx context.Context, chunk biz.Chunk) error {
 		func(transactionContext context.Context) (any, error) {
 			return nil, r.append(transactionContext, chunk)
 		},
+		mongotx.Options(),
 	)
 	if err != nil {
 		return fmt.Errorf("append runtime inventory chunk: %w", err)
@@ -305,6 +308,7 @@ func (r *MongoRepository) Complete(
 				completedAt.UTC(),
 			)
 		},
+		mongotx.Options(),
 	)
 	if err != nil {
 		return fmt.Errorf("complete runtime inventory observation: %w", err)

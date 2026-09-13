@@ -75,6 +75,64 @@ func TestDomainTypesDoNotDeclareJSONTransportTags(t *testing.T) {
 	}
 }
 
+func TestMongoTransactionsUseDurableOptions(t *testing.T) {
+	root := repositoryRoot(t)
+	err := filepath.WalkDir(filepath.Join(root, "internal"), func(
+		path string,
+		entry os.DirEntry,
+		walkErr error,
+	) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || selector.Sel.Name != "WithTransaction" {
+				return true
+			}
+			if len(call.Args) != 3 || !isMongoTransactionOptions(call.Args[2]) {
+				relative, relativeErr := filepath.Rel(root, path)
+				if relativeErr != nil {
+					relative = path
+				}
+				t.Errorf(
+					"%s: MongoDB WithTransaction must pass mongotx.Options()",
+					filepath.ToSlash(relative),
+				)
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func isMongoTransactionOptions(expression ast.Expr) bool {
+	call, ok := expression.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	selector, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || selector.Sel.Name != "Options" {
+		return false
+	}
+	identifier, ok := selector.X.(*ast.Ident)
+	return ok && identifier.Name == "mongotx"
+}
+
 func TestDeprecatedMobyClientOptionsAreNotUsed(t *testing.T) {
 	root := repositoryRoot(t)
 	deprecated := "WithAPI" + "VersionNegotiation"
