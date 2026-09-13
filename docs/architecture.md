@@ -118,7 +118,7 @@ REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session C
 
 进程级 MongoDB Client 由 `internal/platform/mongo` 创建和关闭，业务模块只能通过自己在 `biz` 中定义的 Repository 接口使用持久化。MongoDB 默认关闭；启用时连接串来自指定环境变量，启动 Ping 失败会阻止服务启动，运行期 Ping 失败会使 `/readyz` 返回 503。
 
-开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从内存样例直接生成。启动时使用带租约锁的版本化 migration；资源写入和对应审计事件使用同一事务提交。Runtime Inventory 使用独立 observation/resource/head collection 和 generation 切换，不把动态 Docker 文档嵌入 Deployment。
+开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set，保证事务拓扑不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从内存样例直接生成。启动时使用带租约锁的版本化 migration；资源写入和对应审计事件使用显式 `snapshot` read concern、`primary` read preference、`majority` write concern 的同一事务提交，并依赖 Driver 按标准错误标签重试事务/提交。事务回调禁止外部副作用。Runtime Inventory 使用独立 observation/resource/head collection 和 generation 切换，不把动态 Docker 文档嵌入 Deployment。
 
 关键运行链路见 [flows.md](flows.md)。
 

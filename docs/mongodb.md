@@ -8,6 +8,8 @@ mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6
 
 禁止使用 `mongo:latest`、`mongo:8` 或 `mongo:8.3` 等浮动 tag。版本升级必须同时更新镜像 digest、集成测试和发布说明。
 
+所有通过平台事务管理器提交的产品写入都显式使用 `snapshot` read concern、`primary` read preference 和 `majority` write concern。Go Driver 的 `WithTransaction` 负责按 MongoDB 错误标签重试 transient transaction 或不确定的 commit；业务回调因此必须保持数据库内幂等，任何外部网络或运行时副作用都不能放进事务回调。单节点 Replica Set 可验证事务机制，但不能替代多节点 Primary 切换证据。
+
 ## 配置
 
 MongoDB 默认关闭。启用配置示例：
