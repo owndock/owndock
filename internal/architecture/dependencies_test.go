@@ -75,6 +75,49 @@ func TestDomainTypesDoNotDeclareJSONTransportTags(t *testing.T) {
 	}
 }
 
+func TestMongoDocumentsDoNotUseInlineBSONFields(t *testing.T) {
+	root := repositoryRoot(t)
+	err := filepath.WalkDir(filepath.Join(root, "internal", "modules"), func(
+		path string,
+		entry os.DirEntry,
+		walkErr error,
+	) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		parsed, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			field, ok := node.(*ast.Field)
+			if !ok || field.Tag == nil {
+				return true
+			}
+			tag, err := strconv.Unquote(field.Tag.Value)
+			if err != nil {
+				t.Errorf("%s: invalid struct tag %s", path, field.Tag.Value)
+				return true
+			}
+			if strings.Contains(tag, "bson:") && strings.Contains(tag, ",inline") {
+				relative, relativeErr := filepath.Rel(root, path)
+				if relativeErr != nil {
+					relative = path
+				}
+				t.Errorf("%s: MongoDB documents must use explicit nested fields, not BSON inline", filepath.ToSlash(relative))
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMongoTransactionsUseDurableOptions(t *testing.T) {
 	root := repositoryRoot(t)
 	err := filepath.WalkDir(filepath.Join(root, "internal"), func(

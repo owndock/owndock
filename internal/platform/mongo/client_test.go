@@ -245,6 +245,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("replica set name = %v, want rs0", hello["setName"])
 	}
 	assertMongoFeatureCompatibilityVersion(t, ctx, client.Database().Client(), "8.3")
+	assertMongoBSONStorageContract(t, ctx, client.Database())
 
 	session, err := client.Database().Client().StartSession()
 	if err != nil {

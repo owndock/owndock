@@ -118,7 +118,7 @@ REST API 使用 JSON 返回的 opaque Bearer Session，不读取用户 Session C
 
 进程级 MongoDB Client 由 `internal/platform/mongo` 创建和关闭，业务模块只能通过自己在 `biz` 中定义的 Repository 接口使用持久化。MongoDB 默认关闭；启用时连接串来自指定环境变量，启动 Ping 失败会阻止服务启动，运行期 Ping 失败会使 `/readyz` 返回 503。
 
-开发和 CI 使用 MongoDB 8.3.7 单节点 Replica Set 验证完整产品持久化路径；独立门禁验证最小权限应用认证，以及 `requireTLS` 下的加密事务、明文连接拒绝和错误 CA 拒绝；三成员 Replica Set 门禁在 Runtime Inventory observation 已打开时停止当前 Primary、等待不同成员接管，再追加资源、原子切换 current view 并验证 majority 事务恢复，保证事务拓扑和基础故障发现不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从早期内存实现直接生成。启动时使用带租约锁的版本化 migration；平台事务管理器及 Repository 内部事务统一通过 `internal/platform/mongotx` 使用显式 `snapshot` read concern、`primary` read preference、`majority` write concern，并依赖 Driver 按标准错误标签重试事务/提交。架构测试拒绝任何没有传入该选项的生产 `WithTransaction` 调用。事务回调禁止外部副作用。Runtime Inventory 使用独立 observation/resource/head collection 和 generation 切换，不把动态 Docker 文档嵌入 Deployment。
+开发和 CI 使用 MongoDB 8.3.7/FCV 8.3 单节点 Replica Set 验证完整产品持久化路径和 OwnDock BSON 存储契约；独立门禁验证最小权限应用认证，以及 `requireTLS` 下的加密事务、明文连接拒绝和错误 CA 拒绝；三成员 Replica Set 门禁在 Runtime Inventory observation 已打开时停止当前 Primary、等待不同成员接管，再追加资源、原子切换 current view 并验证 majority 事务恢复，保证事务拓扑和基础故障发现不会被 standalone 测试掩盖。业务 collection、BSON 模型和 migration 按已接受的产品所有权与不可变 Release 语义设计，不能从早期内存实现直接生成；资源 ID 使用字符串，时间接受 BSON 毫秒精度，空值语义显式区分，嵌套文档不得使用 BSON `inline`。启动时使用带租约锁的版本化 migration；平台事务管理器及 Repository 内部事务统一通过 `internal/platform/mongotx` 使用显式 `snapshot` read concern、`primary` read preference、`majority` write concern，并依赖 Driver 按标准错误标签重试事务/提交。架构测试拒绝任何没有传入该选项的生产 `WithTransaction` 调用。事务回调禁止外部副作用。Runtime Inventory 使用独立 observation/resource/head collection 和 generation 切换，不把动态 Docker 文档嵌入 Deployment。
 
 关键运行链路见 [flows.md](flows.md)。
 

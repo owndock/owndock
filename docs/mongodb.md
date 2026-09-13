@@ -10,6 +10,8 @@ mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6
 
 MongoDB 8.3.7 的 Feature Compatibility Version（FCV）固定为 `8.3`。社区版初始化会在 Replica Set 选出 Primary 后幂等执行 `setFeatureCompatibilityVersion`，随后回读并核对精确值；集成测试也会从固定镜像读取同一 FCV。修改 Server 镜像或 FCV 属于独立数据库升级操作，不能依赖新镜像默认值，也不能与普通应用发布隐式绑定。
 
+OwnDock 的 BSON 存储契约由自身领域模型决定：资源 `_id` 使用不透明字符串，不使用 MongoDB ObjectID；时间统一按 UTC 解释，并接受 BSON DateTime 的毫秒精度；有符号和无符号计数都落为 BSON int64，因此持久化的 `uint64` 必须不超过 int64 上限，越界由编码器失败关闭；`nil` slice/map 保存为 null，已初始化但为空的 slice/map 保存为空 array/document；只有明确声明 `omitempty` 的可选字段才允许缺失。生产文档禁止 BSON `inline`，嵌套结构必须有显式字段名，避免新增字段静默碰撞。固定镜像集成测试直接核验这些类型、空值和往返行为，架构测试阻止生产模型引入 `inline`。
+
 所有通过平台事务管理器提交的产品写入，以及 Build 日志、Deployment、Runtime Inventory 和 Artifact Evidence Repository 自己维护的内部原子操作，都从同一个 `mongotx` 契约显式取得 `snapshot` read concern、`primary` read preference 和 `majority` write concern。架构测试会扫描生产代码中的每个 `WithTransaction`，阻止新事务退回 Driver 默认值。Go Driver 负责按 MongoDB 错误标签重试 transient transaction 或不确定的 commit；业务回调因此必须保持数据库内幂等，任何外部网络或运行时副作用都不能放进事务回调。单节点 Replica Set 验证完整产品持久化路径；独立三成员门禁会在 Runtime Inventory observation 已开始、尚未提交资源时停止当前 Primary，确认 Driver 发现新 Primary，再追加资源、原子切换 current view，并完成切换后的 majority 事务。认证门禁使用 root 身份仅创建用户，再由仅有目标数据库 `readWrite` 的应用身份执行事务，并确认其不能写 `admin`。TLS 门禁使用临时私有 CA、服务端证书和同一最小权限应用身份，把 MongoDB 从初始化期 `allowTLS` 单向提升到 `requireTLS`，确认加密事务可用、明文连接和错误 CA 都被拒绝。仓库内证据仍不能替代客户证书签发/轮换、Secret 挂载和等价存储上的生产故障演练。
 
 ## 配置
