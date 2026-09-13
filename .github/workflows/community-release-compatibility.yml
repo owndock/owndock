@@ -21,13 +21,35 @@ concurrency:
 jobs:
   adjacent-community:
     if: github.repository == 'owndock/owndock'
-    runs-on: ubuntu-24.04
+    name: adjacent-community (${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            goarch: amd64
+            machine: x86_64
+          - runner: ubuntu-24.04-arm
+            goarch: arm64
+            machine: aarch64
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
           ref: ${{ github.event.release.tag_name || inputs.current_tag }}
+      - name: Verify native Linux community environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = "${{ matrix.machine }}"
+          test -s /sys/fs/cgroup/cgroup.controllers
+          test "$(docker info --format '{{.OSType}}')" = linux
+          test "$(docker info --format '{{.Architecture}}')" = "${{ matrix.machine }}"
+          docker info --format \
+            'docker={{.ServerVersion}} os={{.OSType}} arch={{.Architecture}} cgroup={{.CgroupVersion}} storage={{.Driver}}'
       - name: Resolve adjacent published releases
         id: releases
         env:

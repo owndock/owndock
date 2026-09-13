@@ -37,7 +37,7 @@ make test-release-candidate
 - 回滚到上一版并再次验证版本、登录与数据保持；
 - 停写备份、创建新空卷、恢复、恢复后登录和全程秘密日志扫描。
 
-该门禁失败时不会创建 GitHub Release。发布成功后，发布工作流还会显式 dispatch `community-release-compatibility` 和 Agent 兼容矩阵，使用两版已发布制品留下可手动重跑的发布后证据；不能依赖 `GITHUB_TOKEN` 创建的 Release 事件再次触发工作流。兼容矩阵不接受未发布 Tag、可变镜像 tag 或未签名的 Server digest。
+上述发布前门禁和发布后社区矩阵都在原生 Ubuntu 24.04 amd64/arm64 Runner 上执行，并校验内核、cgroup v2 与 Docker Engine 架构。任一架构失败时不会创建 GitHub Release。发布成功后，发布工作流还会显式 dispatch `community-release-compatibility` 和 Agent 兼容矩阵，使用两版已发布制品留下可手动重跑的发布后证据；不能依赖 `GITHUB_TOKEN` 创建的 Release 事件再次触发工作流。兼容矩阵不接受未发布 Tag、可变镜像 tag 或未签名的 Server digest。
 
 ```mermaid
 sequenceDiagram
