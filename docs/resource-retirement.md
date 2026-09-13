@@ -56,10 +56,12 @@ stateDiagram-v2
 
 Application 的非终态 Build 按最多 100 条的批次进入 `canceling`，每次状态变化与 `build.cancel_for_application_retirement` 审计处于同一事务。Build Worker 仍负责停止实际执行并写入 `canceled`；只有查询不到活动 Build 后 Application 才可完成退役。并发恰好成功或失败的 Build 视为已经收敛，已生成的 Artifact 和全部 Build 历史继续保留。Environment 不拥有 Build，因此 Environment 退役不会取消 Application 级构建。
 
+退役还会收敛该 Application 的 `release_pending` Artifact。若围栏前已经幂等创建 Release，则补记 Release ID 并转为 `release_created`；若权威存储确认没有 Release，则转为终态 `release_skipped`。两种转换均保留 Artifact 并记录原始删除 Actor/Request 审计，避免 Build Worker 对已 retired Application 永久重试。
+
 历史 Deployment 引用的 Runtime Target 只有在权威控制面确认目标记录已经不存在时才跳过清理，因为目标自身的退役流程已经完成相同的运行排空。目标记录仍存在但处于 `unreachable`、非 ready 或暂时无法解析清理连接时不会被当作已删除，资源保持 `retiring` 并由 Worker 重试。
 
 容器 TerminalSession 创建会在同一 MongoDB 事务中写入 Application/Environment 的内部 admission revision，再写会话与审计。退役状态切换会写同一父文档，因此并发的“最后一次 active 检查”和退役不能同时提交，消除收敛扫描后落入新活动会话的 write-skew 窗口。
 
 Release、Build 和 Deployment 创建也遵循相同的父资源事务围栏：Release/Build 写 active Application 的 `work_admission_revision`，Deployment 同时写 active Application 与 Environment，再创建子记录和审计。MongoDB 写冲突保证“新工作提交”和 `active → retiring` 只能有一个先完成；退役先完成时新工作失败，工作先完成时重试后的退役扫描一定能发现并收敛它。幂等重放已有不可变记录不创建新工作，因此仍可读取原结果。
 
-MongoDB migration v48 为 Application/Environment 增加状态、持久退役队列和 active-only 名称唯一索引；v49 为活动容器会话回填 Application/Environment 归属，并建立两类有界收敛索引；v50 建立 Application 活动 Build 有界收敛索引。
+MongoDB migration v48 为 Application/Environment 增加状态、持久退役队列和 active-only 名称唯一索引；v49 为活动容器会话回填 Application/Environment 归属，并建立两类有界收敛索引；v50/v51 建立 Application 活动 Build 与 pending Artifact Release 有界收敛索引。

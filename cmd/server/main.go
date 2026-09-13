@@ -540,6 +540,9 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("create build retirement dependency: %w", err)
 		}
+		buildRetirement.WithArtifactReleaseResolver(
+			builddata.NewArtifactReleaseRetirementResolver(controlPlaneStore),
+		)
 		if err := productAPI.WithBuild(
 			buildservice.NewHTTP(buildUseCase).
 				WithWebhookMaxBodyBytes(cfg.Product.BuildWebhookMaxBodyBytesValue()),

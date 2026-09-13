@@ -81,6 +81,28 @@ func TestArtifactRejectsMismatchedOrMutableOutput(t *testing.T) {
 	}
 }
 
+func TestArtifactSkipsOnlyPendingAutomaticRelease(t *testing.T) {
+	item := Artifact{ReleaseStatus: ArtifactReleasePending}
+	if err := item.SkipPendingRelease(); err != nil {
+		t.Fatal(err)
+	}
+	if item.ReleaseStatus != ArtifactReleaseSkipped || item.ReleaseID != "" ||
+		!item.ReleaseStatus.Valid() {
+		t.Fatalf("skipped Artifact = %+v", item)
+	}
+	if err := item.SkipPendingRelease(); err != nil {
+		t.Fatalf("idempotent skip error = %v", err)
+	}
+	for _, status := range []ArtifactReleaseStatus{
+		ArtifactReleaseAvailable, ArtifactReleaseCreated,
+	} {
+		candidate := Artifact{ReleaseStatus: status}
+		if err := candidate.SkipPendingRelease(); !errors.Is(err, ErrInvalidArtifact) {
+			t.Fatalf("skip %s error = %v", status, err)
+		}
+	}
+}
+
 func TestExternalArtifactPinsDeclaredProducerAndDigest(t *testing.T) {
 	now := time.Unix(200, 0).UTC()
 	input := ExternalArtifactInput{

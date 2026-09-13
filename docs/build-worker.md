@@ -161,7 +161,7 @@ BuildKit 会从自己的私有 cache 执行固定 digest 的 Dockerfile frontend
 
 日志的容量、脱敏和访问规则见 [Build 日志与排障](build-logs.md)。Build Worker 在 metrics 地址同时提供 `/livez`、MongoDB `/readyz` 和 `/metrics`；指标包含已领取 Build 的专用执行信号，以及 `worker="build"` 的统一轮询信号。完整指标、Trace 和告警语义见 [Worker 可观测性与告警](worker-observability.md)。该地址默认只监听容器/主机 loopback；如果改为可被 Prometheus 抓取的地址，必须由监控网络或防火墙保护，不能公开到互联网。
 
-如果镜像已推送但进程在 Artifact 发布前中断，新 Worker 会直接使用已保存的 digest 完成 Artifact，不重新构建。Release 或自动 Deployment 协调失败时 Artifact 保持 `release_pending`，任意 Worker 后续只重试幂等交接；已创建目标不会重复。详见 [Artifact 与 Release 交接](artifacts.md)和[自动部署规则](automatic-deployments.md)。
+如果镜像已推送但进程在 Artifact 发布前中断，新 Worker 会直接使用已保存的 digest 完成 Artifact，不重新构建。Release 或自动 Deployment 协调临时失败时 Artifact 保持 `release_pending`，任意 Worker 后续只重试幂等交接；已创建目标不会重复。Application 退役时，资源 Worker 会把已创建 Release 的记录补齐为 `release_created`，或把没有 Release 的交接终结为 `release_skipped`。详见 [Artifact 与 Release 交接](artifacts.md)和[自动部署规则](automatic-deployments.md)。
 
 ## 构建与部署 Worker 镜像
 

@@ -11,11 +11,71 @@ import (
 )
 
 type retirementRepositoryStub struct {
-	items       map[string]Build
-	listErr     error
-	saveErr     error
-	getErr      error
-	conflictNow *Build
+	items           map[string]Build
+	artifacts       map[string]Artifact
+	listErr         error
+	artifactListErr error
+	saveErr         error
+	getErr          error
+	conflictNow     *Build
+}
+
+func (s *retirementRepositoryStub) ListPendingReleaseArtifactsForApplication(
+	_ context.Context,
+	organizationID, projectID, applicationID string,
+	limit int64,
+) ([]Artifact, error) {
+	if s.artifactListErr != nil {
+		return nil, s.artifactListErr
+	}
+	items := make([]Artifact, 0, limit)
+	for _, item := range s.artifacts {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID &&
+			item.ApplicationID == applicationID && item.ReleaseStatus == ArtifactReleasePending {
+			items = append(items, item)
+			if int64(len(items)) == limit {
+				break
+			}
+		}
+	}
+	return items, nil
+}
+
+func (s *retirementRepositoryStub) GetArtifact(
+	_ context.Context, projectID, artifactID string,
+) (Artifact, error) {
+	item, found := s.artifacts[artifactID]
+	if !found || item.ProjectID != projectID {
+		return Artifact{}, ErrNotFound
+	}
+	return item, nil
+}
+
+func (s *retirementRepositoryStub) SaveArtifactRelease(
+	_ context.Context, item Artifact, expectedVersion uint64,
+) (Artifact, error) {
+	current, found := s.artifacts[item.ID]
+	if !found || current.Version != expectedVersion {
+		return Artifact{}, ErrVersionConflict
+	}
+	item.Version = expectedVersion + 1
+	s.artifacts[item.ID] = item
+	return item, nil
+}
+
+type artifactReleaseResolverStub struct {
+	releases map[string]string
+	err      error
+}
+
+func (s artifactReleaseResolverStub) ResolveArtifactRelease(
+	_ context.Context, _, artifactID string,
+) (string, bool, error) {
+	if s.err != nil {
+		return "", false, s.err
+	}
+	releaseID, found := s.releases[artifactID]
+	return releaseID, found, nil
 }
 
 func (s *retirementRepositoryStub) ListActiveBuildsForApplication(
@@ -138,6 +198,122 @@ func TestProductResourceRetirementCancelsOnlyApplicationBuilds(t *testing.T) {
 	)
 	if err != nil || pending {
 		t.Fatalf("completed convergence = %t, %v", pending, err)
+	}
+}
+
+func TestProductResourceRetirementFinalizesPendingArtifactReleases(t *testing.T) {
+	repository := &retirementRepositoryStub{
+		items: map[string]Build{},
+		artifacts: map[string]Artifact{
+			"linked": {
+				ID: "linked", OrganizationID: "organization-1", ProjectID: "project-1",
+				ApplicationID: "application-1", ReleaseStatus: ArtifactReleasePending, Version: 1,
+			},
+			"skipped": {
+				ID: "skipped", OrganizationID: "organization-1", ProjectID: "project-1",
+				ApplicationID: "application-1", ReleaseStatus: ArtifactReleasePending, Version: 1,
+			},
+			"other": {
+				ID: "other", OrganizationID: "organization-1", ProjectID: "project-1",
+				ApplicationID: "application-2", ReleaseStatus: ArtifactReleasePending, Version: 1,
+			},
+		},
+	}
+	audit := &retirementAuditProbe{}
+	retirement, err := NewProductResourceRetirement(
+		repository, transaction.Passthrough{}, audit,
+		func() (string, error) { return "audit-1", nil },
+		func() time.Time { return time.Unix(100, 0) }, 100,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirement.WithArtifactReleaseResolver(artifactReleaseResolverStub{
+		releases: map[string]string{"linked": "release-1"},
+	})
+	pending, err := retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	)
+	if err != nil || !pending {
+		t.Fatalf("Artifact convergence = %t/%v", pending, err)
+	}
+	if item := repository.artifacts["linked"]; item.ReleaseStatus != ArtifactReleaseCreated ||
+		item.ReleaseID != "release-1" || item.ReleasedAt.IsZero() {
+		t.Fatalf("linked Artifact = %+v", item)
+	}
+	if item := repository.artifacts["skipped"]; item.ReleaseStatus != ArtifactReleaseSkipped ||
+		item.ReleaseID != "" {
+		t.Fatalf("skipped Artifact = %+v", item)
+	}
+	if repository.artifacts["other"].ReleaseStatus != ArtifactReleasePending || len(audit.events) != 2 {
+		t.Fatalf("unrelated Artifact or audits = %+v/%+v", repository.artifacts["other"], audit.events)
+	}
+	actions := map[string]bool{}
+	for _, event := range audit.events {
+		actions[event.Action] = true
+	}
+	if !actions[AuditActionApplicationRetirementReleaseReconciled] ||
+		!actions[AuditActionApplicationRetirementReleaseSkipped] {
+		t.Fatalf("Artifact retirement audit actions = %+v", actions)
+	}
+	pending, err = retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	)
+	if err != nil || pending {
+		t.Fatalf("completed Artifact convergence = %t/%v", pending, err)
+	}
+}
+
+func TestProductResourceRetirementFailsClosedForUnresolvedArtifactRelease(t *testing.T) {
+	pendingArtifact := Artifact{
+		ID: "artifact-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		ApplicationID: "application-1", ReleaseStatus: ArtifactReleasePending, Version: 1,
+	}
+	repository := &retirementRepositoryStub{
+		items: map[string]Build{}, artifacts: map[string]Artifact{pendingArtifact.ID: pendingArtifact},
+	}
+	retirement, err := NewProductResourceRetirement(
+		repository, transaction.Passthrough{}, &retirementAuditProbe{},
+		func() (string, error) { return "audit-1", nil }, time.Now, 100,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	); !errors.Is(err, ErrBuildRetirementUnavailable) {
+		t.Fatalf("missing resolver error = %v", err)
+	}
+
+	resolveFailure := errors.New("resolve Artifact release")
+	retirement.WithArtifactReleaseResolver(artifactReleaseResolverStub{err: resolveFailure})
+	if _, err := retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	); !errors.Is(err, resolveFailure) {
+		t.Fatalf("resolver failure = %v", err)
+	}
+
+	idFailure := errors.New("create Artifact retirement audit id")
+	retirement.WithArtifactReleaseResolver(artifactReleaseResolverStub{releases: map[string]string{}})
+	retirement.newID = func() (string, error) { return "", idFailure }
+	if _, err := retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	); !errors.Is(err, idFailure) {
+		t.Fatalf("Artifact audit id failure = %v", err)
+	}
+
+	listFailure := errors.New("list pending Artifact releases")
+	repository.artifactListErr = listFailure
+	if _, err := retirement.ConvergeProductResource(
+		t.Context(), "organization-1", "project-1", "application-1", "",
+		"owner-1", "request-1",
+	); !errors.Is(err, listFailure) {
+		t.Fatalf("Artifact list failure = %v", err)
 	}
 }
 

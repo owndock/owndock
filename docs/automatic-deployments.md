@@ -69,6 +69,6 @@ Deployment 的 `trigger_source` 为 `automatic`，并保存 `source_artifact_id`
 
 每个自动目标使用由 Artifact、Environment 和 Runtime Target 派生的稳定幂等键。Worker 失联或多个 Worker 同时协调时，同一目标仍只会形成一条 Deployment。
 
-如果 Runtime Target 尚未 `ready`，Release 不会被删除，也不会伪造一条成功记录；Artifact 保持 `release_pending`，协调器稍后重试。已经为其他目标创建的 Deployment 会通过同一幂等键复用，不会重复部署。目标恢复并成功创建全部 Deployment 后，Artifact 才进入 `release_created`。
+如果 Runtime Target 尚未 `ready`，Release 不会被删除，也不会伪造一条成功记录；Artifact 保持 `release_pending`，协调器稍后重试。已经为其他目标创建的 Deployment 会通过同一幂等键复用，不会重复部署。目标恢复并成功创建全部 Deployment 后，Artifact 才进入 `release_created`。如果 Application 在此期间进入退役，生命周期围栏会终止未创建的 Deployment；退役 Worker 根据权威 Release 记录把 Artifact 收敛到 `release_created` 或 `release_skipped`，不再无限重试。
 
 自动部署失败后的业务重试仍使用正常 Deployment retry；修改规则只影响之后创建的 Build，不会重写历史链路。

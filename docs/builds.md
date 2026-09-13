@@ -2,7 +2,7 @@
 
 Build 是一次不可变的构建操作记录。手动触发时，用户选择已有 Build Configuration 和其中允许的 Git ref；OwnDock 读取已登记的 Source Repository，把分支或 Tag 解析成完整 Commit SHA，然后复制当时的构建配置快照并创建 `queued` Build。
 
-当前切片已经实现 Build 状态机、取消/重试 API、MongoDB queue/lease/fence，以及独立 Worker 的固定 Git checkout、rootless BuildKit 构建、认证 Registry push、Artifact/Release 交接和有界脱敏日志。推送成功后真实 OCI digest 会形成 Artifact，Build 原子进入 `succeeded`；自动 Release 失败不会回滚或重新构建，只把 Artifact 留在 `release_pending` 重试。收到触发请求的 `202` 只表示任务已安全记录，API Server 不执行仓库内容。
+当前切片已经实现 Build 状态机、取消/重试 API、MongoDB queue/lease/fence，以及独立 Worker 的固定 Git checkout、rootless BuildKit 构建、认证 Registry push、Artifact/Release 交接和有界脱敏日志。推送成功后真实 OCI digest 会形成 Artifact，Build 原子进入 `succeeded`；自动 Release 的临时失败不会回滚或重新构建，只把 Artifact 留在 `release_pending` 重试，Application 明确退役时则收敛为 `release_created` 或 `release_skipped`。收到触发请求的 `202` 只表示任务已安全记录，API Server 不执行仓库内容。
 
 ## 为什么同时保存 ref 和 Commit SHA
 

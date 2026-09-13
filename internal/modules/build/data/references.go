@@ -36,6 +36,37 @@ type ArtifactReleaseAdapter struct {
 	}
 }
 
+type artifactReleaseRetirementSource interface {
+	GetReleaseByArtifact(context.Context, string, string) (controlplanebiz.Release, error)
+}
+
+type ArtifactReleaseRetirementResolver struct {
+	source artifactReleaseRetirementSource
+}
+
+func NewArtifactReleaseRetirementResolver(
+	source artifactReleaseRetirementSource,
+) *ArtifactReleaseRetirementResolver {
+	return &ArtifactReleaseRetirementResolver{source: source}
+}
+
+func (r *ArtifactReleaseRetirementResolver) ResolveArtifactRelease(
+	ctx context.Context,
+	projectID, artifactID string,
+) (string, bool, error) {
+	if r == nil || r.source == nil {
+		return "", false, biz.ErrBuildRetirementUnavailable
+	}
+	release, err := r.source.GetReleaseByArtifact(ctx, projectID, artifactID)
+	if errors.Is(err, controlplanebiz.ErrNotFound) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return release.ID, true, nil
+}
+
 func (a *ArtifactReleaseAdapter) WithAutomaticDeployments(creator interface {
 	CreateAutomatic(context.Context, deploymentbiz.AutomaticDeploymentInput) (deploymentbiz.Deployment, error)
 }) *ArtifactReleaseAdapter {
@@ -185,6 +216,7 @@ var (
 	_ biz.ProductResourceAdmissionFence      = (*ConfigurationReferenceLookup)(nil)
 	_ biz.RegistryCredentialLookup           = (*ConfigurationReferenceLookup)(nil)
 	_ biz.AutomaticDeploymentReferenceLookup = (*ConfigurationReferenceLookup)(nil)
+	_ biz.ArtifactReleaseResolver            = (*ArtifactReleaseRetirementResolver)(nil)
 	_ biz.BuildRegistrySource                = (*BuildRegistrySourceAdapter)(nil)
 	_ biz.ArtifactReleaseCreator             = (*ArtifactReleaseAdapter)(nil)
 )

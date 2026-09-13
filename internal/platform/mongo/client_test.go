@@ -4678,33 +4678,47 @@ func assertBuildRetirementIndex(
 		Name string `bson:"name"`
 		Key  bson.D `bson:"key"`
 	}
-	cursor, err := database.Collection("builds").Indexes().List(ctx)
-	if err != nil {
-		t.Fatalf("list Build indexes: %v", err)
-	}
-	defer func() { _ = cursor.Close(ctx) }()
-	var documents []indexDocument
-	if err := cursor.All(ctx, &documents); err != nil {
-		t.Fatalf("decode Build indexes: %v", err)
-	}
-	want := []string{
-		"organization_id", "project_id", "application_id", "status", "created_at", "_id",
-	}
-	for _, document := range documents {
-		if document.Name != "idx_build_application_retirement" {
-			continue
+	for _, expectation := range []struct {
+		collection string
+		name       string
+		statusKey  string
+	}{
+		{collection: "builds", name: "idx_build_application_retirement", statusKey: "status"},
+		{collection: "artifacts", name: "idx_artifact_application_release_retirement", statusKey: "release_status"},
+	} {
+		cursor, err := database.Collection(expectation.collection).Indexes().List(ctx)
+		if err != nil {
+			t.Fatalf("list %s indexes: %v", expectation.collection, err)
 		}
-		if len(document.Key) != len(want) {
-			t.Fatalf("Build retirement index keys = %v", document.Key)
+		var documents []indexDocument
+		if err := cursor.All(ctx, &documents); err != nil {
+			_ = cursor.Close(ctx)
+			t.Fatalf("decode %s indexes: %v", expectation.collection, err)
 		}
-		for index, element := range document.Key {
-			if element.Key != want[index] {
-				t.Fatalf("Build retirement index keys = %v, want %v", document.Key, want)
+		_ = cursor.Close(ctx)
+		want := []string{
+			"organization_id", "project_id", "application_id",
+			expectation.statusKey, "created_at", "_id",
+		}
+		found := false
+		for _, document := range documents {
+			if document.Name != expectation.name {
+				continue
+			}
+			found = true
+			if len(document.Key) != len(want) {
+				t.Fatalf("%s keys = %v", expectation.name, document.Key)
+			}
+			for index, element := range document.Key {
+				if element.Key != want[index] {
+					t.Fatalf("%s keys = %v, want %v", expectation.name, document.Key, want)
+				}
 			}
 		}
-		return
+		if !found {
+			t.Fatalf("missing %s", expectation.name)
+		}
 	}
-	t.Fatal("missing Build retirement index")
 }
 
 func verifyBuildRetirementQueryIntegration(
@@ -4759,6 +4773,9 @@ func verifyBuildRetirementQueryIntegration(
 		_, _ = database.Collection("builds").DeleteMany(
 			context.Background(), bson.D{{Key: "project_id", Value: "retirement-project"}},
 		)
+		_, _ = database.Collection("artifacts").DeleteMany(
+			context.Background(), bson.D{{Key: "project_id", Value: "retirement-project"}},
+		)
 	}()
 	limited, err := repository.ListActiveBuildsForApplication(
 		ctx, "retirement-organization", "retirement-project", "retirement-application", 1,
@@ -4771,6 +4788,43 @@ func verifyBuildRetirementQueryIntegration(
 	)
 	if err != nil || len(items) != 2 || items[0].ID != queued.ID || items[1].ID != canceling.ID {
 		t.Fatalf("active Application Builds = %+v/%v", items, err)
+	}
+	artifactBuild := makeBuild(
+		"retirement-artifact-build", "retirement-organization", "retirement-application", now,
+	)
+	artifactBuild.Status = buildbiz.BuildStatusPushing
+	artifactBuild.Configuration.AutoCreateRelease = true
+	artifactBuild.ImageDigest = "registry.example.com/team/retirement@sha256:" + strings.Repeat("b", 64)
+	pendingArtifact, err := buildbiz.NewArtifact("retirement-artifact-pending", artifactBuild, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondPending := pendingArtifact
+	secondPending.ID, secondPending.BuildID, secondPending.CreatedAt =
+		"retirement-artifact-second", "retirement-artifact-build-second", now.Add(time.Second)
+	otherArtifact := pendingArtifact
+	otherArtifact.ID, otherArtifact.BuildID, otherArtifact.ApplicationID =
+		"retirement-artifact-other", "retirement-artifact-build-other", "retirement-other-app"
+	availableArtifact := pendingArtifact
+	availableArtifact.ID, availableArtifact.BuildID, availableArtifact.ReleaseStatus =
+		"retirement-artifact-available", "retirement-artifact-build-available", buildbiz.ArtifactReleaseAvailable
+	for _, item := range []buildbiz.Artifact{pendingArtifact, secondPending, otherArtifact, availableArtifact} {
+		if _, err := repository.CreateArtifact(ctx, item); err != nil {
+			t.Fatalf("seed Artifact retirement query: %v", err)
+		}
+	}
+	limitedArtifacts, err := repository.ListPendingReleaseArtifactsForApplication(
+		ctx, "retirement-organization", "retirement-project", "retirement-application", 1,
+	)
+	if err != nil || len(limitedArtifacts) != 1 || limitedArtifacts[0].ID != pendingArtifact.ID {
+		t.Fatalf("limited pending Artifact releases = %+v/%v", limitedArtifacts, err)
+	}
+	pendingArtifacts, err := repository.ListPendingReleaseArtifactsForApplication(
+		ctx, "retirement-organization", "retirement-project", "retirement-application", 10,
+	)
+	if err != nil || len(pendingArtifacts) != 2 || pendingArtifacts[0].ID != pendingArtifact.ID ||
+		pendingArtifacts[1].ID != secondPending.ID {
+		t.Fatalf("pending Application Artifact releases = %+v/%v", pendingArtifacts, err)
 	}
 }
 

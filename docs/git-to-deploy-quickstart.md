@@ -152,6 +152,7 @@ Cancel、Retry 和 Rollback 都创建或推进明确的操作记录，不覆盖�
 | build 失败 | Dockerfile、context、平台、资源上限 | 在 API Server 执行 Dockerfile 排障 |
 | Registry 认证失败 | Registry server、账号 Secret 注入 | 把 Registry 密码写进配置或日志 |
 | `release_pending` | Release 协调、Environment/Target 是否就绪 | 重新构建同一个镜像 |
+| `release_skipped` | Application 是否已经退役；Artifact 与证据仍保留 | 反复触发同一自动交接 |
 | Deployment 失败 | Deployment 详情、目标状态和健康检查 | 修改或删除历史 Release |
 | Webhook `429` | `Retry-After` 和平台重试策略 | 伪造新 delivery ID 绕过限制 |
 

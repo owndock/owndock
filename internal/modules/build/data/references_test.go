@@ -22,6 +22,50 @@ func (artifactReleaseSourceStub) CreateReleaseFromArtifact(
 	}, nil
 }
 
+type artifactReleaseRetirementSourceStub struct {
+	release controlplanebiz.Release
+	err     error
+}
+
+func (s artifactReleaseRetirementSourceStub) GetReleaseByArtifact(
+	context.Context, string, string,
+) (controlplanebiz.Release, error) {
+	return s.release, s.err
+}
+
+func TestArtifactReleaseRetirementResolverDistinguishesExistingRelease(t *testing.T) {
+	if _, _, err := (*ArtifactReleaseRetirementResolver)(nil).ResolveArtifactRelease(
+		t.Context(), "project-1", "artifact-1",
+	); !errors.Is(err, biz.ErrBuildRetirementUnavailable) {
+		t.Fatalf("nil resolver error = %v", err)
+	}
+	missing := NewArtifactReleaseRetirementResolver(
+		artifactReleaseRetirementSourceStub{err: controlplanebiz.ErrNotFound},
+	)
+	if id, found, err := missing.ResolveArtifactRelease(
+		t.Context(), "project-1", "artifact-1",
+	); err != nil || found || id != "" {
+		t.Fatalf("missing Release = %q/%t/%v", id, found, err)
+	}
+	existing := NewArtifactReleaseRetirementResolver(
+		artifactReleaseRetirementSourceStub{release: controlplanebiz.Release{ID: "release-1"}},
+	)
+	if id, found, err := existing.ResolveArtifactRelease(
+		t.Context(), "project-1", "artifact-1",
+	); err != nil || !found || id != "release-1" {
+		t.Fatalf("existing Release = %q/%t/%v", id, found, err)
+	}
+	failure := errors.New("read Release")
+	failing := NewArtifactReleaseRetirementResolver(
+		artifactReleaseRetirementSourceStub{err: failure},
+	)
+	if _, _, err := failing.ResolveArtifactRelease(
+		t.Context(), "project-1", "artifact-1",
+	); !errors.Is(err, failure) {
+		t.Fatalf("Release read failure = %v", err)
+	}
+}
+
 type automaticDeploymentCreatorStub struct {
 	inputs []deploymentbiz.AutomaticDeploymentInput
 	err    error

@@ -18,10 +18,12 @@ const (
 	ArtifactReleaseAvailable ArtifactReleaseStatus = "available"
 	ArtifactReleasePending   ArtifactReleaseStatus = "release_pending"
 	ArtifactReleaseCreated   ArtifactReleaseStatus = "release_created"
+	ArtifactReleaseSkipped   ArtifactReleaseStatus = "release_skipped"
 )
 
 func (s ArtifactReleaseStatus) Valid() bool {
-	return s == ArtifactReleaseAvailable || s == ArtifactReleasePending || s == ArtifactReleaseCreated
+	return s == ArtifactReleaseAvailable || s == ArtifactReleasePending ||
+		s == ArtifactReleaseCreated || s == ArtifactReleaseSkipped
 }
 
 type ArtifactOrigin string
@@ -195,6 +197,18 @@ func (a *Artifact) MarkReleaseCreated(releaseID string, now time.Time) error {
 	}
 	a.ReleaseStatus, a.ReleaseID = ArtifactReleaseCreated, releaseID
 	a.ReleasedAt = now.UTC()
+	return nil
+}
+
+func (a *Artifact) SkipPendingRelease() error {
+	if a.ReleaseStatus == ArtifactReleaseSkipped {
+		return nil
+	}
+	if a.ReleaseStatus != ArtifactReleasePending {
+		return ErrInvalidArtifact
+	}
+	a.ReleaseStatus = ArtifactReleaseSkipped
+	a.ReleaseID = ""
 	return nil
 }
 

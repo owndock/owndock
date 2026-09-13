@@ -82,7 +82,9 @@ Build 只有在 Artifact 与 `succeeded` 状态通过同一事务提交后才算
 
 ## 失败后为什么不重新构建
 
-镜像成功推送后，Release 或配置中的自动 Deployment 协调可能因数据库、目标就绪状态等短暂问题而失败。此时 Build 已经 `succeeded`，Artifact 保持 `release_pending`；Worker 后续只重试幂等交接，不再 checkout、重新执行 Dockerfile 或再次 push。只有 Release 和全部配置目标的 Deployment 都已创建，Artifact 才进入 `release_created`。
+镜像成功推送后，Release 或配置中的自动 Deployment 协调可能因数据库、目标就绪状态等短暂问题而失败。此时 Build 已经 `succeeded`，Artifact 保持 `release_pending`；Worker 后续只重试幂等交接，不再 checkout、重新执行 Dockerfile 或再次 push。正常运行期间，只有 Release 和全部配置目标的 Deployment 都已创建，Artifact 才进入 `release_created`。
+
+Application 退役是显式终止条件，不按临时失败无限重试。退役围栏前已创建 Release 的 Artifact 会补齐关联并进入 `release_created`；此时该状态确认的是 Release 已存在，退役围栏会终止尚未创建的自动 Deployment。没有 Release 的 pending Artifact 会保留镜像与全部证据，但进入 `release_skipped`，表示自动交接因 Application 生命周期结束而停止。
 
 ```mermaid
 sequenceDiagram
@@ -111,7 +113,8 @@ sequenceDiagram
 | --- | --- | --- |
 | `available` | 镜像已固定，但配置关闭了自动 Release | 用户按需手动创建 Release |
 | `release_pending` | 应自动创建 Release，当前等待或重试协调 | Worker 自动重试，不重新构建 |
-| `release_created` | 已连接唯一 Release，且配置的自动 Deployment 已创建 | 可以查看自动结果，或继续手动选择 Environment 与 Runtime Target |
+| `release_created` | 已连接唯一 Release；正常交接已创建配置的自动 Deployment，退役收敛则可能由生命周期围栏终止未完成项 | 查看已存在的 Release 和 Deployment 结果 |
+| `release_skipped` | Application 已退役，且围栏前没有创建 Release | 保留 Artifact 与证据，不再自动重试交接 |
 
 ## API 与权限
 

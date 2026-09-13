@@ -11,6 +11,11 @@ import (
 
 const AuditActionApplicationRetirementCancel = "build.cancel_for_application_retirement"
 
+const (
+	AuditActionApplicationRetirementReleaseReconciled = "artifact.release_reconciled_for_application_retirement"
+	AuditActionApplicationRetirementReleaseSkipped    = "artifact.release_skipped_for_application_retirement"
+)
+
 var ErrBuildRetirementUnavailable = errors.New("build retirement is unavailable")
 
 type RetirementRepository interface {
@@ -23,6 +28,19 @@ type RetirementRepository interface {
 	) ([]Build, error)
 	GetBuild(context.Context, string, string) (Build, error)
 	SaveBuild(context.Context, Build, uint64) (Build, error)
+	ListPendingReleaseArtifactsForApplication(
+		context.Context,
+		string,
+		string,
+		string,
+		int64,
+	) ([]Artifact, error)
+	GetArtifact(context.Context, string, string) (Artifact, error)
+	SaveArtifactRelease(context.Context, Artifact, uint64) (Artifact, error)
+}
+
+type ArtifactReleaseResolver interface {
+	ResolveArtifactRelease(context.Context, string, string) (string, bool, error)
 }
 
 // ProductResourceRetirement cancels active Application Builds in bounded
@@ -34,6 +52,14 @@ type ProductResourceRetirement struct {
 	newID       IDGenerator
 	now         Clock
 	batchSize   int64
+	releases    ArtifactReleaseResolver
+}
+
+func (r *ProductResourceRetirement) WithArtifactReleaseResolver(
+	resolver ArtifactReleaseResolver,
+) *ProductResourceRetirement {
+	r.releases = resolver
+	return r
 }
 
 func NewProductResourceRetirement(
@@ -87,7 +113,23 @@ func (r *ProductResourceRetirement) ConvergeProductResource(
 			return false, err
 		}
 	}
-	return len(items) > 0, nil
+	artifacts, err := r.repository.ListPendingReleaseArtifactsForApplication(
+		ctx, organizationID, projectID, applicationID, r.batchSize,
+	)
+	if err != nil {
+		return false, err
+	}
+	if len(artifacts) > 0 && r.releases == nil {
+		return false, ErrBuildRetirementUnavailable
+	}
+	for _, artifact := range artifacts {
+		if err := r.reconcileArtifactRelease(
+			ctx, artifact, actorID, requestID,
+		); err != nil {
+			return false, err
+		}
+	}
+	return len(items) > 0 || len(artifacts) > 0, nil
 }
 
 func (r *ProductResourceRetirement) cancel(
@@ -127,6 +169,61 @@ func (r *ProductResourceRetirement) cancel(
 	}
 	if getErr != nil {
 		return getErr
+	}
+	return err
+}
+
+func (r *ProductResourceRetirement) reconcileArtifactRelease(
+	ctx context.Context,
+	item Artifact,
+	actorID, requestID string,
+) error {
+	releaseID, found, err := r.releases.ResolveArtifactRelease(
+		ctx, item.ProjectID, item.ID,
+	)
+	if err != nil {
+		return err
+	}
+	now := r.now().UTC()
+	action := AuditActionApplicationRetirementReleaseSkipped
+	if found {
+		action = AuditActionApplicationRetirementReleaseReconciled
+		if err := item.MarkReleaseCreated(releaseID, now); err != nil {
+			return err
+		}
+	} else if err := item.SkipPendingRelease(); err != nil {
+		return err
+	}
+	expectedVersion := item.Version
+	auditID, err := r.newID()
+	if err != nil {
+		return err
+	}
+	err = r.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		if _, saveErr := r.repository.SaveArtifactRelease(
+			transactionContext, item, expectedVersion,
+		); saveErr != nil {
+			return saveErr
+		}
+		return r.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: item.OrganizationID,
+			ProjectID: item.ProjectID, ActorID: actorID,
+			Action: action, ResourceType: "artifact", ResourceID: item.ID,
+			RequestID: requestID, CreatedAt: now,
+		})
+	})
+	if !errors.Is(err, ErrVersionConflict) {
+		return err
+	}
+	current, getErr := r.repository.GetArtifact(ctx, item.ProjectID, item.ID)
+	if getErr != nil {
+		return getErr
+	}
+	if found && current.ReleaseStatus == ArtifactReleaseCreated && current.ReleaseID == releaseID {
+		return nil
+	}
+	if !found && current.ReleaseStatus == ArtifactReleaseSkipped {
+		return nil
 	}
 	return err
 }

@@ -530,6 +530,38 @@ func (r *MongoRepository) NextPendingArtifact(ctx context.Context) (biz.Artifact
 	return document.domain(), true, nil
 }
 
+func (r *MongoRepository) ListPendingReleaseArtifactsForApplication(
+	ctx context.Context,
+	organizationID, projectID, applicationID string,
+	limit int64,
+) ([]biz.Artifact, error) {
+	cursor, err := r.artifacts.Find(
+		ctx,
+		bson.D{
+			{Key: "organization_id", Value: organizationID},
+			{Key: "project_id", Value: projectID},
+			{Key: "application_id", Value: applicationID},
+			{Key: "release_status", Value: biz.ArtifactReleasePending},
+		},
+		options.Find().SetSort(bson.D{
+			{Key: "created_at", Value: 1}, {Key: "_id", Value: 1},
+		}).SetLimit(limit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("find pending Application Artifact releases: %w", err)
+	}
+	defer func() { _ = cursor.Close(ctx) }()
+	var documents []artifactDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode pending Application Artifact releases: %w", err)
+	}
+	items := make([]biz.Artifact, len(documents))
+	for index, document := range documents {
+		items[index] = document.domain()
+	}
+	return items, nil
+}
+
 func (r *MongoRepository) SaveArtifactRelease(ctx context.Context, item biz.Artifact, expectedVersion uint64) (biz.Artifact, error) {
 	item.Version = expectedVersion + 1
 	result, err := r.artifacts.ReplaceOne(ctx, bson.D{

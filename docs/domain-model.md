@@ -76,7 +76,7 @@ Managed Host 的初始状态由连接模式决定：`agent` 为 `enrolling`，`d
 - Build 位于 Project 下，触发时固定 Application、Build Configuration、精确 ref、完整 Commit SHA 和非秘密配置快照；状态只能通过领域状态机转换，Worker 使用 lease/generation fencing，取消协作收敛，失败重试创建带来源关系的新 Build；Application 退役会按有界批次把非终态 Build 转为 `canceling` 并等待 Worker 收敛，但保留全部终态历史；相同 Project 幂等键只回放相同触发意图，资源变更与审计原子提交；
 - Build Trigger 绑定一个 Build Configuration，允许 ref 只能收窄配置范围；外部请求只能提交 ref 和 Commit SHA，Trigger ID 进入 Build 幂等意图与审计，撤销后不可恢复；
 - Build Hook 绑定一个平台和 Build Configuration，Webhook Secret 与 Repository Credential 分离；原始 body 验签后才解析，provider + Hook + delivery ID 唯一，合法但不适用的事件记录为 ignored；
-- Artifact 位于 Project/Application 下，来源固定为 `owndock_build` 或 `external`。外部登记只接受完整 OCI SHA-256 digest，先用所选 Registry Credential 回读并验证 manifest，再在同一事务中保存 Artifact、审计和 Evidence Jobs；登记幂等键不公开，外部 Artifact 没有 Build/Build Configuration ID，也不会生成 OwnDock Build Provenance 或由平台自动补签；
+- Artifact 位于 Project/Application 下，来源固定为 `owndock_build` 或 `external`。外部登记只接受完整 OCI SHA-256 digest，先用所选 Registry Credential 回读并验证 manifest，再在同一事务中保存 Artifact、审计和 Evidence Jobs；Application 退役会把尚未创建 Release 的自动交接明确终结为 `release_skipped`，围栏前已创建的 Release 则补齐为 `release_created`；登记幂等键不公开，外部 Artifact 没有 Build/Build Configuration ID，也不会生成 OwnDock Build Provenance 或由平台自动补签；
 - Environment 位于 Project 下，阶段固定为 `development`、`staging` 或 `production`，保存 Release 配置键的普通值或 `secret://` 引用；
 - Runtime Target 位于 Project 下，必须绑定同一 Organization 的 Managed Host，且连接模式必须一致；`direct` 要求带端口的 `tcp://` endpoint、TLS server name 和外部 `credential_ref`，`agent` 禁止这些直连字段；公开 API 只返回 `credential_configured`，显式探测只公开安全状态；删除先持久化 `retiring` 关闭 ready 门禁，再收敛容器 TerminalSession、清除可重建 Runtime Inventory、排空 Deployment、删除精确运行资源并回收 Agent 水位；
 - Environment 内部保存运行变量绑定，但公开 API 只返回排序后的 `variable_keys`，不回传明文值或 `secret://` 引用；

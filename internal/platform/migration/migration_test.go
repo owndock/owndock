@@ -27,8 +27,8 @@ func TestValidateMigrations(t *testing.T) {
 
 func TestDefaultMigrationsRemainContiguous(t *testing.T) {
 	items := Default()
-	if len(items) != 50 {
-		t.Fatalf("Default() migration count = %d, want 50", len(items))
+	if len(items) != 51 {
+		t.Fatalf("Default() migration count = %d, want 51", len(items))
 	}
 	for index, item := range items {
 		if item.Version != int64(index+1) {
@@ -36,7 +36,7 @@ func TestDefaultMigrationsRemainContiguous(t *testing.T) {
 		}
 	}
 	last := items[len(items)-1]
-	if last.Name != "index_application_build_retirement" || last.Up == nil {
+	if last.Name != "index_application_artifact_release_retirement" || last.Up == nil {
 		t.Fatalf("latest migration = %+v", last)
 	}
 }

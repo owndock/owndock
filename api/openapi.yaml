@@ -6003,7 +6003,7 @@ components:
             $ref: "#/components/schemas/AutomaticDeploymentRule"
         release_status:
           type: string
-          enum: [available, release_pending, release_created]
+          enum: [available, release_pending, release_created, release_skipped]
         release_id:
           type: string
           minLength: 1

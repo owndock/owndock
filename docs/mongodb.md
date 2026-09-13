@@ -79,9 +79,11 @@ Release、Build 和 Deployment 的创建事务会 `$inc` active Application/Envi
 
 Migration v50 为 Build 建立 Organization/Project/Application/status/创建时间顺序索引。Application 退役据此每批最多读取 100 个 queued/checking_out/building/pushing/canceling Build；转入 canceling 与逐 Build 审计处于同一事务，Build Worker 写入终态后下一轮退役扫描自然推进。
 
+Migration v51 为 Artifact 建立 Organization/Project/Application/release_status/创建时间顺序索引。退役 Worker 用它有界收敛 `release_pending`：存在以 `source_artifact_id` 唯一关联的 Release 时补记 ID，否则写入 `release_skipped`；Artifact 状态与审计原子提交。
+
 退役收敛使用 migration v47 的 Organization/Project/Runtime Target/active/时间索引有界扫描 TerminalSession。会话状态转换与逐会话审计原子提交；Runtime Inventory 则在独立事务中分批删除完全可重建的调度、批次和 current 投影。Inventory `Begin` 与 `Complete` 都复核 Target=ready，阻止已领取租约的旧 Worker 在清理后重建视图。
 
-Migration v4–31 的执行与业务索引沿用各模块版本记录；v32/v33 建立 Terminal 策略、会话、并发槽位和登录 Session 绑定，v34–43 建立 Artifact 证据、签名、漏洞与 Deployment Policy 索引，v44/v45 支持外部 Artifact 和 Registry 匿名/Basic 模式，v46 建立 Runtime Target 退役队列，v47 建立按 Target 收敛活动 TerminalSession 的索引，v48/v49 建立 Application/Environment 软退役及关联 Terminal 收敛，v50 建立 Application 活动 Build 收敛索引。
+Migration v4–31 的执行与业务索引沿用各模块版本记录；v32/v33 建立 Terminal 策略、会话、并发槽位和登录 Session 绑定，v34–43 建立 Artifact 证据、签名、漏洞与 Deployment Policy 索引，v44/v45 支持外部 Artifact 和 Registry 匿名/Basic 模式，v46 建立 Runtime Target 退役队列，v47 建立按 Target 收敛活动 TerminalSession 的索引，v48/v49 建立 Application/Environment 软退役及关联 Terminal 收敛，v50/v51 建立 Application 活动 Build 与 pending Artifact Release 收敛索引。
 
 Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Target 原子分配单调 generation；多 Server 不使用本机时间判断 observation 新旧。
 
