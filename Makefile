@@ -82,7 +82,8 @@ test-supply-chain-integration:
 
 test-vulnerability-integration:
 	OWNDOCK_RUN_VULNERABILITY_INTEGRATION=1 go test ./internal/modules/supplychain/data \
-		-run TestTrivyVulnerabilityScanWithPinnedDatabaseAndRegistry -count=1 -timeout=8m
+		-run 'TestTrivy(VulnerabilityScanWithPinnedDatabaseAndRegistry|DatabaseSnapshotWithPrivateTLSRegistry)' \
+		-count=1 -timeout=8m
 
 test-vulnerability-db-updater-image:
 	$(MAKE) docker-vulnerability-db-updater VERSION=integration

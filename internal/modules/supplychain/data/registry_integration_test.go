@@ -882,10 +882,15 @@ cache_mount=''
 if [ -n "${TRIVY_CACHE_DIR:-}" ]; then
   cache_mount="--volume=$TRIVY_CACHE_DIR:$TRIVY_CACHE_DIR"
 fi
+ca_mount=''
+if [ -n "${SSL_CERT_FILE:-}" ]; then
+  ca_mount="--volume=$SSL_CERT_FILE:$SSL_CERT_FILE:ro"
+fi
 output=$(mktemp)
 %q run --rm --add-host host.docker.internal:host-gateway \
-  --volume "$HOME:$HOME" --workdir "$HOME" $cache_mount \
+  --volume "$HOME:$HOME" --workdir "$HOME" $cache_mount $ca_mount \
   --env HOME --env TRIVY_CACHE_DIR --env TRIVY_USERNAME --env TRIVY_PASSWORD \
+  --env SSL_CERT_FILE \
   --entrypoint /usr/local/bin/trivy %q "$@" >"$output"
 status=$?
 sed 's/host\.docker\.internal:/127.0.0.1:/g' "$output"
