@@ -35,7 +35,8 @@ workflow-validate:
 	go run github.com/rhysd/actionlint/cmd/actionlint@$(ACTIONLINT_VERSION) .github/workflows/*.yml
 
 test-integration:
-	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test ./internal/platform/mongo -run TestMongoReplicaSetIntegration -count=1 -timeout=5m
+	OWNDOCK_RUN_MONGO_INTEGRATION=1 go test ./internal/platform/mongo \
+		-run 'TestMongo(ReplicaSet|PrimaryFailover)Integration' -count=1 -timeout=7m
 
 test-changed-coverage:
 	@test -n "$(COVERAGE_BASE)" || (echo "COVERAGE_BASE must be an immutable Git commit" && exit 2)
