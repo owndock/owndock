@@ -25,6 +25,7 @@ type CosignVerifierOptions struct {
 	TemporaryRoot      string
 	AllowPlainHTTP     bool
 	RegistryCACertFile string
+	RegistryHTTPSProxy string
 }
 
 type CosignVerifier struct {
@@ -34,6 +35,7 @@ type CosignVerifier struct {
 	temporaryRoot      string
 	allowPlainHTTP     bool
 	registryCACertFile string
+	registryHTTPSProxy string
 }
 
 func NewCosignVerifier(options CosignVerifierOptions) (*CosignVerifier, error) {
@@ -42,13 +44,15 @@ func NewCosignVerifier(options CosignVerifierOptions) (*CosignVerifier, error) {
 	temporaryRoot := strings.TrimSpace(options.TemporaryRoot)
 	if !filepath.IsAbs(executable) || version != PinnedCosignVersion ||
 		options.Credentials == nil || !filepath.IsAbs(temporaryRoot) ||
-		!validRegistryCACertFile(options.RegistryCACertFile) {
+		!validRegistryCACertFile(options.RegistryCACertFile) ||
+		!validRegistryHTTPSProxy(options.RegistryHTTPSProxy) {
 		return nil, biz.ErrSignatureToolVersion
 	}
 	return &CosignVerifier{
 		executable: executable, expectedVersion: version,
 		credentials: options.Credentials, temporaryRoot: temporaryRoot,
 		allowPlainHTTP: options.AllowPlainHTTP, registryCACertFile: options.RegistryCACertFile,
+		registryHTTPSProxy: options.RegistryHTTPSProxy,
 	}, nil
 }
 
@@ -143,7 +147,9 @@ func (v *CosignVerifier) VerifySignature(ctx context.Context,
 	}
 	arguments = append(arguments, request.CanonicalSubject())
 	command := exec.CommandContext(ctx, v.executable, arguments...)
-	command.Env = cosignEnvironment(directory, dockerDirectory, v.registryCACertFile)
+	command.Env = registryProxyEnvironment(
+		cosignEnvironment(directory, dockerDirectory, v.registryCACertFile), v.registryHTTPSProxy,
+	)
 	output := &boundedBuffer{maximum: 1024 * 1024}
 	command.Stdout, command.Stderr = output, &boundedBuffer{maximum: 16 * 1024}
 	if err := command.Run(); err != nil {
@@ -230,6 +236,11 @@ func cosignEnvironment(home, dockerConfig, registryCACertFile string) []string {
 
 func validRegistryCACertFile(path string) bool {
 	return path == "" || (filepath.IsAbs(path) && strings.TrimSpace(path) == path)
+}
+
+func validRegistryHTTPSProxy(value string) bool {
+	_, err := parseRegistryHTTPSProxy(value)
+	return err == nil
 }
 
 func registryCAEnvironment(environment []string, path string) []string {

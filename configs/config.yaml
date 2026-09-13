@@ -36,6 +36,9 @@ product:
   # Optional supplemental Registry CA bundle. Mount the same regular PEM file
   # into Server, Build Worker and Evidence Worker; TLS verification stays on.
   registry_ca_cert_file: ""
+  # Optional credential-free HTTP(S) CONNECT proxy used only for Registry
+  # traffic. It is never inherited from ambient process proxy variables.
+  registry_https_proxy: ""
   build_trigger_rate_limit: 60
   build_trigger_rate_window: 1m
   build_webhook_rate_limit: 120

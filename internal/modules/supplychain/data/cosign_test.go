@@ -24,6 +24,7 @@ func TestCosignVerifierUsesPinnedBinaryExactDigestAndTemporaryDockerCredential(t
 	verifier, err := NewCosignVerifier(CosignVerifierOptions{
 		Executable: executable, ExpectedVersion: "3.0.6",
 		Credentials: credentials, TemporaryRoot: directory,
+		RegistryHTTPSProxy: "http://proxy.internal:3128",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +58,10 @@ func TestCosignVerifierUsesPinnedBinaryExactDigestAndTemporaryDockerCredential(t
 	if err != nil || !strings.Contains(string(dockerConfig), "auth") ||
 		strings.Contains(string(dockerConfig), credentials.password) {
 		t.Fatalf("temporary Docker auth config is invalid: %v %s", err, dockerConfig)
+	}
+	proxyEnvironment, err := os.ReadFile(capture + ".proxy")
+	if err != nil || string(proxyEnvironment) != "http://proxy.internal:3128|http://proxy.internal:3128||" {
+		t.Fatalf("Cosign Registry proxy environment = %q, %v", proxyEnvironment, err)
 	}
 	entries, err := os.ReadDir(directory)
 	if err != nil {
@@ -127,6 +132,13 @@ func TestCosignVerifierRequiresExactKeylessIdentityAndOfflineRoot(t *testing.T) 
 
 func TestCosignVerifierFailsClosed(t *testing.T) {
 	directory := t.TempDir()
+	if _, err := NewCosignVerifier(CosignVerifierOptions{
+		Executable: "/usr/bin/cosign", ExpectedVersion: PinnedCosignVersion,
+		Credentials: &credentialCaptureProvider{}, TemporaryRoot: directory,
+		RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128",
+	}); !errors.Is(err, biz.ErrSignatureToolVersion) {
+		t.Fatalf("credential-bearing proxy error = %v", err)
+	}
 	for name, testCase := range map[string]struct {
 		version string
 		succeed bool
@@ -210,6 +222,7 @@ func writeCosignFixture(t *testing.T, directory, capture, version string, succee
 		"if [ \"$1\" = version ]; then printf '%s\\n' '{\"gitVersion\":\"" + version + "\"}'; exit 0; fi\n" +
 		"printf '%s\\n' \"$@\" > '" + capture + "'\n" +
 		"cp \"$DOCKER_CONFIG/config.json\" '" + capture + ".docker-config'\n" +
+		"printf '%s' \"${HTTPS_PROXY:-}|${http_proxy:-}|${NO_PROXY:-}|${no_proxy:-}\" > '" + capture + ".proxy'\n" +
 		"printf '%s\\n' '" + output + "'\nexit " + exit + "\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)

@@ -68,11 +68,15 @@ fi
 [ "$SYFT_REGISTRY_AUTH_PASSWORD" = "registry-password" ]
 [ "$SYFT_SOURCE_IMAGE_MAX_LAYER_SIZE" = "268435456" ]
 [ "$SYFT_CACHE_DIR" = "/tmp/syft-cache" ] && [ "$SYFT_CACHE_TTL" = "0" ]
+[ "$HTTPS_PROXY" = "http://proxy.internal:3128" ] && [ "$https_proxy" = "$HTTPS_PROXY" ]
+[ "$HTTP_PROXY" = "$HTTPS_PROXY" ] && [ "$http_proxy" = "$HTTPS_PROXY" ]
+[ -z "$NO_PROXY" ] && [ -z "$no_proxy" ]
 printf '%s' '{"bomFormat":"CycloneDX","specVersion":"1.6","version":1,"components":[{"type":"library","name":"demo"}]}'
 `)
 	generator, err := NewSyftGenerator(SyftOptions{
 		Executable: executable, ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 4096,
 		MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(),
+		RegistryHTTPSProxy: "http://proxy.internal:3128",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -154,6 +158,7 @@ func TestNewSyftGeneratorRejectsFloatingOrUnsafeConfiguration(t *testing.T) {
 		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 65 * 1024 * 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider()},
 		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 1, Credentials: validSyftCredentialProvider()},
 		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024},
+		{Executable: "/usr/bin/syft", ExpectedVersion: PinnedSyftVersion, MaxOutputBytes: 1024, MaxLayerBytes: 256 * 1024 * 1024, Credentials: validSyftCredentialProvider(), RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128"},
 	} {
 		if _, err := NewSyftGenerator(options); !errors.Is(err, biz.ErrGeneratorVersion) {
 			t.Fatalf("NewSyftGenerator(%+v) error = %v", options, err)

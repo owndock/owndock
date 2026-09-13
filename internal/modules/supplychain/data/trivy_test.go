@@ -45,6 +45,9 @@ fi
 [ "$TRIVY_CACHE_DIR" = "` + cache + `" ]
 [ "$TRIVY_USERNAME" = "publisher" ] && [ "$TRIVY_PASSWORD" = "registry-password" ]
 [ "$TRIVY_SKIP_DB_UPDATE" = "true" ] && [ "$TRIVY_OFFLINE_SCAN" = "true" ]
+[ "$HTTPS_PROXY" = "http://proxy.internal:3128" ] && [ "$https_proxy" = "$HTTPS_PROXY" ]
+[ "$HTTP_PROXY" = "$HTTPS_PROXY" ] && [ "$http_proxy" = "$HTTPS_PROXY" ]
+[ -z "$NO_PROXY" ] && [ -z "$no_proxy" ]
 printf '%s' '{"SchemaVersion":2,"CreatedAt":"2026-08-22T09:40:00Z","ArtifactName":"` + subject + `","Results":[]}'
 `
 }
@@ -54,7 +57,7 @@ func TestTrivyScannerVerifiesPinnedDatabaseAndScansExactDigest(t *testing.T) {
 	executable := writeFakeTrivy(t, validTrivyScript(trivyRequest().CanonicalSubject(), cache))
 	scanner, err := NewTrivyScanner(TrivyOptions{Executable: executable,
 		ExpectedVersion: PinnedTrivyVersion, CacheDirectory: cache, MaxOutputBytes: 4096,
-		Credentials: validSyftCredentialProvider()})
+		Credentials: validSyftCredentialProvider(), RegistryHTTPSProxy: "http://proxy.internal:3128"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,6 +188,7 @@ func TestTrivyScannerRejectsUnsafeConfigurationAndClearsCredential(t *testing.T)
 		{Executable: "/trivy", ExpectedVersion: PinnedTrivyVersion, CacheDirectory: "cache", MaxOutputBytes: 1024, Credentials: validSyftCredentialProvider()},
 		{Executable: "/trivy", ExpectedVersion: PinnedTrivyVersion, CacheDirectory: "/cache", MaxOutputBytes: 1, Credentials: validSyftCredentialProvider()},
 		{Executable: "/trivy", ExpectedVersion: PinnedTrivyVersion, CacheDirectory: "/cache", MaxOutputBytes: 1024},
+		{Executable: "/trivy", ExpectedVersion: PinnedTrivyVersion, CacheDirectory: "/cache", MaxOutputBytes: 1024, Credentials: validSyftCredentialProvider(), RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128"},
 	}
 	for _, option := range options {
 		if _, err := NewTrivyScanner(option); !errors.Is(err, biz.ErrVulnerabilityScannerVersion) {

@@ -29,6 +29,7 @@ func TestCosignSignerUsesKMSReferenceAndOnlyExplicitProviderEnvironment(t *testi
 	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > '" + capture + ".args'\n" +
 		"previous=''\nfor argument in \"$@\"; do if [ \"$previous\" = '--signing-config' ]; then cp \"$argument\" '" + capture + ".signing-config'; fi; previous=\"$argument\"; done\n" +
 		"printf '%s' \"$VAULT_ADDR|$VAULT_TOKEN|$UNRELATED_SECRET\" > '" + capture + ".env'\n" +
+		"printf '%s' \"${HTTPS_PROXY:-}|${http_proxy:-}|${NO_PROXY:-}|${no_proxy:-}\" > '" + capture + ".proxy'\n" +
 		"cp \"$DOCKER_CONFIG/config.json\" '" + capture + ".docker'\n"
 	if err := os.WriteFile(executable, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -38,7 +39,7 @@ func TestCosignSignerUsesKMSReferenceAndOnlyExplicitProviderEnvironment(t *testi
 	credentials := &credentialCaptureProvider{username: "signer", password: "registry-secret-sentinel"}
 	signer, err := NewCosignSigner(CosignSignerOptions{Executable: executable,
 		ExpectedVersion: "3.0.6", Credentials: credentials, SigningEnvironment: environment,
-		TemporaryRoot: directory})
+		TemporaryRoot: directory, RegistryHTTPSProxy: "http://proxy.internal:3128"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +68,10 @@ func TestCosignSignerUsesKMSReferenceAndOnlyExplicitProviderEnvironment(t *testi
 	if string(environmentCapture) != "https://vault.example.com|vault-secret-sentinel|" {
 		t.Fatalf("provider environment = %q", environmentCapture)
 	}
+	proxyEnvironment, err := os.ReadFile(capture + ".proxy")
+	if err != nil || string(proxyEnvironment) != "http://proxy.internal:3128|http://proxy.internal:3128||" {
+		t.Fatalf("Cosign signer Registry proxy environment = %q, %v", proxyEnvironment, err)
+	}
 }
 
 func TestCosignSignerRejectsFileKeysAndUnexpectedEnvironment(t *testing.T) {
@@ -76,6 +81,13 @@ func TestCosignSignerRejectsFileKeysAndUnexpectedEnvironment(t *testing.T) {
 		}
 	}
 	directory := t.TempDir()
+	if _, err := NewCosignSigner(CosignSignerOptions{
+		Executable: "/usr/bin/cosign", ExpectedVersion: PinnedCosignVersion,
+		Credentials: &credentialCaptureProvider{}, SigningEnvironment: &signingEnvironmentProbe{},
+		TemporaryRoot: directory, RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128",
+	}); !errors.Is(err, biz.ErrSignatureToolVersion) {
+		t.Fatalf("credential-bearing proxy error = %v", err)
+	}
 	executable := filepath.Join(directory, "cosign")
 	if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
 		t.Fatal(err)

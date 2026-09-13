@@ -540,6 +540,7 @@ func run() error {
 		artifactProber, err := supplychaindata.NewOCIArtifactProber(
 			supplychaindata.OCIArtifactProberOptions{
 				Credentials: registryCredentialProvider, RegistryCABundle: registryCABundle,
+				RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 			},
 		)
 		if err != nil {
@@ -562,9 +563,10 @@ func run() error {
 		}
 		evidenceContentReader, err := supplychaindata.NewOCIContentReader(
 			supplychaindata.OCIContentReaderOptions{
-				Credentials:      registryCredentialProvider,
-				MaxDocumentBytes: cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
-				RegistryCABundle: registryCABundle,
+				Credentials:        registryCredentialProvider,
+				MaxDocumentBytes:   cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
+				RegistryCABundle:   registryCABundle,
+				RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 			},
 		)
 		if err != nil {

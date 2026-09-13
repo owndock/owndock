@@ -34,6 +34,27 @@ func TestOCIReferrerClientProbesBoundedOCIIndex(t *testing.T) {
 	}
 }
 
+func TestOCIReferrerClientUsesOnlyExplicitProxy(t *testing.T) {
+	client, err := NewOCIReferrerClient(OCIReferrerClientOptions{
+		RegistryHTTPSProxy: "http://proxy.internal:3128",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport, ok := client.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport type = %T", client.client.Transport)
+	}
+	request, err := http.NewRequest(http.MethodGet, "https://registry.example.com/v2/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy, err := transport.Proxy(request)
+	if err != nil || proxy.String() != "http://proxy.internal:3128" {
+		t.Fatalf("resolved proxy = %v, %v", proxy, err)
+	}
+}
+
 func TestOCIReferrerClientUsesStandardTagFallback(t *testing.T) {
 	subject := "sha256:" + strings.Repeat("a", 64)
 	descriptor := "sha256:" + strings.Repeat("b", 64)
@@ -90,6 +111,16 @@ func TestOCIReferrerClientFailsClosed(t *testing.T) {
 	}
 	if _, err := NewOCIReferrerClient(OCIReferrerClientOptions{MaxResponseBytes: 1}); !errors.Is(err, biz.ErrInvalidEvidence) {
 		t.Fatalf("invalid response limit error = %v", err)
+	}
+	if _, err := NewOCIReferrerClient(OCIReferrerClientOptions{
+		RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128",
+	}); !errors.Is(err, biz.ErrInvalidEvidence) {
+		t.Fatalf("credential-bearing proxy error = %v", err)
+	}
+	if _, err := NewOCIReferrerClient(OCIReferrerClientOptions{
+		Transport: http.DefaultTransport, RegistryHTTPSProxy: "http://proxy.internal:3128",
+	}); !errors.Is(err, biz.ErrInvalidEvidence) {
+		t.Fatalf("ambiguous transport and proxy error = %v", err)
 	}
 }
 

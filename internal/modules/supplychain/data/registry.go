@@ -35,9 +35,10 @@ const (
 )
 
 type OCIReferrerClientOptions struct {
-	Transport        http.RoundTripper
-	AllowPlainHTTP   bool
-	MaxResponseBytes int64
+	Transport          http.RoundTripper
+	AllowPlainHTTP     bool
+	MaxResponseBytes   int64
+	RegistryHTTPSProxy string
 }
 
 type OCIReferrerClient struct {
@@ -54,10 +55,21 @@ func NewOCIReferrerClient(options OCIReferrerClientOptions) (*OCIReferrerClient,
 	if maximum < 1024 || maximum > 8*1024*1024 {
 		return nil, biz.ErrInvalidEvidence
 	}
+	proxyURL, err := parseRegistryHTTPSProxy(options.RegistryHTTPSProxy)
+	if err != nil {
+		return nil, biz.ErrInvalidEvidence
+	}
 	transport := options.Transport
+	if transport != nil && proxyURL != nil {
+		return nil, biz.ErrInvalidEvidence
+	}
 	if transport == nil {
 		clone := http.DefaultTransport.(*http.Transport).Clone()
-		clone.Proxy = nil
+		if proxyURL != nil {
+			clone.Proxy = http.ProxyURL(proxyURL)
+		} else {
+			clone.Proxy = nil
+		}
 		clone.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS13}
 		transport = clone
 	}

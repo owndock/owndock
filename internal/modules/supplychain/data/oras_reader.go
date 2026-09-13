@@ -18,10 +18,11 @@ import (
 const maximumEvidenceManifestBytes = int64(1024 * 1024)
 
 type OCIContentReaderOptions struct {
-	Credentials      biz.RegistryCredentialProvider
-	AllowPlainHTTP   bool
-	MaxDocumentBytes int64
-	RegistryCABundle []byte
+	Credentials        biz.RegistryCredentialProvider
+	AllowPlainHTTP     bool
+	MaxDocumentBytes   int64
+	RegistryCABundle   []byte
+	RegistryHTTPSProxy string
 }
 
 // OCIContentReader returns only the single evidence layer referenced by the
@@ -43,7 +44,9 @@ func NewOCIContentReader(options OCIContentReaderOptions) (*OCIContentReader, er
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
 		maxDocumentBytes: options.MaxDocumentBytes,
 	}
-	client, err := newRegistryHTTPClient(reader.allowPlainHTTP, options.RegistryCABundle)
+	client, err := newRegistryHTTPClient(
+		reader.allowPlainHTTP, options.RegistryCABundle, options.RegistryHTTPSProxy,
+	)
 	if err != nil {
 		return nil, biz.ErrInvalidEvidence
 	}

@@ -27,6 +27,14 @@ func mustNewOCIArtifactProber(t testing.TB, options OCIArtifactProberOptions) *O
 	return prober
 }
 
+func TestOCIArtifactProberRejectsCredentialBearingProxy(t *testing.T) {
+	if _, err := NewOCIArtifactProber(OCIArtifactProberOptions{
+		RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128",
+	}); !errors.Is(err, buildbiz.ErrInvalidArtifact) {
+		t.Fatalf("credential-bearing proxy error = %v", err)
+	}
+}
+
 func TestOCIArtifactProberReadsAndHashesExactDigest(t *testing.T) {
 	manifest := []byte(`{"schemaVersion":2,"mediaType":"` + mediaTypeOCIManifest + `","config":{"mediaType":"application/vnd.oci.image.config.v1+json","digest":"sha256:` + strings.Repeat("a", 64) + `","size":2},"layers":[]}`)
 	manifestDigest := digest.FromBytes(manifest).String()

@@ -25,6 +25,7 @@ type TrivyOptions struct {
 	Credentials        biz.RegistryCredentialProvider
 	AllowPlainHTTP     bool
 	RegistryCACertFile string
+	RegistryHTTPSProxy string
 }
 
 type TrivyScanner struct {
@@ -35,6 +36,7 @@ type TrivyScanner struct {
 	credentials        biz.RegistryCredentialProvider
 	allowPlainHTTP     bool
 	registryCACertFile string
+	registryHTTPSProxy string
 }
 
 func NewTrivyScanner(options TrivyOptions) (*TrivyScanner, error) {
@@ -43,13 +45,15 @@ func NewTrivyScanner(options TrivyOptions) (*TrivyScanner, error) {
 	cacheDirectory := strings.TrimSpace(options.CacheDirectory)
 	if !filepath.IsAbs(executable) || version != PinnedTrivyVersion || !filepath.IsAbs(cacheDirectory) ||
 		options.MaxOutputBytes < 1024 || options.MaxOutputBytes > biz.MaximumVulnerabilityReportSize ||
-		options.Credentials == nil || !validRegistryCACertFile(options.RegistryCACertFile) {
+		options.Credentials == nil || !validRegistryCACertFile(options.RegistryCACertFile) ||
+		!validRegistryHTTPSProxy(options.RegistryHTTPSProxy) {
 		return nil, biz.ErrVulnerabilityScannerVersion
 	}
 	return &TrivyScanner{executable: executable, expectedVersion: version,
 		cacheDirectory: cacheDirectory, maxOutputBytes: options.MaxOutputBytes,
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
-		registryCACertFile: options.RegistryCACertFile}, nil
+		registryCACertFile: options.RegistryCACertFile,
+		registryHTTPSProxy: options.RegistryHTTPSProxy}, nil
 }
 
 type trivyVersionOutput struct {
@@ -137,7 +141,10 @@ func (s *TrivyScanner) ScanVulnerabilities(ctx context.Context,
 	}
 	arguments = append(arguments, request.CanonicalSubject())
 	command := exec.CommandContext(ctx, s.executable, arguments...)
-	command.Env = registryCAEnvironment(trivyEnvironment(s.cacheDirectory), s.registryCACertFile)
+	command.Env = registryProxyEnvironment(
+		registryCAEnvironment(trivyEnvironment(s.cacheDirectory), s.registryCACertFile),
+		s.registryHTTPSProxy,
+	)
 	if credential.AuthenticationMode == registryauth.ModeBasic {
 		command.Env = append(command.Env,
 			"TRIVY_USERNAME="+credential.Username,

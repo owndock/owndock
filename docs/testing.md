@@ -45,6 +45,8 @@ make test-release-candidate
 
 Trivy 适配器单元测试覆盖固定 `0.74.0`、精确 digest 调用、扫描前后 DB 元数据一致、扫描期间 DB 变化失败关闭、输出上限、凭据清零和错误分类。MongoDB Replica Set 门禁覆盖 Evidence、最新 Vulnerability Observation 和 Job 完成的同事务提交，并验证持续重扫的有界游标、两个 Server 并发只产生一个活动任务、同一失败重试时间桶去重和下一时间桶恢复入队。
 
+Registry 传输测试使用自签名 TLS Registry 和真实 HTTP CONNECT 隧道，验证未配置时忽略宿主环境代理、配置后只走显式代理、仍执行 CA/主机名校验且不发送 `Proxy-Authorization`。Syft、Trivy、Cosign 的子进程测试进一步核对只注入配置指定的大小写代理变量并清空 `NO_PROXY`；ORAS、Artifact Probe、Evidence Reader 和 Referrer Client 对含凭据或非规范代理地址失败关闭。
+
 `make test-vulnerability-integration` 会从固定 digest 的 Trivy 多架构镜像提取扫描器，通过正式 Snapshot Manager 下载真实 DB 并原子发布 `current`，再启动固定版本的私有 Distribution Registry。门禁验证精确镜像 digest 扫描、报告主题绑定、OCI Referrer 发布和完整内容回读；同一测试还在非 root、只读根、无 capabilities、PID/CPU/内存/tmpfs 上限下使用只读 DB 完成离线扫描，并用 16 MiB+1 的真实子进程输出验证硬截断和凭据清零。
 
 Updater 镜像另已在相同的非 root、只读根、无 capabilities 和有限资源约束下下载并发布真实 DB。该测试下载量较大，因此不进入普通 `make check`，而由定时/手动的双架构 `test-build-security` 执行。首次 GitHub Actions 双架构结果尚未获取；误报豁免以及生产出口/客户文件系统矩阵仍待补齐，因此不能据此宣称漏洞治理已全部生产就绪。

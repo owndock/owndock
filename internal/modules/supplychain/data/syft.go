@@ -26,6 +26,7 @@ type SyftOptions struct {
 	MaxLayerBytes      int64
 	Credentials        biz.RegistryCredentialProvider
 	RegistryCACertFile string
+	RegistryHTTPSProxy string
 }
 
 type SyftGenerator struct {
@@ -35,6 +36,7 @@ type SyftGenerator struct {
 	maxLayerBytes      int64
 	credentials        biz.RegistryCredentialProvider
 	registryCACertFile string
+	registryHTTPSProxy string
 }
 
 func NewSyftGenerator(options SyftOptions) (*SyftGenerator, error) {
@@ -44,13 +46,14 @@ func NewSyftGenerator(options SyftOptions) (*SyftGenerator, error) {
 		version != PinnedSyftVersion || options.MaxOutputBytes < 1024 ||
 		options.MaxOutputBytes > 64*1024*1024 || options.MaxLayerBytes < 1024*1024 ||
 		options.MaxLayerBytes > 4*1024*1024*1024 || options.Credentials == nil ||
-		!validRegistryCACertFile(options.RegistryCACertFile) {
+		!validRegistryCACertFile(options.RegistryCACertFile) ||
+		!validRegistryHTTPSProxy(options.RegistryHTTPSProxy) {
 		return nil, biz.ErrGeneratorVersion
 	}
 	return &SyftGenerator{
 		executable: executable, expectedVersion: version, maxOutputBytes: options.MaxOutputBytes,
 		maxLayerBytes: options.MaxLayerBytes, credentials: options.Credentials,
-		registryCACertFile: options.RegistryCACertFile,
+		registryCACertFile: options.RegistryCACertFile, registryHTTPSProxy: options.RegistryHTTPSProxy,
 	}, nil
 }
 
@@ -89,7 +92,8 @@ func (g *SyftGenerator) GenerateSBOM(ctx context.Context, request biz.SBOMReques
 	output := &boundedBuffer{maximum: g.maxOutputBytes}
 	command := exec.CommandContext(ctx, g.executable,
 		"scan", "registry:"+request.CanonicalSubject(), "-o", "cyclonedx-json@1.6")
-	command.Env = append(registryCAEnvironment(syftEnvironment(), g.registryCACertFile),
+	command.Env = append(registryProxyEnvironment(
+		registryCAEnvironment(syftEnvironment(), g.registryCACertFile), g.registryHTTPSProxy),
 		"SYFT_SOURCE_IMAGE_MAX_LAYER_SIZE="+strconv.FormatInt(g.maxLayerBytes, 10))
 	if credential.AuthenticationMode == registryauth.ModeBasic {
 		command.Env = append(command.Env,

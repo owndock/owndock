@@ -4,13 +4,16 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestRegistryHTTPClientUsesExplicitSupplementalCA(t *testing.T) {
@@ -19,7 +22,7 @@ func TestRegistryHTTPClientUsesExplicitSupplementalCA(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	untrusted, err := newRegistryHTTPClient(false, nil)
+	untrusted, err := newRegistryHTTPClient(false, nil, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +35,7 @@ func TestRegistryHTTPClientUsesExplicitSupplementalCA(t *testing.T) {
 	}
 
 	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-	trusted, err := newRegistryHTTPClient(false, certificate)
+	trusted, err := newRegistryHTTPClient(false, certificate, "")
 	if err != nil {
 		t.Fatalf("newRegistryHTTPClient(explicit CA) error = %v", err)
 	}
@@ -45,8 +48,97 @@ func TestRegistryHTTPClientUsesExplicitSupplementalCA(t *testing.T) {
 	if response.StatusCode != http.StatusNoContent {
 		t.Fatalf("status = %d", response.StatusCode)
 	}
-	if _, err := newRegistryHTTPClient(false, []byte("not a certificate")); !errors.Is(err, errInvalidRegistryTrust) {
+	if _, err := newRegistryHTTPClient(false, []byte("not a certificate"), ""); !errors.Is(err, errInvalidRegistryTrust) {
 		t.Fatalf("invalid in-memory bundle error = %v", err)
+	}
+}
+
+func TestRegistryHTTPClientUsesOnlyExplicitProxy(t *testing.T) {
+	registry := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(registry.Close)
+	proxy, connections := startRegistryCONNECTProxy(t)
+	t.Cleanup(proxy.Close)
+	certificate := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: registry.Certificate().Raw})
+	t.Setenv("HTTPS_PROXY", "http://127.0.0.1:1")
+	t.Setenv("https_proxy", "http://127.0.0.1:1")
+
+	direct, err := newRegistryHTTPClient(false, certificate, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := direct.Get(registry.URL)
+	if err != nil {
+		t.Fatalf("direct Registry request inherited ambient proxy: %v", err)
+	}
+	_ = response.Body.Close()
+	if connections.Load() != 0 {
+		t.Fatal("direct Registry request used the explicit test proxy")
+	}
+
+	proxied, err := newRegistryHTTPClient(false, certificate, proxy.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = proxied.Get(registry.URL)
+	if err != nil {
+		t.Fatalf("explicitly proxied Registry request: %v", err)
+	}
+	_ = response.Body.Close()
+	if connections.Load() != 1 {
+		t.Fatalf("Registry proxy CONNECT count = %d, want 1", connections.Load())
+	}
+
+	tlsProxy, tlsConnections := startRegistryTLSCONNECTProxy(t)
+	t.Cleanup(tlsProxy.Close)
+	tlsProxyCertificate := pem.EncodeToMemory(&pem.Block{
+		Type: "CERTIFICATE", Bytes: tlsProxy.Certificate().Raw,
+	})
+	tlsProxied, err := newRegistryHTTPClient(
+		false, append(certificate, tlsProxyCertificate...), tlsProxy.URL,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err = tlsProxied.Get(registry.URL)
+	if err != nil {
+		t.Fatalf("explicitly TLS-proxied Registry request: %v", err)
+	}
+	_ = response.Body.Close()
+	if tlsConnections.Load() != 1 {
+		t.Fatalf("TLS Registry proxy CONNECT count = %d, want 1", tlsConnections.Load())
+	}
+}
+
+func TestRegistryProxyValidationAndEnvironment(t *testing.T) {
+	for _, value := range []string{"", "http://proxy.internal:3128", "https://127.0.0.1:8443"} {
+		if _, err := parseRegistryHTTPSProxy(value); err != nil {
+			t.Errorf("valid Registry proxy %q error = %v", value, err)
+		}
+	}
+	for _, value := range []string{
+		" http://proxy.internal:3128", "http://user:secret@proxy.internal:3128",
+		"http://proxy.internal:3128/path", "socks5://proxy.internal:1080",
+		"http://PROXY.internal:3128", "http://proxy.internal:65536",
+	} {
+		if _, err := parseRegistryHTTPSProxy(value); !errors.Is(err, errInvalidRegistryProxy) {
+			t.Errorf("invalid Registry proxy %q error = %v", value, err)
+		}
+	}
+	base := []string{"HOME=/tmp"}
+	if got := registryProxyEnvironment(base, ""); len(got) != 1 {
+		t.Fatalf("environment without proxy = %v", got)
+	}
+	got := registryProxyEnvironment(base, "http://proxy.internal:3128")
+	for _, expected := range []string{
+		"HTTP_PROXY=http://proxy.internal:3128", "HTTPS_PROXY=http://proxy.internal:3128",
+		"http_proxy=http://proxy.internal:3128", "https_proxy=http://proxy.internal:3128",
+		"NO_PROXY=", "no_proxy=",
+	} {
+		if !containsEnvironmentEntry(got, expected) {
+			t.Errorf("Registry proxy environment is missing %q: %v", expected, got)
+		}
 	}
 }
 
@@ -161,4 +253,63 @@ func TestRegistryRedirectPolicyAllowsOnlySameOrigin(t *testing.T) {
 			}
 		})
 	}
+}
+
+func startRegistryCONNECTProxy(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	connections := &atomic.Int64{}
+	return httptest.NewServer(registryCONNECTProxyHandler(connections)), connections
+}
+
+func startRegistryTLSCONNECTProxy(t *testing.T) (*httptest.Server, *atomic.Int64) {
+	t.Helper()
+	connections := &atomic.Int64{}
+	return httptest.NewTLSServer(registryCONNECTProxyHandler(connections)), connections
+}
+
+func registryCONNECTProxyHandler(connections *atomic.Int64) http.Handler {
+	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodConnect || request.Header.Get("Proxy-Authorization") != "" {
+			http.Error(response, "CONNECT required", http.StatusMethodNotAllowed)
+			return
+		}
+		upstream, err := net.DialTimeout("tcp", request.Host, 5*time.Second)
+		if err != nil {
+			http.Error(response, "upstream unavailable", http.StatusBadGateway)
+			return
+		}
+		hijacker, ok := response.(http.Hijacker)
+		if !ok {
+			_ = upstream.Close()
+			http.Error(response, "tunnel unsupported", http.StatusInternalServerError)
+			return
+		}
+		client, buffer, err := hijacker.Hijack()
+		if err != nil {
+			_ = upstream.Close()
+			return
+		}
+		connections.Add(1)
+		_, _ = buffer.WriteString("HTTP/1.1 200 Connection Established\r\n\r\n")
+		_ = buffer.Flush()
+		go tunnelRegistryConnections(client, upstream)
+	})
+}
+
+func tunnelRegistryConnections(left, right net.Conn) {
+	defer left.Close()
+	defer right.Close()
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(left, right); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(right, left); done <- struct{}{} }()
+	<-done
+}
+
+func containsEnvironmentEntry(environment []string, expected string) bool {
+	for _, entry := range environment {
+		if entry == expected {
+			return true
+		}
+	}
+	return false
 }

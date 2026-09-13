@@ -78,6 +78,11 @@ func TestORASPublisherRejectsUnsafeConfigurationAndPublication(t *testing.T) {
 	if _, err := NewORASPublisher(ORASPublisherOptions{MaxDocumentBytes: 1}); !errors.Is(err, biz.ErrInvalidEvidenceJob) {
 		t.Fatalf("invalid limit error = %v", err)
 	}
+	if _, err := NewORASPublisher(ORASPublisherOptions{
+		MaxDocumentBytes: 4096, RegistryHTTPSProxy: "http://user:secret@proxy.internal:3128",
+	}); !errors.Is(err, biz.ErrInvalidEvidenceJob) {
+		t.Fatalf("credential-bearing proxy error = %v", err)
+	}
 	publisher, err := NewORASPublisher(ORASPublisherOptions{AllowPlainHTTP: true, MaxDocumentBytes: 4096})
 	if err != nil {
 		t.Fatal(err)

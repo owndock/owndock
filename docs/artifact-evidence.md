@@ -263,6 +263,8 @@ Registry Credential 仍只在 MongoDB 保存 `secret://production` 这样的引�
 
 自建 Registry 使用企业 CA 时，通过 `product.registry_ca_cert_file` 给 Server、Build Worker 和 Evidence Worker 挂载同一份只读 PEM。Worker 启动时固定经过校验的内容，再用私有 `0600` 快照向 Syft、Trivy 和 Cosign 提供 `SSL_CERT_FILE`；不会关闭 TLS 或主机名校验。完整文件规则及 BuildKit/Docker daemon 的独立信任边界见 [Registry 连接与认证](registry-connections.md#自建-registry-的私有-ca)。
 
+需要经过企业出口访问 Registry 时，设置无凭据的 `product.registry_https_proxy`。Server/Build Worker 的内置 OCI 客户端以及 Evidence Worker 的 ORAS、Syft、Trivy、Cosign 都只使用这个显式代理，不继承宿主环境代理；工具进程的 `NO_PROXY` 会被清空，Registry 凭据不会成为代理凭据。BuildKit、Docker daemon 和漏洞库 Updater 是独立网络边界，必须分别配置，详见 [Registry 显式代理](registry-connections.md#显式-registry-https-代理)。
+
 ```bash
 make docker-evidence-worker VERSION=dev
 

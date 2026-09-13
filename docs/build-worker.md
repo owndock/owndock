@@ -70,6 +70,7 @@ sequenceDiagram
 - TCP endpoint 必须使用双向 TLS，并验证 `server_name`；本机方式只允许专用绝对 Unix Socket。`docker-container://` 和 `/var/run/docker.sock` 均被拒绝。
 - Registry Password 按 `secret://alias` 在单次操作中解析，只交给 BuildKit Session auth provider；不会进入 image name、Solve attrs、Build、MongoDB 或普通日志。
 - `product.registry_ca_cert_file` 供 Build Worker 自身的 OCI Evidence 回读使用；BuildKit daemon 推送镜像时的 Registry CA 必须在 BuildKit 的 Registry 配置中独立安装，不能把两者混为一个信任边界。
+- `product.registry_https_proxy` 只控制 Build Worker 自身的 OCI Evidence 回读。BuildKit 拉取 frontend/base image、执行 Dockerfile 网络请求和推送结果仍只走 Build Boundary 的 `build_egress_proxy_url`；两个代理不能互相替代。
 - Exporter 固定启用 `push=true`、canonical name 与 OCI media types，只接受 BuildKit 返回的 SHA-256 digest，且仓库必须与配置快照完全相同。
 - BuildKit 的 cache 位于独立文件系统，启用 8 GB GC 基线。Compose 中的 `buildkit-storage-preflight` 会在 BuildKit 启动前检查该路径确实是独立挂载点，并确认文件系统总容量不超过 `OWNDOCK_BUILDKIT_CACHE_HARD_QUOTA_BYTES`（默认 12 GiB）；普通宿主目录会失败关闭。GC 只负责回收，硬容量边界由文件系统负责。安全门禁会直接流式导出该 Volume，并在容量/文件数上限内扫描原始、gzip 与 zstd 内容中的已知秘密哨兵；`docker export` 不包含镜像声明的 Volume，不能单独作为 cache 无泄漏证据。
 
@@ -100,6 +101,7 @@ product:
   source_git_ca_cert_file: /etc/owndock/git/ca.pem
   source_git_https_proxy: http://proxy.internal:3128
   registry_ca_cert_file: /etc/owndock/registry/ca.pem
+  registry_https_proxy: http://registry-proxy.internal:3128
 runtime:
   build_worker:
     enabled: true

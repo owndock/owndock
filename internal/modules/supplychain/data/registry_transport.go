@@ -5,8 +5,10 @@ import (
 	"crypto/x509"
 	"errors"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/owndock/owndock/internal/shared/tlstrust"
@@ -18,6 +20,7 @@ const maximumRegistryCABundleBytes = int64(1024 * 1024)
 var (
 	errUnsafeRegistryRedirect = errors.New("unsafe Registry redirect")
 	errInvalidRegistryTrust   = errors.New("Registry TLS trust configuration is invalid")
+	errInvalidRegistryProxy   = errors.New("Registry proxy configuration is invalid")
 )
 
 // LoadRegistryCABundle validates and snapshots the optional installation-wide
@@ -68,11 +71,19 @@ func SnapshotRegistryCABundle(root string, bundle []byte) (string, func(), error
 	return path, cleanup, nil
 }
 
-func newRegistryHTTPClient(allowPlainHTTP bool, caBundle []byte) (*http.Client, error) {
+func newRegistryHTTPClient(allowPlainHTTP bool, caBundle []byte, proxyAddress string) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// Registry traffic must use the explicitly supported direct route. In
-	// particular, worker processes must not inherit ambient proxy variables.
-	transport.Proxy = nil
+	proxyURL, err := parseRegistryHTTPSProxy(proxyAddress)
+	if err != nil {
+		return nil, err
+	}
+	// Registry traffic uses only this explicit route and never inherits ambient
+	// proxy variables from the Server or Worker process.
+	if proxyURL != nil {
+		transport.Proxy = http.ProxyURL(proxyURL)
+	} else {
+		transport.Proxy = nil
+	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS13}
 	if len(caBundle) > 0 {
 		if !tlstrust.ValidBundle(caBundle) {
@@ -92,6 +103,46 @@ func newRegistryHTTPClient(allowPlainHTTP bool, caBundle []byte) (*http.Client, 
 		Transport:     retry.NewTransport(transport),
 		CheckRedirect: registryRedirectPolicy(allowPlainHTTP),
 	}, nil
+}
+
+func parseRegistryHTTPSProxy(value string) (*url.URL, error) {
+	if value == "" {
+		return nil, nil
+	}
+	if strings.TrimSpace(value) != value {
+		return nil, errInvalidRegistryProxy
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || parsed.Hostname() == "" || parsed.User != nil ||
+		parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		strings.HasSuffix(parsed.Hostname(), ".") || parsed.Host != strings.ToLower(parsed.Host) {
+		return nil, errInvalidRegistryProxy
+	}
+	if port := parsed.Port(); port != "" {
+		number, portErr := strconv.Atoi(port)
+		if portErr != nil || number < 1 || number > 65535 {
+			return nil, errInvalidRegistryProxy
+		}
+	}
+	if parsed.String() != value {
+		return nil, errInvalidRegistryProxy
+	}
+	return parsed, nil
+}
+
+func registryProxyEnvironment(environment []string, proxyAddress string) []string {
+	if proxyAddress == "" {
+		return environment
+	}
+	return append(environment,
+		"HTTP_PROXY="+proxyAddress,
+		"HTTPS_PROXY="+proxyAddress,
+		"http_proxy="+proxyAddress,
+		"https_proxy="+proxyAddress,
+		"NO_PROXY=",
+		"no_proxy=",
+	)
 }
 
 func registryRedirectPolicy(allowPlainHTTP bool) func(*http.Request, []*http.Request) error {

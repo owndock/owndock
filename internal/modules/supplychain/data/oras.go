@@ -21,10 +21,11 @@ import (
 )
 
 type ORASPublisherOptions struct {
-	Credentials      biz.RegistryCredentialProvider
-	AllowPlainHTTP   bool
-	MaxDocumentBytes int64
-	RegistryCABundle []byte
+	Credentials        biz.RegistryCredentialProvider
+	AllowPlainHTTP     bool
+	MaxDocumentBytes   int64
+	RegistryCABundle   []byte
+	RegistryHTTPSProxy string
 }
 
 const ORASGoVersion = "2.6.2"
@@ -44,7 +45,9 @@ func NewORASPublisher(options ORASPublisherOptions) (*ORASPublisher, error) {
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
 		maxDocumentBytes: options.MaxDocumentBytes,
 	}
-	client, err := newRegistryHTTPClient(publisher.allowPlainHTTP, options.RegistryCABundle)
+	client, err := newRegistryHTTPClient(
+		publisher.allowPlainHTTP, options.RegistryCABundle, options.RegistryHTTPSProxy,
+	)
 	if err != nil {
 		return nil, biz.ErrInvalidEvidenceJob
 	}

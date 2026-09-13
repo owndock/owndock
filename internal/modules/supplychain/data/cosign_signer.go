@@ -23,6 +23,7 @@ type CosignSignerOptions struct {
 	TemporaryRoot      string
 	AllowPlainHTTP     bool
 	RegistryCACertFile string
+	RegistryHTTPSProxy string
 }
 
 type CosignSigner struct {
@@ -33,6 +34,7 @@ type CosignSigner struct {
 	temporaryRoot      string
 	allowPlainHTTP     bool
 	registryCACertFile string
+	registryHTTPSProxy string
 }
 
 func NewCosignSigner(options CosignSignerOptions) (*CosignSigner, error) {
@@ -40,12 +42,14 @@ func NewCosignSigner(options CosignSignerOptions) (*CosignSigner, error) {
 	root := strings.TrimSpace(options.TemporaryRoot)
 	if !filepath.IsAbs(executable) || version != PinnedCosignVersion || options.Credentials == nil ||
 		options.SigningEnvironment == nil || !filepath.IsAbs(root) ||
-		!validRegistryCACertFile(options.RegistryCACertFile) {
+		!validRegistryCACertFile(options.RegistryCACertFile) ||
+		!validRegistryHTTPSProxy(options.RegistryHTTPSProxy) {
 		return nil, biz.ErrSignatureToolVersion
 	}
 	return &CosignSigner{executable: executable, expectedVersion: version,
 		credentials: options.Credentials, environment: options.SigningEnvironment, temporaryRoot: root,
-		allowPlainHTTP: options.AllowPlainHTTP, registryCACertFile: options.RegistryCACertFile}, nil
+		allowPlainHTTP: options.AllowPlainHTTP, registryCACertFile: options.RegistryCACertFile,
+		registryHTTPSProxy: options.RegistryHTTPSProxy}, nil
 }
 
 func (s *CosignSigner) SignSignature(ctx context.Context,
@@ -89,6 +93,7 @@ func (s *CosignSigner) SignSignature(ctx context.Context,
 		return biz.SignatureSigningResult{}, biz.ErrSignatureSigning
 	}
 	environment := cosignEnvironment(directory, dockerDirectory, s.registryCACertFile)
+	environment = registryProxyEnvironment(environment, s.registryHTTPSProxy)
 	keys := make([]string, 0, len(providerEnvironment))
 	for key := range providerEnvironment {
 		keys = append(keys, key)

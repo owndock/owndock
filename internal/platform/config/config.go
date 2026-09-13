@@ -163,6 +163,7 @@ type Product struct {
 	SourceGitCACertFile                 string `json:"source_git_ca_cert_file"`
 	SourceGitHTTPSProxy                 string `json:"source_git_https_proxy"`
 	RegistryCACertFile                  string `json:"registry_ca_cert_file"`
+	RegistryHTTPSProxy                  string `json:"registry_https_proxy"`
 	BuildTriggerRateLimit               int    `json:"build_trigger_rate_limit"`
 	BuildTriggerRateWindow              string `json:"build_trigger_rate_window"`
 	BuildWebhookRateLimit               int    `json:"build_webhook_rate_limit"`
@@ -555,6 +556,10 @@ func (p Product) Validate() error {
 	if caFile := strings.TrimSpace(p.RegistryCACertFile); caFile != p.RegistryCACertFile ||
 		(caFile != "" && !filepath.IsAbs(caFile)) {
 		return fmt.Errorf("registry_ca_cert_file must be an absolute path without surrounding whitespace")
+	}
+	if proxy := strings.TrimSpace(p.RegistryHTTPSProxy); proxy != p.RegistryHTTPSProxy ||
+		(proxy != "" && !validSourceGitHTTPSProxy(proxy)) {
+		return fmt.Errorf("registry_https_proxy must be a credential-free canonical HTTP(S) origin")
 	}
 	if p.BuildTriggerRateLimitValue() < 1 || p.BuildTriggerRateLimitValue() > 10_000 {
 		return fmt.Errorf("build_trigger_rate_limit must be between 1 and 10000")

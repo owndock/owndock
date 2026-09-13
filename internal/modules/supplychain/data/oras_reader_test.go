@@ -14,6 +14,11 @@ func TestOCIContentReaderRejectsUnsafeLimitsAndMismatchedIdentityBeforeNetwork(t
 	if _, err := NewOCIContentReader(OCIContentReaderOptions{MaxDocumentBytes: 1}); !errors.Is(err, biz.ErrInvalidEvidence) {
 		t.Fatalf("invalid limit error = %v", err)
 	}
+	if _, err := NewOCIContentReader(OCIContentReaderOptions{
+		MaxDocumentBytes: 4096, RegistryHTTPSProxy: "http://proxy.internal:3128/path",
+	}); !errors.Is(err, biz.ErrInvalidEvidence) {
+		t.Fatalf("invalid proxy origin error = %v", err)
+	}
 	reader, err := NewOCIContentReader(OCIContentReaderOptions{
 		AllowPlainHTTP: true, MaxDocumentBytes: 4096,
 	})

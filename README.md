@@ -20,7 +20,7 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 - MongoDB：官方 Go Driver v2.8.0；服务端测试基线 8.3.7，默认关闭
 - 正式产品切片：本地 bootstrap/login/session、一次性用户邀请、Owner 管理员会话治理、Project 成员绑定与即时撤权、可信代理来源识别和来源/实例共享入口限流、内置 RBAC、只读内置 Template 与 Application 快照、Organization Managed Host、一次性 Agent enrollment 与证书身份、Project、Project Application、Source Repository/Repository Credential 与只读连接探测、Build Configuration、三类 Build 触发入口、状态机、取消/重试与 Mongo queue/lease/fence、隔离 Build Worker 的固定 Git HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建与认证 Registry push、OwnDock Build 或外部 CI digest 双来源 Artifact、Registry manifest 完整性探测和生产者信任标记、Artifact Evidence 有界索引/授权下载 API、OCI Referrers 原生/Tag Schema 探测、Evidence Job queue/lease/generation fence、CycloneDX 1.6 SBOM、SLSA Provenance v1、固定 Trivy 漏洞扫描及原子数据库快照、精确漏洞 ID 的 Project/Artifact 限时豁免、Project/Environment 版本化 Deployment Policy 与不可变准入快照、幂等 Release 交接、development 显式自动部署、不可变 Release、Runtime Target、Runtime Inventory 安全查询、基础审计和 MongoDB migration
 - 资源退役：Application 与 Environment 先关闭新工作入口，再由持久后台流程排空 Deployment、关闭容器 Terminal、清理精确运行槽位并释放 Agent watermark，同时保留不可变历史；详见 [docs/resource-retirement.md](docs/resource-retirement.md)
-- 已接受、待完成或待验收：持续重扫调度、其他 KMS 客户矩阵，以及 Evidence Worker 的真实超大镜像/生产出口系统验收；Git 自建 CA/代理兼容矩阵、首个受保护 Agent Tag 的公开发行证据、多主机升级/回滚系统验收，以及 enrollment/证书轮换/Terminal 的真实远程与浏览器安全验收
+- 已接受、待完成或待验收：其他 KMS 客户矩阵，以及 Evidence Worker 的真实超大镜像/生产出口系统验收；Git/Registry 品牌与客户网络兼容矩阵、首个受保护 Agent Tag 的公开发行证据、多主机升级/回滚系统验收，以及 enrollment/证书轮换/Terminal 的真实远程与浏览器安全验收
 - 默认接口：健康和版本接口；产品切片需要显式启用 MongoDB 与 `product.enabled`
 
 本地用户由 Owner 使用一次性邀请接入并自行设置密码。受邀 Viewer 默认看不到任何 Project；Owner 或 Project Maintainer 显式绑定 Project 角色。角色不缓存到 Session，每次 Project 请求实时解析，因此移除成员后原 Session 的下一次请求立即失去访问权限。Owner 还可以查看同 Organization 用户的不含 Token/hash 的 Session 摘要，并在账号泄漏或离职时撤销一个或全部 Session。

@@ -28,9 +28,10 @@ const (
 )
 
 type OCIArtifactProberOptions struct {
-	Credentials      supplychainbiz.RegistryCredentialProvider
-	AllowPlainHTTP   bool
-	RegistryCABundle []byte
+	Credentials        supplychainbiz.RegistryCredentialProvider
+	AllowPlainHTTP     bool
+	RegistryCABundle   []byte
+	RegistryHTTPSProxy string
 }
 
 // OCIArtifactProber proves that the exact digest selected by an external
@@ -45,7 +46,9 @@ func NewOCIArtifactProber(options OCIArtifactProberOptions) (*OCIArtifactProber,
 	prober := &OCIArtifactProber{
 		credentials: options.Credentials, allowPlainHTTP: options.AllowPlainHTTP,
 	}
-	client, err := newRegistryHTTPClient(prober.allowPlainHTTP, options.RegistryCABundle)
+	client, err := newRegistryHTTPClient(
+		prober.allowPlainHTTP, options.RegistryCABundle, options.RegistryHTTPSProxy,
+	)
 	if err != nil {
 		return nil, buildbiz.ErrInvalidArtifact
 	}

@@ -79,6 +79,40 @@ product:
 - BuildKit 推送镜像时，由 BuildKit daemon 配置 Registry CA；
 - Docker Engine 或目标主机拉取镜像时，由目标 Docker daemon 配置 Registry CA。
 
-这两个守护进程不读取 `product.registry_ca_cert_file`，部署时必须按它们各自的标准方式安装同一 CA。Registry 显式代理、不同品牌兼容性、中国大陆网络和完全离线矩阵仍属于生产验收范围。
+这两个守护进程不读取 `product.registry_ca_cert_file`，部署时必须按它们各自的标准方式安装同一 CA。
+
+## 显式 Registry HTTPS 代理
+
+Server、Build Worker 和 Evidence Worker 自身访问 Registry 时可以使用安装级、无凭据代理：
+
+```yaml
+product:
+  registry_https_proxy: http://proxy.internal:3128
+```
+
+该值必须是规范的 `http://host[:port]` 或 `https://host[:port]` origin，不能包含用户名、密码、路径、查询参数或 fragment。OwnDock 不支持代理认证；需要认证的企业出口应在受信任网络中提供一个不含客户端凭据的专用转发入口，或通过网络策略限定来源。配置不合法时相关进程拒绝启动。
+
+OwnDock 的 Registry HTTP 客户端不会继承进程环境中的 `HTTP_PROXY`、`HTTPS_PROXY` 或 `NO_PROXY`。配置代理后，Server 的 Artifact 探测和 Evidence 下载、Build Worker 的 Evidence 回读，以及 Evidence Worker 的 ORAS/Syft/Trivy/Cosign Registry 操作都只使用这个显式地址。子进程同时收到大小写代理变量，并强制空 `NO_PROXY`，避免客户环境中的旁路规则让流量绕过已选择的出口；Registry Basic 凭据仍只发送给隧道内的目标 Registry，不作为 `Proxy-Authorization` 发送。
+
+```mermaid
+sequenceDiagram
+    participant P as OwnDock 进程或固定工具
+    participant X as 无凭据 CONNECT Proxy
+    participant R as HTTPS OCI Registry
+    P->>X: CONNECT registry.example.com:443
+    X-->>P: 200 Connection Established
+    P->>R: 隧道内 TLS 1.3 + 主机名/CA 校验
+    P->>R: Registry authentication（如需要）
+    R-->>P: digest-bound OCI response
+    Note over P,X: 不发送 Proxy-Authorization
+```
+
+若使用 `https://` 代理，`registry_ca_cert_file` 的补充根也用于校验代理 TLS；应把所需企业 CA 一并纳入受控 bundle。这个产品配置不控制另外三个网络边界：
+
+- BuildKit 拉取 frontend/base image 和推送构建结果，使用 Build Boundary 的 `build_egress_proxy_url` 与 BuildKit 自己的 Registry 信任；
+- Docker Engine 或 Agent 目标主机拉取 Release 镜像，使用 Docker daemon 自身的代理和 CA；
+- Trivy 漏洞库更新器只使用独立的 `OWNDOCK_TRIVY_DB_HTTPS_PROXY`。
+
+这些边界不能通过给 OwnDock 进程设置环境变量代替。不同 Registry 品牌、中国大陆网络和完全离线的客户等价矩阵仍属于生产验收范围。
 
 MongoDB v45 会把升级前已有的 Registry Credential 明确回填为 `basic`。新建匿名记录不会保存 `username` 或 `password_ref`。

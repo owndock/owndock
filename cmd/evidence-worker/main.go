@@ -109,6 +109,7 @@ func run(ctx context.Context, arguments []string) error {
 		MaxOutputBytes: workerConfig.MaxDocumentBytesValue(),
 		MaxLayerBytes:  workerConfig.MaxLayerBytesValue(), Credentials: credentialProvider,
 		RegistryCACertFile: registryCACertFile,
+		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Syft generator: %w", err)
@@ -121,7 +122,7 @@ func run(ctx context.Context, arguments []string) error {
 	}
 	publisher, err := supplychaindata.NewORASPublisher(supplychaindata.ORASPublisherOptions{
 		Credentials: credentialProvider, MaxDocumentBytes: workerConfig.MaxDocumentBytesValue(),
-		RegistryCABundle: registryCABundle,
+		RegistryCABundle: registryCABundle, RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})
 	if err != nil {
 		return fmt.Errorf("create OCI Evidence publisher: %w", err)
@@ -146,6 +147,7 @@ func run(ctx context.Context, arguments []string) error {
 		Executable: workerConfig.CosignExecutable, ExpectedVersion: workerConfig.CosignVersion,
 		Credentials: credentialProvider, TemporaryRoot: os.TempDir(),
 		RegistryCACertFile: registryCACertFile,
+		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Cosign verifier: %w", err)
@@ -169,6 +171,7 @@ func run(ctx context.Context, arguments []string) error {
 		Credentials:        credentialProvider,
 		SigningEnvironment: supplychaindata.EnvironmentSigningEnvironmentResolver{},
 		TemporaryRoot:      os.TempDir(), RegistryCACertFile: registryCACertFile,
+		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Cosign signer: %w", err)
@@ -182,6 +185,7 @@ func run(ctx context.Context, arguments []string) error {
 		CacheDirectory: workerConfig.TrivyCacheDirectory,
 		MaxOutputBytes: minInt64(workerConfig.MaxDocumentBytesValue(), supplychainbiz.MaximumVulnerabilityReportSize),
 		Credentials:    credentialProvider, RegistryCACertFile: registryCACertFile,
+		RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 	})
 	if err != nil {
 		return fmt.Errorf("create pinned Trivy scanner: %w", err)

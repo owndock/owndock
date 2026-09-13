@@ -191,7 +191,7 @@ func run(ctx context.Context, arguments []string) error {
 		supplychaindata.OCIContentReaderOptions{
 			Credentials:      supplychaindata.NewEnvironmentRegistryCredentialProvider(controlPlaneStore),
 			MaxDocumentBytes: cfg.Runtime.EvidenceWorker.MaxDocumentBytesValue(),
-			RegistryCABundle: registryCABundle,
+			RegistryCABundle: registryCABundle, RegistryHTTPSProxy: cfg.Product.RegistryHTTPSProxy,
 		},
 	)
 	if err != nil {
