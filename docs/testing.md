@@ -25,7 +25,7 @@ make test-changed-coverage COVERAGE_BASE=<完整或可解析的 commit SHA>
 
 极少数通过真实子进程、打包或平台系统测试验证的入口与 fixture，记录在 `.github/changed-coverage-exclusions.txt`。每条排除必须包含精确路径、复核日期和原因；到期后门禁自动失败。不得为了让比例通过而加入普通业务代码，也不得用目录级排除覆盖生产模块。
 
-CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、MongoDB 集成测试、API 契约、构建、Agent 进程测试和 race 检测。`make test-integration` 同时运行单节点完整产品持久化回归、启用认证且只有目标数据库 `readWrite` 权限的应用身份回归，以及三成员 Replica Set 的全员就绪、Primary 停止、不同成员接管、切换后 majority 事务恢复和跨切换 Runtime Inventory current view 提交。架构测试还要求生产代码中的每个 Driver `WithTransaction` 显式使用统一耐久选项。定时/手动双架构安全 Job 继续重复执行供应链真实 Registry/KMS 门禁，防止只在相关源码发生变化时运行。变更覆盖率只是其中一道门禁。
+CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、MongoDB 集成测试、API 契约、构建、Agent 进程测试和 race 检测。`make test-integration` 同时运行单节点完整产品持久化回归、启用认证且只有目标数据库 `readWrite` 权限的应用身份回归、认证 + `requireTLS` 的加密/明文拒绝/错误 CA 回归，以及三成员 Replica Set 的全员就绪、Primary 停止、不同成员接管、切换后 majority 事务恢复和跨切换 Runtime Inventory current view 提交。架构测试还要求生产代码中的每个 Driver `WithTransaction` 显式使用统一耐久选项。定时/手动双架构安全 Job 继续重复执行供应链真实 Registry/KMS 门禁，防止只在相关源码发生变化时运行。变更覆盖率只是其中一道门禁。
 
 正式 Tag 会执行更完整的仓库内发布候选组合门禁：
 

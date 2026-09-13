@@ -8,7 +8,7 @@ mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6
 
 禁止使用 `mongo:latest`、`mongo:8` 或 `mongo:8.3` 等浮动 tag。版本升级必须同时更新镜像 digest、集成测试和发布说明。
 
-所有通过平台事务管理器提交的产品写入，以及 Build 日志、Deployment、Runtime Inventory 和 Artifact Evidence Repository 自己维护的内部原子操作，都从同一个 `mongotx` 契约显式取得 `snapshot` read concern、`primary` read preference 和 `majority` write concern。架构测试会扫描生产代码中的每个 `WithTransaction`，阻止新事务退回 Driver 默认值。Go Driver 负责按 MongoDB 错误标签重试 transient transaction 或不确定的 commit；业务回调因此必须保持数据库内幂等，任何外部网络或运行时副作用都不能放进事务回调。单节点 Replica Set 验证完整产品持久化路径；独立三成员门禁会在 Runtime Inventory observation 已开始、尚未提交资源时停止当前 Primary，确认 Driver 发现新 Primary，再追加资源、原子切换 current view，并完成切换后的 majority 事务。独立认证门禁使用 root 身份仅创建用户，再由仅有目标数据库 `readWrite` 的应用身份执行事务，并确认其不能写 `admin`。该仓库内门禁仍不能替代启用 TLS 和客户等价存储的生产故障演练。
+所有通过平台事务管理器提交的产品写入，以及 Build 日志、Deployment、Runtime Inventory 和 Artifact Evidence Repository 自己维护的内部原子操作，都从同一个 `mongotx` 契约显式取得 `snapshot` read concern、`primary` read preference 和 `majority` write concern。架构测试会扫描生产代码中的每个 `WithTransaction`，阻止新事务退回 Driver 默认值。Go Driver 负责按 MongoDB 错误标签重试 transient transaction 或不确定的 commit；业务回调因此必须保持数据库内幂等，任何外部网络或运行时副作用都不能放进事务回调。单节点 Replica Set 验证完整产品持久化路径；独立三成员门禁会在 Runtime Inventory observation 已开始、尚未提交资源时停止当前 Primary，确认 Driver 发现新 Primary，再追加资源、原子切换 current view，并完成切换后的 majority 事务。认证门禁使用 root 身份仅创建用户，再由仅有目标数据库 `readWrite` 的应用身份执行事务，并确认其不能写 `admin`。TLS 门禁使用临时私有 CA、服务端证书和同一最小权限应用身份，把 MongoDB 从初始化期 `allowTLS` 单向提升到 `requireTLS`，确认加密事务可用、明文连接和错误 CA 都被拒绝。仓库内证据仍不能替代客户证书签发/轮换、Secret 挂载和等价存储上的生产故障演练。
 
 ## 配置
 
@@ -28,7 +28,7 @@ database:
     max_pool_size: 100
 ```
 
-连接串从 `uri_env` 指定的环境变量，或从 `uri_file` 指定的绝对路径二选一读取；同时配置或都不配置会拒绝启动。文件必须是最多 8 KiB 的普通文件，不能是符号链接或允许 group/world 写入，且只能包含一个非空行。连接串不写入配置模板、日志或版本库；回归测试还会分别制造连接串解析失败、错误密码和目标不可达，确保向上传递的启动错误不包含完整 URI、用户名或密码。Compose 基线使用文件型 Secret，并分离 root 初始化身份、仅可读写 `owndock` 数据库的应用身份，以及只挂载到 Mongo 容器的 `backup`/`restore` 操作身份；生产环境还需要 TLS，以及经过容量与故障转移验证的 Replica Set。
+连接串从 `uri_env` 指定的环境变量，或从 `uri_file` 指定的绝对路径二选一读取；同时配置或都不配置会拒绝启动。文件必须是最多 8 KiB 的普通文件，不能是符号链接或允许 group/world 写入，且只能包含一个非空行。连接串不写入配置模板、日志或版本库；回归测试还会分别制造连接串解析失败、错误密码、错误 CA 和目标不可达，确保向上传递的启动错误不包含完整 URI、用户名或密码。Compose 基线使用文件型 Secret，并分离 root 初始化身份、仅可读写 `owndock` 数据库的应用身份，以及只挂载到 Mongo 容器的 `backup`/`restore` 操作身份。生产连接必须校验服务端证书并要求 TLS；证书和 CA 的签发、轮换与挂载仍由部署环境负责。生产环境还需要经过容量与故障转移验证的 Replica Set。
 
 单节点安装、备份和恢复边界见[社区版单节点安装与恢复](community-installation.md)。
 
@@ -103,7 +103,7 @@ Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Targe
 make check
 ```
 
-MongoDB 集成测试使用 Testcontainers 启动固定镜像。单节点 Replica Set 验证连接、Ping、事务、migration 幂等、认证会话、共享登录尝试并发阈值与成功清理、活跃 Session 上限/自助及管理员撤销、来源入口并发阈值与 TTL 索引、Agent token 只存哈希/原子消费/同请求恢复/冲突重放拒绝、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、Runtime Inventory open TTL/分块幂等/显式 present/absent/恢复/旧批次 fence/1,202 资源批量归属核验/Project 与 Host 最大页长分页隔离/全量与 Event 并发租约/Event 与 Finish 竞态/失败不推进游标、审计原子回滚和注销失效。第二个单节点 Replica Set 启用认证，验证应用身份可执行目标数据库 majority 事务、不可写 `admin`、错误密码失败关闭且错误文本不泄漏身份或密码。三成员 Replica Set 另验证所有成员就绪、Primary 容器停止、选出不同 Primary、切换前后的 majority 事务，以及跨切换继续完成已打开的 Runtime Inventory observation 并读取原子 current view：
+MongoDB 集成测试使用 Testcontainers 启动固定镜像。单节点 Replica Set 验证连接、Ping、事务、migration 幂等、认证会话、共享登录尝试并发阈值与成功清理、活跃 Session 上限/自助及管理员撤销、来源入口并发阈值与 TTL 索引、Agent token 只存哈希/原子消费/同请求恢复/冲突重放拒绝、Agent mTLS 身份查询/online/heartbeat/重连 fence/禁用吊销、正式资源持久化、Deployment 领取/终态/取消/重试/回滚、Runtime Inventory open TTL/分块幂等/显式 present/absent/恢复/旧批次 fence/1,202 资源批量归属核验/Project 与 Host 最大页长分页隔离/全量与 Event 并发租约/Event 与 Finish 竞态/失败不推进游标、审计原子回滚和注销失效。第二个单节点 Replica Set 启用认证，验证应用身份可执行目标数据库 majority 事务、不可写 `admin`、错误密码失败关闭且错误文本不泄漏身份或密码。第三个单节点 Replica Set 同时启用认证和 TLS，提升为 `requireTLS` 后验证最小权限应用事务、明文拒绝和错误 CA 拒绝。三成员 Replica Set 另验证所有成员就绪、Primary 容器停止、选出不同 Primary、切换前后的 majority 事务，以及跨切换继续完成已打开的 Runtime Inventory observation 并读取原子 current view：
 
 ```bash
 make test-integration
