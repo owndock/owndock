@@ -139,12 +139,18 @@ test-community-deployment:
 
 test-community-integration:
 	docker build \
-		--build-arg VERSION=0.0.0-community-integration \
+		--build-arg VERSION=0.0.0-community-baseline \
 		--build-arg COMMIT=$(COMMIT) \
 		--build-arg BUILD_TIME=$(BUILD_TIME) \
-		--tag owndock-community-integration:$(COMMIT) .
+		--tag owndock-community-integration:$(COMMIT)-baseline .
+	docker build \
+		--build-arg VERSION=0.0.1-community-candidate \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BUILD_TIME=$(BUILD_TIME) \
+		--tag owndock-community-integration:$(COMMIT)-candidate .
 	sh deploy/community_process_integration_test.sh \
-		owndock-community-integration:$(COMMIT)
+		owndock-community-integration:$(COMMIT)-baseline \
+		owndock-community-integration:$(COMMIT)-candidate
 
 test-release-candidate: check test-community-deployment
 	go test -race ./... -count=1

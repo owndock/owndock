@@ -1,15 +1,22 @@
 #!/bin/sh
 set -eu
 
-if [ "$#" -ne 1 ] || [ -z "$1" ]; then
-  echo "usage: $0 LOCAL_SERVER_IMAGE" >&2
+if [ "$#" -ne 2 ] || [ -z "$1" ] || [ -z "$2" ]; then
+  echo "usage: $0 BASELINE_SERVER_IMAGE CANDIDATE_SERVER_IMAGE" >&2
   exit 2
 fi
-server_image=$1
-case "$server_image" in
-  owndock-community-integration:*) ;;
-  *) echo "integration image must use the isolated owndock-community-integration repository" >&2; exit 2 ;;
-esac
+baseline_image=$1
+candidate_image=$2
+for server_image in "$baseline_image" "$candidate_image"; do
+  case "$server_image" in
+    owndock-community-integration:*) ;;
+    *) echo "integration images must use the isolated owndock-community-integration repository" >&2; exit 2 ;;
+  esac
+done
+[ "$baseline_image" != "$candidate_image" ] || {
+  echo "baseline and candidate images must be different" >&2
+  exit 2
+}
 
 for command in docker curl openssl; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -33,7 +40,7 @@ project=owndock-community-test-$$
 mkdir -m 0700 "$backup_directory"
 
 export COMPOSE_PROJECT_NAME=$project
-export OWNDOCK_SERVER_IMAGE=$server_image
+export OWNDOCK_SERVER_IMAGE=$baseline_image
 export OWNDOCK_HTTP_PORT=$((18000 + ($$ % 20000)))
 export OWNDOCK_MONGODB_KEYFILE_PATH=$secret_directory/mongodb-keyfile
 export OWNDOCK_MONGODB_ROOT_USERNAME_PATH=$secret_directory/mongodb-root-username
@@ -73,6 +80,47 @@ wait_ready() {
 }
 wait_ready
 
+compose_log=$test_directory/compose.log
+: >"$compose_log"
+append_compose_logs() {
+  docker compose -f "$compose_file" logs --no-color >>"$compose_log"
+}
+
+assert_version() {
+  expected_version=$1
+  response_file=$test_directory/version-response.json
+  status=$(curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+    "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/meta/version")
+  test "$status" = 200
+  grep -Fq "\"version\":\"$expected_version\"" "$response_file"
+}
+
+assert_server_hardening() {
+  server_container=$(docker compose -f "$compose_file" ps -q server)
+  test -n "$server_container"
+  server_user=$(docker inspect --format '{{.Config.User}}' "$server_container")
+  case "$server_user" in
+    ""|0|0:*|root|root:*) echo "Server is not configured as a non-root container" >&2; exit 1 ;;
+  esac
+  test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$server_container")" = true
+  docker inspect --format '{{join .HostConfig.CapDrop ","}}' "$server_container" | grep -iq all
+}
+
+recreate_server() {
+  next_image=$1
+  expected_version=$2
+  append_compose_logs
+  export OWNDOCK_SERVER_IMAGE=$next_image
+  if ! docker compose -f "$compose_file" up -d --no-deps --force-recreate server; then
+    docker compose -f "$compose_file" ps -a >&2 || true
+    docker compose -f "$compose_file" logs --no-color --tail 100 >&2 || true
+    return 1
+  fi
+  wait_ready
+  assert_version "$expected_version"
+  assert_server_hardening
+}
+
 mongodb_container=$(docker compose -f "$compose_file" ps -q mongodb)
 test -n "$mongodb_container"
 port_bindings=$(docker inspect --format '{{json .HostConfig.PortBindings}}' "$mongodb_container")
@@ -80,14 +128,8 @@ case "$port_bindings" in
   null|'{}') ;;
   *) echo "MongoDB unexpectedly exposes a host port: $port_bindings" >&2; exit 1 ;;
 esac
-server_container=$(docker compose -f "$compose_file" ps -q server)
-test -n "$server_container"
-server_user=$(docker inspect --format '{{.Config.User}}' "$server_container")
-case "$server_user" in
-  ""|0|0:*|root|root:*) echo "Server is not configured as a non-root container" >&2; exit 1 ;;
-esac
-test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$server_container")" = true
-docker inspect --format '{{join .HostConfig.CapDrop ","}}' "$server_container" | grep -iq all
+assert_version 0.0.0-community-baseline
+assert_server_hardening
 
 bootstrap_header=$test_directory/bootstrap-header
 bootstrap_body=$test_directory/bootstrap.json
@@ -123,6 +165,18 @@ status=$(curl --silent --show-error --output "$test_directory/login-response.jso
   "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
 test "$status" = 200
 
+recreate_server "$candidate_image" 0.0.1-community-candidate
+status=$(curl --silent --show-error --output "$test_directory/upgraded-login-response.json" --write-out '%{http_code}' \
+  --request POST --header 'Content-Type: application/json' --data-binary "@$login_body" \
+  "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
+test "$status" = 200
+
+recreate_server "$baseline_image" 0.0.0-community-baseline
+status=$(curl --silent --show-error --output "$test_directory/rollback-login-response.json" --write-out '%{http_code}' \
+  --request POST --header 'Content-Type: application/json' --data-binary "@$login_body" \
+  "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
+test "$status" = 200
+
 docker compose -f "$compose_file" stop server >/dev/null
 archive=$backup_directory/community.archive.gz
 if ! sh "$script_directory/backup-community.sh" "$archive" \
@@ -132,7 +186,7 @@ if ! sh "$script_directory/backup-community.sh" "$archive" \
 fi
 test -s "$archive"
 test -s "$archive.sha256"
-docker compose -f "$compose_file" logs --no-color >"$test_directory/compose.log"
+append_compose_logs
 
 docker compose -f "$compose_file" down --volumes --remove-orphans >/dev/null
 docker compose -f "$compose_file" up -d mongodb-init
@@ -157,25 +211,27 @@ OWNDOCK_RESTORE_CONFIRM=empty-owndock-database \
     }
 docker compose -f "$compose_file" up -d --no-deps server
 wait_ready
+assert_version 0.0.0-community-baseline
+assert_server_hardening
 
 status=$(curl --silent --show-error --output "$test_directory/restored-login-response.json" --write-out '%{http_code}' \
   --request POST --header 'Content-Type: application/json' --data-binary "@$login_body" \
   "http://127.0.0.1:$OWNDOCK_HTTP_PORT/api/v1/auth/login")
 test "$status" = 200
 
-docker compose -f "$compose_file" logs --no-color >>"$test_directory/compose.log"
+append_compose_logs
 for secret_file in \
   mongodb-root-password mongodb-app-password mongodb-tools-password \
   owndock-bootstrap-token owndock-mongodb-uri owndock-mongodb-tools.yaml; do
   secret_value=$(tr -d '\r\n' <"$secret_directory/$secret_file")
-  if [ -n "$secret_value" ] && grep -Fq "$secret_value" "$test_directory/compose.log"; then
+  if [ -n "$secret_value" ] && grep -Fq "$secret_value" "$compose_log"; then
     echo "Compose logs exposed $secret_file" >&2
     exit 1
   fi
 done
-if grep -Fq 'integration-password-123' "$test_directory/compose.log"; then
+if grep -Fq 'integration-password-123' "$compose_log"; then
   echo "Compose logs exposed the integration login password" >&2
   exit 1
 fi
 
-echo "community startup, persistence, backup and empty-volume restore passed"
+echo "community startup, upgrade, rollback, persistence, backup and empty-volume restore passed"

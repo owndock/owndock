@@ -120,6 +120,58 @@ sh deploy/backup-community.sh \
 
 至少记录：OwnDock 精确版本和 commit、MongoDB 版本、备份开始/结束时间、archive SHA-256、加密密钥标识和恢复演练结果。只复制 Docker volume 目录不构成支持的在线备份。
 
+## 升级与回滚
+
+社区版升级使用维护窗口，不承诺无停机。只允许升级到发布说明明确支持的相邻版本；开始前必须完成上面的停写备份，并保留当前已验签的 Server image digest。验证候选版本的安装包、容器清单和签名后执行：
+
+```bash
+previous_image=$OWNDOCK_SERVER_IMAGE
+export OWNDOCK_SERVER_IMAGE='ghcr.io/owndock/owndock@sha256:<verified-candidate-digest>'
+docker compose -f deploy/community.compose.yaml up -d --no-deps --force-recreate server
+curl --fail --silent http://127.0.0.1:8000/readyz
+curl --fail --silent http://127.0.0.1:8000/api/v1/meta/version
+```
+
+确认版本和 commit 都与候选清单一致，再验证 Owner 登录、核心资源读取、一次写入操作和审计记录。不要在验证完成前删除旧镜像或唯一可恢复备份。
+
+若候选版本失败，并且该发行说明明确声明数据库 schema 可向后兼容，可在同一维护窗口切回旧 digest：
+
+```bash
+export OWNDOCK_SERVER_IMAGE=$previous_image
+docker compose -f deploy/community.compose.yaml up -d --no-deps --force-recreate server
+curl --fail --silent http://127.0.0.1:8000/readyz
+curl --fail --silent http://127.0.0.1:8000/api/v1/meta/version
+```
+
+若发布说明没有明确允许二进制回滚，或候选 migration 已产生不兼容变更，不得直接启动旧二进制；应停止服务，按下一节把升级前备份恢复到新的空 volume，再启动旧版本。镜像回滚和备份恢复是两个不同的回退路径。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor O as Operator
+    participant B as Verified Backup
+    participant P as Previous Server
+    participant C as Candidate Server
+    participant M as MongoDB
+
+    O->>P: 停写并完成升级前备份
+    P->>B: archive + checksum + version metadata
+    O->>C: 以已验签 digest 重建 Server
+    C->>M: 执行允许的相邻 migration
+    O->>C: ready、版本、登录、写入和审计验收
+    alt 候选成功
+        O->>C: 保留候选并结束维护窗口
+    else 失败且 schema 向后兼容
+        O->>P: 以旧 digest 重建 Server
+        O->>P: 再次验收版本和关键旅程
+    else schema 不允许回退
+        O->>B: 恢复到新的空 volume
+        B->>P: 启动备份时旧版本
+    end
+```
+
+仓库的 `make test-community-integration` 会从同一 commit 构建两个带不同版本元数据的本地镜像，真实验证 Compose 的升级、数据保持和回滚机制。它不等同于相邻正式发行版 schema 兼容证明；正式 Tag 仍必须用当前版和上一版签名制品重跑本节旅程。
+
 ## 恢复演练
 
 恢复必须在隔离环境先验证：
