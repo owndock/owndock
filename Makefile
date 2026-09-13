@@ -64,7 +64,7 @@ test-changed-coverage:
 		-threshold $(CHANGED_COVERAGE_THRESHOLD)
 
 test-runtime-integration:
-	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run TestDockerGatewayEngineIntegration -count=1 -timeout=5m
+	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run 'TestDockerGateway(Engine|MTLSEnginePartitionAndRecovery)Integration' -count=1 -timeout=5m
 	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/agent/runtime -run TestDockerExecutorIntegration -count=1 -timeout=5m
 
 test-build-integration:

@@ -1,6 +1,6 @@
 # Deployment Worker
 
-> 正式 Deployment Worker 已进入主进程的受管生命周期，但默认关闭。当前 Docker 适配器用于验证固定 digest、mTLS、私有 Registry 认证、运行规格、健康门禁、fenced token、幂等容器替换和安全失败分类；本地真实 Engine 验证已完成，在远程 mTLS Engine、入口流量和故障注入系统验证完成前，不应视为生产就绪。
+> 正式 Deployment Worker 已进入主进程的受管生命周期，但默认关闭。当前 Docker 适配器用于验证固定 digest、mTLS、私有 Registry 认证、运行规格、健康门禁、fenced token、幂等容器替换和安全失败分类；本地真实 Engine 和仓内 mTLS 连接/分区恢复验证已完成，在物理远程 Engine、入口流量和切换窗口故障注入完成前，不应视为生产就绪。
 
 Deployment API 创建身份与目标不可变、执行状态可演进的交付记录，初始状态为 `queued`。Worker 负责消费队列并推进状态：
 
@@ -11,6 +11,26 @@ queued → preparing → deploying → succeeded
 Deployment Worker 不执行源码构建。Git-to-Deploy 由隔离 Build Worker/BuildKit 构建并推送 digest 镜像，再通过 Artifact 创建不可变 Release 后进入本 Worker。构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段创建或替换目标容器。
 
 当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。Agent Gateway 对 Worker 保持相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机；内部把 Deploy 拆为候选 stage、Server Mongo fence 验证和 activate。Agent Control Server 启用时，Agent prober 与 Gateway 配套注册；未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
+
+direct 模式的连接失败按以下边界收敛：
+
+```mermaid
+sequenceDiagram
+    participant W as Deployment Worker
+    participant T as mTLS Runtime Target
+    participant D as Docker Engine
+
+    W->>T: TLS 1.2+，验证 Server Name 并提交客户端证书
+    T->>T: 验证客户端证书链
+    T->>D: Ping / digest image inspect
+    D-->>W: 只返回本次操作结果
+    T--xW: 错误身份或网络分区
+    W->>W: 归类 credential / target_unreachable
+    Note over W: 对外不返回 PEM、Endpoint 或底层 TLS 错误
+    W->>T: 后续任务重新建连，不复用失败连接
+```
+
+仓内集成门禁把该 mTLS 边界置于 Worker 与真实 Docker API 之间：受信客户端成功，其他 CA 签发的客户端被拒绝，监听连接被主动丢弃时归类为 `target_unreachable`，恢复后使用新连接再次 Prepare 成功。它验证真实客户端栈与故障收敛，但不替代两台物理主机上的证书轮换和长链路网络测试。
 
 Worker 不再使用“全量 List 后 Update”的领取方式。Repository 的 `ClaimNext` 原子领取 `queued` 任务，或接管租约已过期的 `preparing/deploying` 任务，同时写入 worker ID、租约截止时间和递增版本。Runner 再通过带期望版本的事务更新进入 `preparing`，确保状态审计与状态写入一起提交。后续 `SaveClaimed` 同时校验 owner、租约和期望版本，阻止旧 Worker 覆盖新状态。
 
@@ -57,8 +77,8 @@ Worker 只把 Release 声明过的配置键传入容器；未声明值被忽略�
 
 生产验收前仍需补充：
 
-- 远程 mTLS Docker Engine、入口路由和端口占用集成测试；
-- 在进程退出、网络分区、租约接管和切换窗口执行故障注入；
+- 物理远程 mTLS Docker Engine 的证书签发/轮换，以及入口路由和端口占用集成测试；
+- 在进程退出、已开始部署后的网络分区、租约接管和切换窗口执行组合故障注入；
 - 量化健康门禁替换的实际停机窗口并形成支持矩阵。
 
 本地 Docker Engine 回归使用固定的
@@ -69,4 +89,4 @@ Worker 只把 Release 声明过的配置键传入容器；未声明值被忽略�
 make test-runtime-integration
 ```
 
-该测试会创建带随机前缀的临时容器，并覆盖首次安装、健康候选替换、异常候选清理且旧实例继续运行、过期 fence 拒绝切换、旧实例回退名称清理以及取消清理。它只验证本机 Engine，不替代远程证书、网络和入口流量验收。
+该门禁会创建带随机前缀的临时容器，并覆盖首次安装、健康候选替换、异常候选清理且旧实例继续运行、过期 fence 拒绝切换、旧实例回退名称清理以及取消清理；还会通过要求客户端证书的 TLS 边界访问真实 Engine，验证错误身份、连接分区、安全失败分类和恢复。后者仍是单机回环边界，不替代物理远程证书轮换、长链路网络和入口流量验收。
