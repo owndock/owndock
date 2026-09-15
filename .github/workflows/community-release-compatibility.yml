@@ -83,8 +83,10 @@ jobs:
           fi
           previous_tag=$(go run ./internal/tools/adjacentrelease \
             -current "${current_tag}" < "${tag_list}")
-          printf 'current_tag=%s\n' "${current_tag}" >> "${GITHUB_OUTPUT}"
-          printf 'current_version=%s\n' "${current_tag#v}" >> "${GITHUB_OUTPUT}"
+          {
+            printf 'current_tag=%s\n' "${current_tag}"
+            printf 'current_version=%s\n' "${current_tag#v}"
+          } >> "${GITHUB_OUTPUT}"
           if [[ -z "${previous_tag}" ]]; then
             printf 'has_previous=false\n' >> "${GITHUB_OUTPUT}"
             printf '### Community adjacent release matrix\n\n%s\n' \
@@ -92,9 +94,11 @@ jobs:
               >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
-          printf 'has_previous=true\n' >> "${GITHUB_OUTPUT}"
-          printf 'previous_tag=%s\n' "${previous_tag}" >> "${GITHUB_OUTPUT}"
-          printf 'previous_version=%s\n' "${previous_tag#v}" >> "${GITHUB_OUTPUT}"
+          {
+            printf 'has_previous=true\n'
+            printf 'previous_tag=%s\n' "${previous_tag}"
+            printf 'previous_version=%s\n' "${previous_tag#v}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Install fixed Cosign release
         if: steps.releases.outputs.has_previous == 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -207,7 +211,9 @@ jobs:
             "${CURRENT_IMAGE}" "${CURRENT_VERSION}"
           {
             printf '### Community adjacent release matrix\n\n'
+            # shellcheck disable=SC2016
             printf -- '- Previous: `%s`\n' "${PREVIOUS_TAG}"
+            # shellcheck disable=SC2016
             printf -- '- Current: `%s`\n' "${CURRENT_TAG}"
             printf -- '- Release manifests verified offline; both Server digest signatures verified\n'
             printf -- '- Lifecycle: previous start → current upgrade → previous rollback passed\n'

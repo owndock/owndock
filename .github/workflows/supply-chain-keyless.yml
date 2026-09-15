@@ -69,9 +69,11 @@ jobs:
             --filter "label=io.x-k8s.kind.cluster=${kind_cluster}" \
             --format '{{.Names}}' | head -n 1)"
           test -n "$offline_container"
-          echo "OWNDOCK_SIGSTORE_SIGNING_CONFIG=$(realpath "$signing_config")" >> "$GITHUB_ENV"
-          echo "OWNDOCK_SIGSTORE_TRUSTED_ROOT=$(realpath "$trusted_root")" >> "$GITHUB_ENV"
-          echo "OWNDOCK_SIGSTORE_OFFLINE_CONTAINER=$offline_container" >> "$GITHUB_ENV"
+          {
+            printf 'OWNDOCK_SIGSTORE_SIGNING_CONFIG=%s\n' "$(realpath "$signing_config")"
+            printf 'OWNDOCK_SIGSTORE_TRUSTED_ROOT=%s\n' "$(realpath "$trusted_root")"
+            printf 'OWNDOCK_SIGSTORE_OFFLINE_CONTAINER=%s\n' "$offline_container"
+          } >> "$GITHUB_ENV"
       - name: Verify private keyless bundle offline with OwnDock adapter
         env:
           OWNDOCK_RUN_PRIVATE_SIGSTORE_INTEGRATION: "1"

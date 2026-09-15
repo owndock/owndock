@@ -54,12 +54,12 @@ jobs:
             echo "release ${tag} already exists; refusing to rebuild it" >&2
             exit 2
           fi
-          printf 'version=%s\n' "${version}" >> "${GITHUB_OUTPUT}"
-          printf 'identity=%s\n' \
-            "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${tag}" \
-            >> "${GITHUB_OUTPUT}"
-          printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)" \
-            >> "${GITHUB_OUTPUT}"
+          {
+            printf 'version=%s\n' "${version}"
+            printf 'identity=%s\n' \
+              "https://github.com/owndock/owndock/.github/workflows/release.yml@refs/tags/${tag}"
+            printf 'build_time=%s\n' "$(git show -s --format=%cI HEAD)"
+          } >> "${GITHUB_OUTPUT}"
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: 1.26.5
@@ -261,9 +261,11 @@ jobs:
               >> "${GITHUB_STEP_SUMMARY}"
             exit 0
           fi
-          printf 'has_previous=true\n' >> "${GITHUB_OUTPUT}"
-          printf 'tag=%s\n' "${previous_tag}" >> "${GITHUB_OUTPUT}"
-          printf 'version=%s\n' "${previous_tag#v}" >> "${GITHUB_OUTPUT}"
+          {
+            printf 'has_previous=true\n'
+            printf 'tag=%s\n' "${previous_tag}"
+            printf 'version=%s\n' "${previous_tag#v}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Install fixed Cosign release
         if: steps.previous.outputs.has_previous == 'true'
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -369,7 +371,9 @@ jobs:
             "${CURRENT_IMAGE}" "${CURRENT_VERSION}"
           {
             printf '### Community pre-publish compatibility\n\n'
+            # shellcheck disable=SC2016
             printf -- '- Previous: `%s`\n' "${PREVIOUS_TAG}"
+            # shellcheck disable=SC2016
             printf -- '- Candidate: `%s`\n' "${GITHUB_REF_NAME}"
             printf -- '- Signed adjacent upgrade, rollback, and recovery passed\n'
           } >> "${GITHUB_STEP_SUMMARY}"
