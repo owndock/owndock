@@ -40,6 +40,7 @@ database:
 
 - 启动时创建连接池并 Ping Primary；失败时服务不启动；
 - 启动时获取带租约的全局锁并按版本执行 migration；已记录的同名版本会跳过，版本名称漂移会拒绝启动；
+- 首个正式版本使用 `initial_owndock_schema` v1：只接受空的 OwnDock 数据库并直接建立当前索引；非空旧开发库失败关闭，不运行回填或自动导入，也不会删除其内容；
 - 每次操作受 Client operation timeout 和调用方 context 共同约束；
 - `/readyz` 会 Ping Primary，失败时返回通用 `not_ready`，不暴露数据库错误；
 - Kratos 停止接收请求后关闭连接池；
@@ -69,35 +70,35 @@ Build Hook 保存平台、Build Configuration、精确允许 ref 和外部 `secr
 
 Owner 管理员会话接口先按 Organization 读取目标用户，再以目标 `user_id` 查询或删除 Session。单会话和全部会话撤销都在事务中写入管理员审计；跨 Organization 用户按不存在处理。当前 Owner 不能从管理员入口撤销自己的当前 Session 或批量撤销自己，避免误操作切断唯一管理入口。
 
-`ingress_rate_limits` 只保存来源/全局准入键的 SHA-256、窗口起点、计数、revision 和过期时间，不保存原始 IP、请求路径、header 或正文。Mongo 条件替换保证多个 Server 共享固定窗口；migration v31 的 TTL 索引清理过期窗口。保护状态无法读取或更新时请求失败关闭，具体代理信任与返回语义见[产品 API 入口保护](ingress-protection.md)。
+`ingress_rate_limits` 只保存来源/全局准入键的 SHA-256、窗口起点、计数、revision 和过期时间，不保存原始 IP、请求路径、header 或正文。Mongo 条件替换保证多个 Server 共享固定窗口；首发 baseline 的 TTL 索引清理过期窗口。保护状态无法读取或更新时请求失败关闭，具体代理信任与返回语义见[产品 API 入口保护](ingress-protection.md)。
 
 `user_invitations` 保存 Organization、规范化邮箱、状态、版本、到期时间和一次性 Token SHA-256 哈希。接受时使用 status/version/expiry 条件更新，并在同一事务创建 Viewer 用户、Session 和审计；成功或撤销后移除 Token hash。Token hash 唯一索引阻止碰撞，active-only TTL 索引清理过期未使用邀请，不会删除 accepted/revoked 元数据。
 
 `project_members` 保存 Organization、Project、用户、不可为 Owner 的 Project 角色和乐观锁版本。Project + 用户、Project + 邮箱均唯一，Organization + 用户 + Project 索引用于过滤用户可见 Project。Session 不保存 Project 角色；每次 Project 请求实时读取成员关系，所以降权和删除无需等待 Session 过期。
 
-Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Application、Environment 与 Runtime Target 上曾成功部署的 Release”建立回滚查询索引。自动 Deployment 额外按 Project、Artifact、Environment 和 Runtime Target 建立部分索引，并保存 `trigger_source` 与 Build 链路字段；旧记录回填为 `manual`。`deployment_cutover_sequences` 只保存部署槽位及其当前序号，不保存运行凭据；Deployment 与审计在同一事务中创建时，序号分配也处于该事务内。Runtime Inventory 把新 observation 写成独立 generation，所有声明分块完成后才在一个事务中更新显式 `present/absent` current 投影并切换 current head；open generation 先设置两小时 TTL，完成时移除当前 generation 的 TTL，上一 generation 和 absent current 项在被替换七天后回收。
+Deployment 使用 Project 范围的唯一幂等索引，并为“同一 Application、Environment 与 Runtime Target 上曾成功部署的 Release”建立回滚查询索引。自动 Deployment 额外按 Project、Artifact、Environment 和 Runtime Target 建立部分索引，并保存 `trigger_source` 与 Build 链路字段。`deployment_cutover_sequences` 只保存部署槽位及其当前序号，不保存运行凭据；Deployment 与审计在同一事务中创建时，序号分配也处于该事务内。Runtime Inventory 把新 observation 写成独立 generation，所有声明分块完成后才在一个事务中更新显式 `present/absent` current 投影并切换 current head；open generation 先设置两小时 TTL，完成时移除当前 generation 的 TTL，上一 generation 和 absent current 项在被替换七天后回收。
 
-Runtime Target 删除把 `retiring` 与最小退役上下文原子持久化：Organization、Actor、Request ID 和开始时间。migration v46 的 `status + retirement.started_at + _id` 索引支持 Server 有界扫描；最终删除与原始身份审计处于同一事务。记录在提交删除前始终可重新发现，因此 Server 重启或客户端不再重试也不会遗失已接受的退役工作。
+Runtime Target 删除把 `retiring` 与最小退役上下文原子持久化：Organization、Actor、Request ID 和开始时间。首发 baseline 的 `status + retirement.started_at + _id` 索引支持 Server 有界扫描；最终删除与原始身份审计处于同一事务。记录在提交删除前始终可重新发现，因此 Server 重启或客户端不再重试也不会遗失已接受的退役工作。
 
-Application 与 Environment 使用软退役保留业务历史。Migration v48 回填 `active` 状态，把名称唯一索引改为只约束 active 文档，并分别增加 `status + retirement.started_at + _id` 部分索引。开始退役会原子保存 Organization、Actor、Request ID 与开始时间；完成时写入 `retired_at` 并移除临时上下文。默认列表、Application/Environment 引用解析和运行配置读取只接受 active 文档，不可变 Release 历史可按已知 Application ID 继续读取。Migration v49 为活动容器 TerminalSession 回填 Application/Environment ID，并建立 active 部分索引，使资源退役可有界关闭关联会话。
+Application 与 Environment 使用软退役保留业务历史。首发 baseline 直接建立只约束 active 文档的名称唯一索引和 `status + retirement.started_at + _id` 部分索引。开始退役会原子保存 Organization、Actor、Request ID 与开始时间；完成时写入 `retired_at` 并移除临时上下文。默认列表、Application/Environment 引用解析和运行配置读取只接受 active 文档，不可变 Release 历史可按已知 Application ID 继续读取。活动容器 TerminalSession 从创建时就保存 Application/Environment ID，相关部分索引使资源退役可有界关闭关联会话。
 
 Release、Build 和 Deployment 的创建事务会 `$inc` active Application/Environment 的内部 `work_admission_revision`，容器 TerminalSession 使用独立的 `terminal_admission_revision`。这些 revision 不表达业务版本，仅用于让 MongoDB 检测父资源退役与子资源准入的并发写冲突；父状态不是 active 时更新不匹配，整个子资源与审计事务回滚。
 
-Migration v50 为 Build 建立 Organization/Project/Application/status/创建时间顺序索引。Application 退役据此每批最多读取 100 个 queued/checking_out/building/pushing/canceling Build；转入 canceling 与逐 Build 审计处于同一事务，Build Worker 写入终态后下一轮退役扫描自然推进。
+首发 baseline 为 Build 建立 Organization/Project/Application/status/创建时间顺序索引。Application 退役据此每批最多读取 100 个 queued/checking_out/building/pushing/canceling Build；转入 canceling 与逐 Build 审计处于同一事务，Build Worker 写入终态后下一轮退役扫描自然推进。
 
-Migration v51 为 Artifact 建立 Organization/Project/Application/release_status/创建时间顺序索引。退役 Worker 用它有界收敛 `release_pending`：存在以 `source_artifact_id` 唯一关联的 Release 时补记 ID，否则写入 `release_skipped`；Artifact 状态与审计原子提交。
+首发 baseline 为 Artifact 建立 Organization/Project/Application/release_status/创建时间顺序索引。退役 Worker 用它有界收敛 `release_pending`：存在以 `source_artifact_id` 唯一关联的 Release 时补记 ID，否则写入 `release_skipped`；Artifact 状态与审计原子提交。
 
-Migration v52 为现有 Evidence Job 回填显式 `active` 状态，为 Vulnerability Observation 建立 `(scanner, fresh_until, _id)` 重扫游标索引，并以 partial unique index 保证同一 Artifact 最多一个活动 `vulnerability_report` Job。迁移若发现历史数据已存在同 Artifact 的多个活动漏洞任务会失败关闭，不会任意选择或删除任务。
+Evidence Job 从创建时就保存显式 `active` 状态；首发 baseline 为 Vulnerability Observation 建立 `(scanner, fresh_until, _id)` 重扫游标索引，并以 partial unique index 保证同一 Artifact 最多一个活动 `vulnerability_report` Job。不接受缺少这些字段的开发期记录，也不执行历史任务回填。
 
-退役收敛使用 migration v47 的 Organization/Project/Runtime Target/active/时间索引有界扫描 TerminalSession。会话状态转换与逐会话审计原子提交；Runtime Inventory 则在独立事务中分批删除完全可重建的调度、批次和 current 投影。Inventory `Begin` 与 `Complete` 都复核 Target=ready，阻止已领取租约的旧 Worker 在清理后重建视图。
+退役收敛使用首发 baseline 的 Organization/Project/Runtime Target/active/时间索引有界扫描 TerminalSession。会话状态转换与逐会话审计原子提交；Runtime Inventory 则在独立事务中分批删除完全可重建的调度、批次和 current 投影。Inventory `Begin` 与 `Complete` 都复核 Target=ready，阻止已领取租约的旧 Worker 在清理后重建视图。
 
-Migration v4–31 的执行与业务索引沿用各模块版本记录；v32/v33 建立 Terminal 策略、会话、并发槽位和登录 Session 绑定，v34–43 建立 Artifact 证据、签名、漏洞与 Deployment Policy 索引，v44/v45 支持外部 Artifact 和 Registry 匿名/Basic 模式，v46 建立 Runtime Target 退役队列，v47 建立按 Target 收敛活动 TerminalSession 的索引，v48/v49 建立 Application/Environment 软退役及关联 Terminal 收敛，v50/v51 建立 Application 活动 Build 与 pending Artifact Release 收敛索引，v52 建立有界持续重扫查询与活动任务串行化约束。
+开发期 v1～v52 索引与回填链已经压平为首发 `initial_owndock_schema` v1。它只在空库上直接创建当前全部业务索引；首次正式 Release 之后才追加 OwnDock 自身版本升级 migration。未完成首发 baseline 的空库若发生创建失败，须排查根因并使用新空库重新执行；不会自动接管非空数据库。
 
 Runtime Inventory 还使用 `runtime_inventory_counters` 为每个 Runtime Target 原子分配单调 generation；多 Server 不使用本机时间判断 observation 新旧。
 
 `runtime_inventory_schedule` 为每个 Runtime Target 保存全量采集与 Event 轮询各自的下一次到期时间、短时 owner/expiry 和递增 token，以及最后安全处理的 Docker 事件时间游标。多个 Server 同时领取同类任务时只有一个原子更新成功；完成调度必须匹配 owner 和 token，旧实例不能覆盖租约接管后的结果。Event 失败时不推进游标。该 collection 不保存 endpoint、凭据引用、证书或采集错误正文。
 
-`runtime_inventory_current` 是可重建读取投影，不是另一份 Docker 事实来源；它保留最新安全资源摘要、presence、first/last seen、absent 时间和 generation。受管容器的 Project/Deployment 字段只在成功 Deployment 与候选 Label 的 Organization、Project、Application、Runtime Target 全部匹配后写入。Migration v16 建立 Project/Host 视图索引，v17 优化包含 absent 时的稳定游标排序；集成测试会检查最终索引字段顺序，防止后续迁移意外退化。`runtime_inventory_event_hints` 只保留 24 小时安全摘要，Event 只把调度提前，不能直接改 current presence。
+`runtime_inventory_current` 是可重建读取投影，不是另一份 Docker 事实来源；它保留最新安全资源摘要、presence、first/last seen、absent 时间和 generation。受管容器的 Project/Deployment 字段只在成功 Deployment 与候选 Label 的 Organization、Project、Application、Runtime Target 全部匹配后写入。首发 baseline 直接建立优化后的 Project/Host 稳定游标视图索引；集成测试会检查最终索引字段顺序，防止后续 migration 意外退化。`runtime_inventory_event_hints` 只保留 24 小时安全摘要，Event 只把调度提前，不能直接改 current presence。
 
 启动和事务写入时序见 [flows.md](flows.md)。
 

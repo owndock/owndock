@@ -266,7 +266,7 @@ MongoDB collection：
 
 `Begin` 创建的 open observation、chunk 和 resource 先设置两小时过期时间，避免 Agent 断线或 Server 重启留下永久孤儿数据。完成提交会移除当前 generation 的过期时间；切换后，上一 generation 的 observation、chunk 和 resource 设置七天过期时间。MongoDB TTL 负责最终回收。
 
-`runtime_inventory_schedule` 只保存 Target/Organization/Host 标识、全量与 Event 各自的租约 owner/token/expiry、Docker 事件游标、下一次到期时间和最近成功或失败时间，不保存 endpoint、凭据引用、证书或采集错误正文。Migration v13 为全量采集到期领取与 Host 诊断建立索引，v14 为 current presence 投影和 24 小时 Event 摘要建立唯一、读取与 TTL 索引，v15 为 Event 轮询到期与租约接管建立索引，v16 建立 Project/Host 视图索引，v17 优化其字段顺序，使默认查询与包含 absent 的稳定游标遍历都能复用索引排序。
+`runtime_inventory_schedule` 只保存 Target/Organization/Host 标识、全量与 Event 各自的租约 owner/token/expiry、Docker 事件游标、下一次到期时间和最近成功或失败时间，不保存 endpoint、凭据引用、证书或采集错误正文。首发 MongoDB 空库基线直接建立全量采集、Event 轮询、current presence 投影和 24 小时 Event 摘要所需的领取、读取、唯一与 TTL 索引；Project/Host 视图从首发起使用优化后的字段顺序，使默认查询与包含 absent 的稳定游标遍历都能复用索引排序。
 
 该保留期用于故障解释和后续 absent/history 投影，不是长期审计。Docker 日志、Stats 和高频原始 Event 不写入这些 collection：
 

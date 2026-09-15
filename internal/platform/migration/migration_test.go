@@ -25,19 +25,14 @@ func TestValidateMigrations(t *testing.T) {
 	}
 }
 
-func TestDefaultMigrationsRemainContiguous(t *testing.T) {
+func TestDefaultMigrationIsSingleInitialSchema(t *testing.T) {
 	items := Default()
-	if len(items) != 52 {
-		t.Fatalf("Default() migration count = %d, want 52", len(items))
+	if len(items) != 1 {
+		t.Fatalf("Default() migration count = %d, want 1", len(items))
 	}
-	for index, item := range items {
-		if item.Version != int64(index+1) {
-			t.Fatalf("migration[%d].Version = %d", index, item.Version)
-		}
-	}
-	last := items[len(items)-1]
-	if last.Name != "schedule_vulnerability_rescans" || last.Up == nil {
-		t.Fatalf("latest migration = %+v", last)
+	item := items[0]
+	if item.Version != 1 || item.Name != "initial_owndock_schema" || item.Up == nil {
+		t.Fatalf("initial migration = %+v", item)
 	}
 }
 

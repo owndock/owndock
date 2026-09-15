@@ -64,4 +64,4 @@ Application 的非终态 Build 按最多 100 条的批次进入 `canceling`，�
 
 Release、Build 和 Deployment 创建也遵循相同的父资源事务围栏：Release/Build 写 active Application 的 `work_admission_revision`，Deployment 同时写 active Application 与 Environment，再创建子记录和审计。MongoDB 写冲突保证“新工作提交”和 `active → retiring` 只能有一个先完成；退役先完成时新工作失败，工作先完成时重试后的退役扫描一定能发现并收敛它。幂等重放已有不可变记录不创建新工作，因此仍可读取原结果。
 
-MongoDB migration v48 为 Application/Environment 增加状态、持久退役队列和 active-only 名称唯一索引；v49 为活动容器会话回填 Application/Environment 归属，并建立两类有界收敛索引；v50/v51 建立 Application 活动 Build 与 pending Artifact Release 有界收敛索引。
+首发 MongoDB 空库基线直接建立 Application/Environment 的持久退役队列、active-only 名称唯一索引、活动容器会话关联索引，以及 Application 活动 Build 与 pending Artifact Release 的有界收敛索引。资源和会话从创建时保存当前字段，不执行历史回填。

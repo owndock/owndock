@@ -117,4 +117,4 @@ sequenceDiagram
 
 这些边界不能通过给 OwnDock 进程设置环境变量代替。不同 Registry 品牌、中国大陆网络和完全离线的客户等价矩阵仍属于生产验收范围。
 
-MongoDB v45 会把升级前已有的 Registry Credential 明确回填为 `basic`。新建匿名记录不会保存 `username` 或 `password_ref`。
+首发 MongoDB 空库基线直接建立 Registry Credential 所需索引。Credential 从创建时就明确选择 `anonymous` 或 `basic`；匿名记录不会保存 `username` 或 `password_ref`，不执行旧记录回填。

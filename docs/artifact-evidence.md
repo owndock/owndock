@@ -402,7 +402,7 @@ product:
   vulnerability_rescan_candidate_limit: 100
 ```
 
-`poll_interval` 是发现过期 Observation 的频率，`retry_interval` 是失败任务可再次入队的时间桶，不是扫描结果有效期。成功扫描会写入新的 `fresh_until`，在它到期前不会重复调度。候选按 `(fresh_until, id)` 使用有界游标轮转，单次最多 1000 条；多个 Server 副本可以同时运行，MongoDB migration v52 的 partial unique index 保证同一 Artifact 最多只有一个活动漏洞任务。手动请求若撞上活动任务，会复用该任务 ID。
+`poll_interval` 是发现过期 Observation 的频率，`retry_interval` 是失败任务可再次入队的时间桶，不是扫描结果有效期。成功扫描会写入新的 `fresh_until`，在它到期前不会重复调度。候选按 `(fresh_until, id)` 使用有界游标轮转，单次最多 1000 条；多个 Server 副本可以同时运行，首发 MongoDB 空库基线的 partial unique index 保证同一 Artifact 最多只有一个活动漏洞任务。手动请求若撞上活动任务，会复用该任务 ID。
 
 ```mermaid
 sequenceDiagram

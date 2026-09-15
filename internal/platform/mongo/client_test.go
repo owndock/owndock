@@ -245,6 +245,35 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("replica set name = %v, want rs0", hello["setName"])
 	}
 	assertMongoFeatureCompatibilityVersion(t, ctx, client.Database().Client(), "8.3")
+	occupied := client.Database().Client().Database("owndock_nonempty_rejection")
+	if _, err := occupied.Collection("projects").InsertOne(ctx, bson.D{{Key: "_id", Value: "existing-project"}}); err != nil {
+		t.Fatalf("seed occupied database: %v", err)
+	}
+	if err := migration.NewRunner(occupied, "integration-test").Run(ctx, migration.Default()); err == nil ||
+		!strings.Contains(err.Error(), "requires an empty database") {
+		t.Fatalf("occupied database baseline error = %v", err)
+	}
+	if count, err := occupied.Collection("projects").CountDocuments(ctx, bson.D{}); err != nil || count != 1 {
+		t.Fatalf("occupied database content changed = %d/%v", count, err)
+	}
+	runner := migration.NewRunner(client.Database(), "integration-test")
+	if err := runner.Run(ctx, migration.Default()); err != nil {
+		t.Fatalf("run initial schema: %v", err)
+	}
+	if err := runner.Run(ctx, migration.Default()); err != nil {
+		t.Fatalf("rerun initial schema: %v", err)
+	}
+	var recorded struct {
+		Name string `bson:"name"`
+	}
+	if err := client.Database().Collection("schema_migrations").FindOne(
+		ctx, bson.D{{Key: "version", Value: 1}},
+	).Decode(&recorded); err != nil || recorded.Name != "initial_owndock_schema" {
+		t.Fatalf("initial schema migration record = %+v/%v", recorded, err)
+	}
+	if count, err := client.Database().Collection("schema_migrations").CountDocuments(ctx, bson.D{}); err != nil || count != 1 {
+		t.Fatalf("initial schema migration count = %d/%v", count, err)
+	}
 	assertMongoBSONStorageContract(t, ctx, client.Database())
 
 	session, err := client.Database().Client().StartSession()
@@ -268,169 +297,6 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("transaction result count = %d, want 1", count)
 	}
 
-	if _, err := client.Database().Collection("projects").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-project"},
-		{Key: "organization_id", Value: "legacy-organization"},
-	}); err != nil {
-		t.Fatalf("seed legacy project: %v", err)
-	}
-	if _, err := client.Database().Collection("product_applications").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-application"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "name", Value: "Legacy Application"},
-		{Key: "name_normalized", Value: "legacy application"},
-		{Key: "created_by", Value: "legacy-user"},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy Application: %v", err)
-	}
-	if _, err := client.Database().Collection("environments").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-environment"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "name", Value: "Legacy Environment"},
-		{Key: "name_normalized", Value: "legacy environment"},
-		{Key: "stage", Value: "development"},
-		{Key: "created_by", Value: "legacy-user"},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy Environment: %v", err)
-	}
-	if _, err := client.Database().Collection("releases").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-release"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "application_id", Value: "legacy-application"},
-		{Key: "image_digest", Value: "registry.example.com/api@sha256:" + strings.Repeat("f", 64)},
-	}); err != nil {
-		t.Fatalf("seed legacy release: %v", err)
-	}
-	if _, err := client.Database().Collection("artifacts").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-artifact"},
-		{Key: "organization_id", Value: "legacy-organization"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "application_id", Value: "legacy-application"},
-		{Key: "build_id", Value: "legacy-build"},
-		{Key: "build_configuration_id", Value: "legacy-build-configuration"},
-		{Key: "registry_credential_id", Value: "legacy-registry"},
-		{Key: "image_repository", Value: "registry.example.com/team/legacy"},
-		{Key: "image_digest", Value: "registry.example.com/team/legacy@sha256:" + strings.Repeat("e", 64)},
-		{Key: "target_platform", Value: "linux/amd64"},
-		{Key: "automatic_deployments", Value: bson.A{}},
-		{Key: "release_status", Value: "available"},
-		{Key: "version", Value: uint64(1)},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy Artifact: %v", err)
-	}
-	if _, err := client.Database().Collection("registry_credentials").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-registry"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "name", Value: "Legacy Registry"},
-		{Key: "name_normalized", Value: "legacy registry"},
-		{Key: "server", Value: "registry.example.com"},
-		{Key: "username", Value: "legacy-robot"},
-		{Key: "password_ref", Value: "secret://legacy-registry"},
-		{Key: "created_by", Value: "legacy-user"},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy Registry Credential: %v", err)
-	}
-	if _, err := client.Database().Collection("deployments").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-deployment"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "application_id", Value: "legacy-application"},
-		{Key: "environment_id", Value: "legacy-environment"},
-		{Key: "idempotency_key", Value: "legacy-key"},
-		{Key: "status", Value: "building"},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy deployment: %v", err)
-	}
-	if _, err := client.Database().Collection("terminal_sessions").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-terminal-session"},
-		{Key: "organization_id", Value: "legacy-organization"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "kind", Value: "container"},
-		{Key: "authentication_session_id", Value: "legacy-authentication-session"},
-		{Key: "deployment_id", Value: "legacy-deployment"},
-		{Key: "active", Value: true},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy TerminalSession: %v", err)
-	}
-	if _, err := client.Database().Collection("deployments").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-failed-deployment"},
-		{Key: "project_id", Value: "legacy-project"},
-		{Key: "idempotency_key", Value: "legacy-failed-key"},
-		{Key: "status", Value: "failed"},
-		{Key: "created_at", Value: time.Now().UTC()},
-	}); err != nil {
-		t.Fatalf("seed legacy failed deployment: %v", err)
-	}
-	legacyInventoryCompletedAt := time.Now().UTC().Add(-time.Minute)
-	if _, err := client.Database().Collection("runtime_inventory_heads").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-inventory-target"},
-		{Key: "organization_id", Value: "legacy-organization"},
-		{Key: "managed_host_id", Value: "legacy-inventory-host"},
-		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
-		{Key: "observation_id", Value: "legacy-inventory-observation"},
-		{Key: "generation", Value: uint64(9)},
-		{Key: "started_at", Value: legacyInventoryCompletedAt.Add(-time.Second)},
-		{Key: "completed_at", Value: legacyInventoryCompletedAt},
-	}); err != nil {
-		t.Fatalf("seed legacy runtime inventory head: %v", err)
-	}
-	if _, err := client.Database().Collection("runtime_inventory_resources").InsertOne(ctx, bson.D{
-		{Key: "_id", Value: "legacy-inventory-resource-document"},
-		{Key: "observation_id", Value: "legacy-inventory-observation"},
-		{Key: "organization_id", Value: "legacy-organization"},
-		{Key: "managed_host_id", Value: "legacy-inventory-host"},
-		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
-		{Key: "kind", Value: "container"},
-		{Key: "runtime_id", Value: "legacy-inventory-container"},
-		{Key: "name", Value: "legacy-api"},
-		{Key: "managed", Value: false},
-		{Key: "container", Value: bson.D{{Key: "state", Value: "running"}}},
-		{Key: "labels", Value: bson.D{}},
-		{Key: "attributes", Value: bson.D{}},
-		{Key: "ports", Value: bson.A{}},
-		{Key: "mounts", Value: bson.A{}},
-		{Key: "networks", Value: bson.A{}},
-		{Key: "observed_at", Value: legacyInventoryCompletedAt},
-		{Key: "schema_version", Value: 1},
-	}); err != nil {
-		t.Fatalf("seed legacy runtime inventory resource: %v", err)
-	}
-	runner := migration.NewRunner(client.Database(), "integration-test")
-	if err := runner.Run(ctx, migration.Default()); err != nil {
-		t.Fatalf("run migrations: %v", err)
-	}
-	if err := runner.Run(ctx, migration.Default()); err != nil {
-		t.Fatalf("rerun migrations: %v", err)
-	}
-	for collection, resourceID := range map[string]string{
-		"product_applications": "legacy-application",
-		"environments":         "legacy-environment",
-	} {
-		var document struct {
-			Status string `bson:"status"`
-		}
-		if err := client.Database().Collection(collection).FindOne(
-			ctx, bson.D{{Key: "_id", Value: resourceID}},
-		).Decode(&document); err != nil || document.Status != "active" {
-			t.Fatalf("%s lifecycle backfill = %+v/%v", collection, document, err)
-		}
-	}
-	var legacyTerminalScope struct {
-		ApplicationID string `bson:"application_id"`
-		EnvironmentID string `bson:"environment_id"`
-	}
-	if err := client.Database().Collection("terminal_sessions").FindOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-terminal-session"}},
-	).Decode(&legacyTerminalScope); err != nil ||
-		legacyTerminalScope.ApplicationID != "legacy-application" ||
-		legacyTerminalScope.EnvironmentID != "legacy-environment" {
-		t.Fatalf("legacy TerminalSession product scope = %+v/%v", legacyTerminalScope, err)
-	}
 	assertRuntimeInventoryViewIndexes(t, ctx, client.Database())
 	assertBuildLogIndexes(t, ctx, client.Database())
 	assertBuildRetirementIndex(t, ctx, client.Database())
@@ -459,122 +325,9 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	verifyVulnerabilityWaiverIntegration(t, ctx, client.Database())
 	verifyDeploymentPolicyIntegration(t, ctx, client.Database())
 	verifyExternalArtifactPersistenceIntegration(t, ctx, client.Database())
-	var migratedArtifact struct {
-		Origin               string `bson:"origin"`
-		Producer             string `bson:"producer"`
-		ProducerVerification string `bson:"producer_verification"`
-	}
-	if err := client.Database().Collection("artifacts").FindOne(ctx,
-		bson.D{{Key: "_id", Value: "legacy-artifact"}}).Decode(&migratedArtifact); err != nil {
-		t.Fatalf("read migrated Artifact: %v", err)
-	}
-	if migratedArtifact.Origin != "owndock_build" || migratedArtifact.Producer != "owndock-build-worker" ||
-		migratedArtifact.ProducerVerification != "verified" {
-		t.Fatalf("migrated Artifact producer = %+v", migratedArtifact)
-	}
-	var migratedRegistryCredential struct {
-		AuthenticationMode registryauth.Mode `bson:"authentication_mode"`
-	}
-	if err := client.Database().Collection("registry_credentials").FindOne(ctx,
-		bson.D{{Key: "_id", Value: "legacy-registry"}}).Decode(&migratedRegistryCredential); err != nil {
-		t.Fatalf("read migrated Registry Credential: %v", err)
-	}
-	if migratedRegistryCredential.AuthenticationMode != registryauth.ModeBasic {
-		t.Fatalf("migrated Registry authentication mode = %q", migratedRegistryCredential.AuthenticationMode)
-	}
-	var backfilledInventory bson.M
-	if err := client.Database().Collection("runtime_inventory_current").FindOne(ctx, bson.D{
-		{Key: "runtime_target_id", Value: "legacy-inventory-target"},
-		{Key: "runtime_id", Value: "legacy-inventory-container"},
-	}).Decode(&backfilledInventory); err != nil {
-		t.Fatalf("find backfilled runtime inventory current state: %v", err)
-	}
-	if backfilledInventory["presence"] != "present" ||
-		backfilledInventory["generation"] != int64(9) ||
-		backfilledInventory["first_seen_at"] == nil {
-		t.Fatalf("backfilled runtime inventory current state = %#v", backfilledInventory)
-	}
-	for _, collection := range []string{
-		"runtime_inventory_heads", "runtime_inventory_resources", "runtime_inventory_current",
-	} {
-		if _, err := client.Database().Collection(collection).DeleteMany(ctx, bson.D{
-			{Key: "runtime_target_id", Value: "legacy-inventory-target"},
-		}); err != nil {
-			t.Fatalf("clean legacy runtime inventory %s: %v", collection, err)
-		}
-	}
 	verifyRuntimeInventoryIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryViewsIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryScheduleIntegration(t, ctx, client.Database())
-	var migratedDeployment struct {
-		OrganizationID  string `bson:"organization_id"`
-		Status          string `bson:"status"`
-		TriggerSource   string `bson:"trigger_source"`
-		CutoverSequence uint64 `bson:"cutover_sequence"`
-	}
-	if err := client.Database().Collection("deployments").FindOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-deployment"}},
-	).Decode(&migratedDeployment); err != nil {
-		t.Fatalf("read migrated deployment: %v", err)
-	}
-	if migratedDeployment.OrganizationID != "legacy-organization" ||
-		migratedDeployment.Status != "preparing" ||
-		migratedDeployment.TriggerSource != "manual" ||
-		migratedDeployment.CutoverSequence == 0 {
-		t.Fatalf("migrated deployment = %+v", migratedDeployment)
-	}
-	var migratedFailure struct {
-		OrganizationID  string `bson:"organization_id"`
-		FailureCategory string `bson:"failure_category"`
-	}
-	if err := client.Database().Collection("deployments").FindOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-failed-deployment"}},
-	).Decode(&migratedFailure); err != nil {
-		t.Fatalf("read migrated failed deployment: %v", err)
-	}
-	if migratedFailure.OrganizationID != "legacy-organization" ||
-		migratedFailure.FailureCategory != "unknown" {
-		t.Fatalf("migrated failed deployment = %+v", migratedFailure)
-	}
-	var migratedRelease struct {
-		RuntimeSpec struct {
-			Resources struct {
-				CPUMilli    int64 `bson:"cpu_milli"`
-				MemoryBytes int64 `bson:"memory_bytes"`
-			} `bson:"resources"`
-		} `bson:"runtime_spec"`
-	}
-	if err := client.Database().Collection("releases").FindOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-release"}},
-	).Decode(&migratedRelease); err != nil {
-		t.Fatalf("read migrated release: %v", err)
-	}
-	if migratedRelease.RuntimeSpec.Resources.CPUMilli != runtimespec.DefaultCPUMilli ||
-		migratedRelease.RuntimeSpec.Resources.MemoryBytes != runtimespec.DefaultMemoryBytes {
-		t.Fatalf("migrated release = %+v", migratedRelease)
-	}
-	if _, err := client.Database().Collection("deployments").DeleteMany(
-		ctx, bson.D{{Key: "_id", Value: bson.D{{Key: "$in", Value: bson.A{
-			"legacy-deployment", "legacy-failed-deployment",
-		}}}}},
-	); err != nil {
-		t.Fatalf("delete legacy deployment fixtures: %v", err)
-	}
-	if _, err := client.Database().Collection("projects").DeleteOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-project"}},
-	); err != nil {
-		t.Fatalf("delete legacy project fixture: %v", err)
-	}
-	if _, err := client.Database().Collection("releases").DeleteOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-release"}},
-	); err != nil {
-		t.Fatalf("delete legacy release fixture: %v", err)
-	}
-	if _, err := client.Database().Collection("artifacts").DeleteOne(
-		ctx, bson.D{{Key: "_id", Value: "legacy-artifact"}},
-	); err != nil {
-		t.Fatalf("delete legacy Artifact fixture: %v", err)
-	}
 	auditStore := platformaudit.NewMongoStore(client.Database())
 	passwords, err := identitydata.NewPasswordHasher()
 	if err != nil {
@@ -4379,16 +4132,33 @@ func verifyRuntimeInventoryScheduleIntegration(
 	database *drivermongo.Database,
 ) {
 	t.Helper()
+	const organizationID = "inventory-schedule-organization"
+	const projectID = "inventory-schedule-project"
+	if _, err := database.Collection("projects").InsertOne(ctx, bson.D{
+		{Key: "_id", Value: projectID},
+		{Key: "organization_id", Value: organizationID},
+	}); err != nil {
+		t.Fatalf("seed runtime inventory schedule Project: %v", err)
+	}
+	defer func() {
+		for _, item := range []struct{ collection, id string }{
+			{"runtime_targets", "inventory-schedule-target"},
+			{"managed_hosts", "inventory-schedule-host"},
+			{"projects", projectID},
+		} {
+			_, _ = database.Collection(item.collection).DeleteOne(ctx, bson.D{{Key: "_id", Value: item.id}})
+		}
+	}()
 	if _, err := database.Collection("managed_hosts").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "inventory-schedule-host"},
-		{Key: "organization_id", Value: "legacy-organization"},
+		{Key: "organization_id", Value: organizationID},
 		{Key: "status", Value: managedhostbiz.StatusOnline},
 	}); err != nil {
 		t.Fatalf("seed runtime inventory schedule host: %v", err)
 	}
 	if _, err := database.Collection("runtime_targets").InsertOne(ctx, bson.D{
 		{Key: "_id", Value: "inventory-schedule-target"},
-		{Key: "project_id", Value: "legacy-project"},
+		{Key: "project_id", Value: projectID},
 		{Key: "managed_host_id", Value: "inventory-schedule-host"},
 		{Key: "connection_mode", Value: runtimeaccess.ModeDirectDocker},
 		{Key: "endpoint", Value: "tcp://runtime.example:2376"},
@@ -4412,7 +4182,7 @@ func verifyRuntimeInventoryScheduleIntegration(
 		}
 	}
 	if target.RuntimeTargetID == "" ||
-		target.OrganizationID != "legacy-organization" {
+		target.OrganizationID != organizationID {
 		t.Fatalf("runtime inventory schedule target = %+v", target)
 	}
 	verifyConcurrentInventoryRunners(t, ctx, database, repository)
