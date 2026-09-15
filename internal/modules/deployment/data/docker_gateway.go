@@ -220,8 +220,10 @@ func (g *DockerGateway) Deploy(
 	if _, err := engine.ContainerRename(
 		ctx, candidateID, mobyclient.ContainerRenameOptions{NewName: plan.ContainerName},
 	); err != nil {
-		g.restorePrevious(previousID, plan, engine)
+		// The daemon may have applied the rename before its response was lost.
+		// Remove by candidate ID first so the stable name is free for rollback.
 		g.removeCandidate(candidateID, engine)
+		g.restorePrevious(previousID, plan, engine)
 		return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 	}
 	if previousID != "" {

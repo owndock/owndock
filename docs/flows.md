@@ -542,7 +542,7 @@ sequenceDiagram
 
 ## 部分实现：从 Release 到 Docker Deployment
 
-下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换和 Agent 两阶段部署/取消，单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令；远程 mTLS Engine、双主机断线/过期 fence、网络层延迟、实际入口流量和故障注入系统测试尚未完成，因此仍不是生产闭环。
+下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换、Agent 两阶段部署/取消，以及 mTLS Docker API 在切换窗口第二次重命名被拒绝或已生效但响应丢失时恢复旧稳定容器、清理候选并重试成功；单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令。物理远程 Engine、实际入口流量、双主机断线/过期 fence 与网络层延迟系统测试仍未完成，因此仍不是生产闭环。
 
 ```mermaid
 sequenceDiagram
@@ -626,5 +626,5 @@ stateDiagram-v2
 
 - 当前正式持久化资源：Organization、User、User Invitation、Session、Managed Host、Agent Enrollment、Agent Identity、Project、Project Member、Project Application（含可选 Template 快照）、Repository Credential、Source Repository、Build Configuration、Build Trigger、Build Hook、Webhook Delivery、Build（含状态/lease/fence）、Registry Credential、Environment、Release、Runtime Target、Deployment、Audit Event；内置 Template Catalog 随 Server 版本只读发布。
 - Runtime Target 只保存连接元数据和 `credential_ref`，不保存凭据正文；显式探测会更新 `ready`、`unreachable` 或 `credential_error` 及探测时间。
-- Git 自建 CA/代理矩阵、远程 mTLS Docker Engine、入口流量和故障注入系统测试仍是后续纵向切片；只读内置 Template 与 Application 脱钩快照已经落地。独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
+- Git 自建 CA/代理矩阵、物理远程 mTLS Docker Engine、入口流量和网络层故障注入系统测试仍是后续纵向切片；本地 mTLS Docker API 切换失败/恢复门禁已加入 `make test-runtime-integration`。只读内置 Template 与 Application 脱钩快照已经落地。独立 Build Worker 的固定 Git HTTPS/SSH checkout、rootless BuildKit/Registry push、有界脱敏日志、Artifact/Release 交接与 Build 控制面队列协议已完成，基础 Deployment Worker 与 Docker 执行默认关闭。
 - 早期顶层 Application、Environment、Deployment 样例路由已经删除；所有同名产品资源仅通过正式 Project 范围 API 提供。

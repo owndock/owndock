@@ -214,6 +214,83 @@ func TestDockerGatewayMTLSEnginePartitionAndRecoveryIntegration(t *testing.T) {
 	}
 }
 
+func TestDockerGatewayMTLSCutoverRenameFailureAndRecoveryIntegration(t *testing.T) {
+	if os.Getenv("OWNDOCK_RUN_DOCKER_INTEGRATION") != "1" {
+		t.Skip("set OWNDOCK_RUN_DOCKER_INTEGRATION=1 to run the Docker Engine integration test")
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+	inspectionClient, err := localDockerClient()
+	if err != nil {
+		t.Fatalf("create Docker client: %v", err)
+	}
+	defer func() { _ = inspectionClient.Close() }()
+	if _, err := inspectionClient.ServerVersion(ctx, mobyclient.ServerVersionOptions{}); err != nil {
+		t.Fatalf("query Docker Engine version: %v", err)
+	}
+
+	pki := newDockerIntegrationPKI(t)
+	boundary := newDockerMTLSBoundary(t, inspectionClient.DaemonHost(), pki)
+	connection, err := runtimeaccess.NewDirectDocker(
+		"", "tcp://"+boundary.address(), pki.serverName, "secret://runtime-integration",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credential := biz.RuntimeCredential{DirectDocker: &biz.DirectDockerCredential{
+		CACertificate: pki.caCertificate, ClientCertificate: pki.clientCertificate,
+		ClientKey: pki.clientKey,
+	}}
+	stableName := "owndock-cutover-integration-" + strconv.FormatInt(time.Now().UnixNano(), 36)
+	healthCommand := []string{"/bin/sh", "-c", "wget -q -O /dev/null http://127.0.0.1/"}
+	first := integrationExecutionPlan(stableName, "deployment-cutover-first", healthCommand)
+	first.TargetConnection = connection
+	second := integrationExecutionPlan(stableName, "deployment-cutover-second", healthCommand)
+	second.TargetConnection = connection
+	second.CutoverSequence = 2
+	t.Cleanup(func() {
+		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cleanupCancel()
+		for _, name := range []string{stableName, candidateContainerName(first),
+			previousContainerName(first), candidateContainerName(second), previousContainerName(second)} {
+			_, _ = inspectionClient.ContainerRemove(cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true})
+		}
+	})
+
+	gateway := NewDockerGateway()
+	gateway.pollInterval = 100 * time.Millisecond
+	if err := gateway.Deploy(ctx, first, credential); err != nil {
+		t.Fatalf("deploy first through mTLS boundary: %v", err)
+	}
+	assertRunningDeployment(t, ctx, inspectionClient, stableName, first.DeploymentID)
+
+	// The first rename moves the old container aside; fault the second rename
+	// inside the same real Docker cutover, then permit rollback requests.
+	boundary.rejectRenameNumber.Store(boundary.renameRequests.Load() + 2)
+	assertDockerIntegrationFailure(t, gateway.Deploy(ctx, second, credential), biz.FailureRuntime)
+	assertRunningDeployment(t, ctx, inspectionClient, stableName, first.DeploymentID)
+	assertContainerMissing(t, ctx, inspectionClient, candidateContainerName(second))
+	assertContainerMissing(t, ctx, inspectionClient, previousContainerName(second))
+
+	// The daemon now applies the candidate rename, but the mTLS boundary
+	// discards its successful response. The candidate may already own the
+	// stable name when the Gateway begins rollback.
+	boundary.loseRenameNumber.Store(boundary.renameRequests.Load() + 2)
+	assertDockerIntegrationFailure(t, gateway.Deploy(ctx, second, credential), biz.FailureRuntime)
+	if boundary.lostResponses.Load() != 1 {
+		t.Fatal("mTLS boundary did not lose an applied rename response")
+	}
+	assertRunningDeployment(t, ctx, inspectionClient, stableName, first.DeploymentID)
+	assertContainerMissing(t, ctx, inspectionClient, candidateContainerName(second))
+	assertContainerMissing(t, ctx, inspectionClient, previousContainerName(second))
+
+	if err := gateway.Deploy(ctx, second, credential); err != nil {
+		t.Fatalf("retry healthy cutover after boundary recovery: %v", err)
+	}
+	assertRunningDeployment(t, ctx, inspectionClient, stableName, second.DeploymentID)
+	assertContainerMissing(t, ctx, inspectionClient, previousContainerName(second))
+}
+
 type dockerIntegrationPKI struct {
 	serverName                 string
 	caCertificate              []byte
@@ -312,6 +389,10 @@ type dockerMTLSBoundary struct {
 	server                *httptest.Server
 	partitioned           atomic.Bool
 	authenticatedRequests atomic.Uint64
+	renameRequests        atomic.Uint64
+	rejectRenameNumber    atomic.Uint64
+	loseRenameNumber      atomic.Uint64
+	lostResponses         atomic.Uint64
 }
 
 type dockerPartitionListener struct {
@@ -356,6 +437,27 @@ func newDockerMTLSBoundary(
 			return
 		}
 		boundary.authenticatedRequests.Add(1)
+		if strings.Contains(r.URL.Path, "/containers/") && strings.HasSuffix(r.URL.Path, "/rename") {
+			count := boundary.renameRequests.Add(1)
+			if count == boundary.rejectRenameNumber.Load() {
+				boundary.rejectRenameNumber.Store(0)
+				http.Error(w, "injected cutover rename failure", http.StatusServiceUnavailable)
+				return
+			}
+			if count == boundary.loseRenameNumber.Load() {
+				boundary.loseRenameNumber.Store(0)
+				backendResponse := httptest.NewRecorder()
+				proxy.ServeHTTP(backendResponse, r)
+				if backendResponse.Code >= 200 && backendResponse.Code < 300 {
+					boundary.lostResponses.Add(1)
+					http.Error(w, "injected cutover response loss", http.StatusBadGateway)
+					return
+				}
+				w.WriteHeader(backendResponse.Code)
+				_, _ = w.Write(backendResponse.Body.Bytes())
+				return
+			}
+		}
 		proxy.ServeHTTP(w, r)
 	}))
 	server.Listener = dockerPartitionListener{Listener: server.Listener, partitioned: &boundary.partitioned}
