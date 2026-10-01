@@ -21,6 +21,7 @@ func TestHTTPApplicationRouteLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	useCase.WithRetirement(repository, routeRetirerStub{})
 	handler := NewHTTP(useCase)
 	principal := security.Principal{UserID: "user-1", OrganizationID: "organization-1",
 		SessionID: "session-1", Role: security.RoleMaintainer}
@@ -62,6 +63,10 @@ func TestHTTPApplicationRouteLifecycle(t *testing.T) {
 	}
 	if replay := exchange(http.MethodPatch, "/api/v1/projects/project-1/application-routes/route-1", updateBody); replay.Code != http.StatusConflict {
 		t.Fatalf("stale update status = %d: %s", replay.Code, replay.Body.String())
+	}
+	deleted := exchange(http.MethodDelete, "/api/v1/projects/project-1/application-routes/route-1", "")
+	if deleted.Code != http.StatusAccepted || !strings.Contains(deleted.Body.String(), `"status":"retiring"`) {
+		t.Fatalf("delete status = %d: %s", deleted.Code, deleted.Body.String())
 	}
 	invalidCreate := strings.TrimSuffix(createBody, "}") + `,"expected_version":1}`
 	if response := exchange(http.MethodPost, "/api/v1/projects/project-1/application-routes", invalidCreate); response.Code != http.StatusUnprocessableEntity {
@@ -106,6 +111,12 @@ func (routeReferencesStub) Resolve(context.Context, string, string, string, stri
 
 type routeRepositoryStub struct{ item biz.ApplicationRoute }
 
+type routeRetirerStub struct{}
+
+func (routeRetirerStub) Retire(context.Context, string) (bool, error) {
+	return false, biz.ErrRetirementPending
+}
+
 func (r *routeRepositoryStub) Create(_ context.Context, item biz.ApplicationRoute) (biz.ApplicationRoute, error) {
 	r.item = item
 	return item, nil
@@ -125,4 +136,16 @@ func (r *routeRepositoryStub) Save(_ context.Context, item biz.ApplicationRoute,
 	}
 	r.item = item
 	return item, nil
+}
+func (r *routeRepositoryStub) ListRetiring(context.Context, int64) ([]biz.ApplicationRoute, error) {
+	if r.item.Status == biz.StatusRetiring {
+		return []biz.ApplicationRoute{r.item}, nil
+	}
+	return nil, nil
+}
+func (r *routeRepositoryStub) ListByProductResource(context.Context, string, string, string, string) ([]biz.ApplicationRoute, error) {
+	return nil, nil
+}
+func (r *routeRepositoryStub) ListByRuntimeTarget(context.Context, string, string, string) ([]biz.ApplicationRoute, error) {
+	return nil, nil
 }

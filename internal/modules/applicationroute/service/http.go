@@ -160,6 +160,19 @@ func (s *HTTP) item(w http.ResponseWriter, r *http.Request, principal security.P
 			return
 		}
 		httpx.JSON(w, http.StatusOK, responseFromDomain(item))
+	case http.MethodDelete:
+		completed, err := s.useCase.Delete(
+			r.Context(), principal, projectID, routeID,
+			httpx.RequestIDFromContext(r.Context()),
+		)
+		if writeError(w, r, err) {
+			return
+		}
+		if completed {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		httpx.JSON(w, http.StatusAccepted, map[string]string{"status": "retiring"})
 	default:
 		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
 	}
@@ -195,8 +208,14 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) bool {
 		httpx.ErrorRequest(w, r, http.StatusConflict, "application_route_conflict")
 	case errors.Is(err, biz.ErrRouteLimitExceeded):
 		httpx.ErrorRequest(w, r, http.StatusConflict, "application_route_limit_exceeded")
-	case errors.Is(err, biz.ErrUnavailable):
+	case errors.Is(err, biz.ErrUnavailable), errors.Is(err, biz.ErrRetirementUnavailable),
+		errors.Is(err, biz.ErrGatewayUnavailable):
 		httpx.ErrorRequest(w, r, http.StatusServiceUnavailable, "application_route_unavailable")
+	case errors.Is(err, biz.ErrRetirementPending):
+		httpx.JSON(w, http.StatusAccepted, map[string]string{"status": "retiring"})
+	case errors.Is(err, biz.ErrRetirementConflict), errors.Is(err, biz.ErrGatewayFenceConflict),
+		errors.Is(err, biz.ErrGatewayFenceStale):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "application_route_conflict")
 	default:
 		httpx.ErrorRequest(w, r, http.StatusInternalServerError, "internal_error")
 	}

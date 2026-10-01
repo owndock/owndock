@@ -108,6 +108,15 @@ type Observation struct {
 	ObservedAt        time.Time
 }
 
+// Retirement preserves the identity of the accepted delete request so a
+// worker can resume gateway cleanup after a process restart without losing
+// audit attribution.
+type Retirement struct {
+	ActorID   string
+	RequestID string
+	StartedAt time.Time
+}
+
 type ApplicationRoute struct {
 	ID              string
 	OrganizationID  string
@@ -122,6 +131,7 @@ type ApplicationRoute struct {
 	Revision        uint64
 	Version         uint64
 	Observation     *Observation
+	Retirement      *Retirement
 	FailureCode     FailureCode
 	CreatedBy       string
 	UpdatedBy       string
@@ -143,6 +153,7 @@ type Input struct {
 	Revision        uint64
 	Version         uint64
 	Observation     *Observation
+	Retirement      *Retirement
 	FailureCode     FailureCode
 	CreatedBy       string
 	UpdatedBy       string
@@ -164,8 +175,9 @@ func NewApplicationRoute(input Input) (ApplicationRoute, error) {
 		EnvironmentID: strings.TrimSpace(input.EnvironmentID), RuntimeTargetID: strings.TrimSpace(input.RuntimeTargetID),
 		Hostname: normalizeHostname(input.Hostname), PortName: strings.TrimSpace(input.PortName),
 		TLSMode: input.TLSMode, Status: input.Status, Revision: input.Revision, Version: input.Version,
-		Observation: cloneObservation(input.Observation), FailureCode: input.FailureCode,
-		CreatedBy: strings.TrimSpace(input.CreatedBy), UpdatedBy: strings.TrimSpace(input.UpdatedBy),
+		Observation: cloneObservation(input.Observation), Retirement: cloneRetirement(input.Retirement),
+		FailureCode: input.FailureCode,
+		CreatedBy:   strings.TrimSpace(input.CreatedBy), UpdatedBy: strings.TrimSpace(input.UpdatedBy),
 		CreatedAt: input.CreatedAt.UTC(), UpdatedAt: input.UpdatedAt.UTC(),
 	}
 	if !validID(route.ID) || !validID(route.OrganizationID) || !validID(route.ProjectID) ||
@@ -180,11 +192,35 @@ func NewApplicationRoute(input Input) (ApplicationRoute, error) {
 	if !validObservation(route) {
 		return ApplicationRoute{}, ErrInvalidRoute
 	}
+	if !validRetirement(route) {
+		return ApplicationRoute{}, ErrInvalidRoute
+	}
 	if route.Status == StatusDegraded && !route.FailureCode.Valid() ||
 		route.Status != StatusDegraded && route.FailureCode != "" {
 		return ApplicationRoute{}, ErrInvalidRoute
 	}
 	return route, nil
+}
+
+func cloneRetirement(value *Retirement) *Retirement {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	copy.ActorID = strings.TrimSpace(copy.ActorID)
+	copy.RequestID = strings.TrimSpace(copy.RequestID)
+	copy.StartedAt = copy.StartedAt.UTC()
+	return &copy
+}
+
+func validRetirement(route ApplicationRoute) bool {
+	if route.Status != StatusRetiring {
+		return route.Retirement == nil
+	}
+	return route.Retirement != nil && validID(route.Retirement.ActorID) &&
+		!route.Retirement.StartedAt.IsZero() &&
+		!route.Retirement.StartedAt.Before(route.CreatedAt) &&
+		!route.Retirement.StartedAt.After(route.UpdatedAt)
 }
 
 func cloneObservation(value *Observation) *Observation {
@@ -249,7 +285,8 @@ func validID(value string) bool { return idPattern.MatchString(value) }
 // method while persisting the current Version as its optimistic-lock fence.
 func (r ApplicationRoute) Transition(next Status, actorID string, now time.Time) (ApplicationRoute, error) {
 	actorID = strings.TrimSpace(actorID)
-	if !validID(actorID) || now.IsZero() || !validTransition(r.Status, next) {
+	if !validID(actorID) || now.IsZero() || next == StatusRetiring ||
+		!validTransition(r.Status, next) {
 		return ApplicationRoute{}, ErrRouteConflict
 	}
 	if next == StatusDegraded {
@@ -260,7 +297,8 @@ func (r ApplicationRoute) Transition(next Status, actorID string, now time.Time)
 	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
 		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
 		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
-		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation,
+		Retirement: r.Retirement, FailureCode: r.FailureCode,
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 }
 
@@ -280,8 +318,40 @@ func (r ApplicationRoute) Degrade(
 	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
 		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
 		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
-		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation,
+		Retirement: r.Retirement, FailureCode: r.FailureCode,
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+}
+
+// BeginRetirement closes route admission before any external gateway work is
+// attempted. The returned state is durable and safe for worker replay.
+func (r ApplicationRoute) BeginRetirement(
+	actorID, requestID string,
+	now time.Time,
+) (ApplicationRoute, error) {
+	actorID, requestID = strings.TrimSpace(actorID), strings.TrimSpace(requestID)
+	if !validID(actorID) || now.IsZero() || !validTransition(r.Status, StatusRetiring) {
+		return ApplicationRoute{}, ErrRouteConflict
+	}
+	r.Status, r.Version, r.UpdatedBy, r.UpdatedAt =
+		StatusRetiring, r.Version+1, actorID, now.UTC()
+	r.Retirement = &Retirement{ActorID: actorID, RequestID: requestID, StartedAt: now.UTC()}
+	r.FailureCode = ""
+	return NewApplicationRoute(inputFromRoute(r))
+}
+
+// CompleteRetirement is controller-only and may run only after the committed
+// gateway configuration no longer contains the route.
+func (r ApplicationRoute) CompleteRetirement(actorID string, now time.Time) (ApplicationRoute, error) {
+	actorID = strings.TrimSpace(actorID)
+	if !validID(actorID) || now.IsZero() || r.Retirement == nil ||
+		!validTransition(r.Status, StatusRetired) {
+		return ApplicationRoute{}, ErrRouteConflict
+	}
+	r.Status, r.Version, r.UpdatedBy, r.UpdatedAt =
+		StatusRetired, r.Version+1, actorID, now.UTC()
+	r.Retirement, r.FailureCode = nil, ""
+	return NewApplicationRoute(inputFromRoute(r))
 }
 
 func validTransition(current, next Status) bool {
@@ -315,8 +385,19 @@ func (r ApplicationRoute) ObserveReady(observation Observation, actorID string, 
 	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
 		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
 		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
-		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation,
+		Retirement: r.Retirement, FailureCode: r.FailureCode,
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+}
+
+func inputFromRoute(r ApplicationRoute) Input {
+	return Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
+		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID,
+		RuntimeTargetID: r.RuntimeTargetID, Hostname: r.Hostname, PortName: r.PortName,
+		TLSMode: r.TLSMode, Status: r.Status, Revision: r.Revision, Version: r.Version,
+		Observation: r.Observation, Retirement: r.Retirement, FailureCode: r.FailureCode,
+		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy,
+		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt}
 }
 
 type Repository interface {
@@ -336,12 +417,14 @@ type ReferenceResolver interface {
 }
 
 type UseCase struct {
-	repository  Repository
-	references  ReferenceResolver
-	newID       func() (string, error)
-	now         func() time.Time
-	transaction transaction.Manager
-	auditor     sharedaudit.Recorder
+	repository           Repository
+	references           ReferenceResolver
+	newID                func() (string, error)
+	now                  func() time.Time
+	transaction          transaction.Manager
+	auditor              sharedaudit.Recorder
+	retirementRepository RetirementRepository
+	retirer              RouteRetirer
 }
 
 func NewUseCase(repository Repository, references ReferenceResolver, newID func() (string, error), now func() time.Time) (*UseCase, error) {
@@ -353,6 +436,14 @@ func NewUseCase(repository Repository, references ReferenceResolver, newID func(
 
 func (u *UseCase) WithAudit(manager transaction.Manager, auditor sharedaudit.Recorder) *UseCase {
 	u.transaction, u.auditor = manager, auditor
+	return u
+}
+
+func (u *UseCase) WithRetirement(
+	repository RetirementRepository,
+	retirer RouteRetirer,
+) *UseCase {
+	u.retirementRepository, u.retirer = repository, retirer
 	return u
 }
 

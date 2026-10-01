@@ -2305,7 +2305,8 @@ func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *
 		names[name] = true
 	}
 	for _, name := range []string{"uniq_application_route_hostname", "uniq_application_route_project_slot",
-		"idx_application_route_project_created", "idx_application_route_target_status"} {
+		"idx_application_route_project_created", "idx_application_route_retirement",
+		"idx_application_route_target_status"} {
 		if !names[name] {
 			t.Errorf("application route index %q is missing: %#v", name, names)
 		}
@@ -2324,8 +2325,11 @@ func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *
 		name, _ := document["name"].(string)
 		names[name] = true
 	}
-	if !names["uniq_application_route_pending_deployment"] {
-		t.Errorf("application route host pending index is missing: %#v", names)
+	for _, name := range []string{"uniq_application_route_pending_deployment",
+		"uniq_application_route_retirement"} {
+		if !names[name] {
+			t.Errorf("application route host index %q is missing: %#v", name, names)
+		}
 	}
 }
 
@@ -3152,6 +3156,47 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 		restoredRoute.FailureCode != "" || restoredRoute.Observation == nil ||
 		restoredRoute.Observation.DeploymentID != replayedRequest.DeploymentID {
 		t.Fatalf("restored previous route = %+v, %v", restoredRoute, err)
+	}
+
+	retiringRoute, err := restoredRoute.BeginRetirement(
+		"route-integration-maintainer", "route-retirement-request", now.Add(4*time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Save(ctx, retiringRoute, restoredRoute.Version); err != nil {
+		t.Fatalf("begin route retirement: %v", err)
+	}
+	retirementStore, err := applicationroutedata.NewMongoRetirementStore(
+		database, client, func() time.Time { return now.Add(5 * time.Second) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retirementGateway := &replayableIngressGateway{}
+	retirementCoordinator, err := applicationroutebiz.NewRetirementCoordinator(
+		retirementStore, retirementGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		completed, retireErr := retirementCoordinator.Retire(ctx, retiringRoute.ID)
+		if retireErr != nil || !completed {
+			t.Fatalf("route retirement attempt %d = %t, %v", attempt+1, completed, retireErr)
+		}
+	}
+	if retirementGateway.prepareCalls != 1 || retirementGateway.commitCalls != 1 {
+		t.Fatalf("route retirement gateway calls = %d/%d",
+			retirementGateway.prepareCalls, retirementGateway.commitCalls)
+	}
+	if _, err := repository.Get(ctx, retiringRoute.OrganizationID, retiringRoute.ProjectID,
+		retiringRoute.ID); !errors.Is(err, applicationroutebiz.ErrNotFound) {
+		t.Fatalf("retired route remains visible: %v", err)
+	}
+	replacement := newRoute("route-integration-hostname-reuse", retiringRoute.Hostname)
+	if _, err := repository.Create(ctx, replacement); err != nil {
+		t.Fatalf("reuse retired route hostname: %v", err)
 	}
 }
 

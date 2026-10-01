@@ -222,6 +222,33 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 	if fence.calls != 3 {
 		t.Fatalf("activation and rollback fence calls = %d, want 3", fence.calls)
 	}
+	retirementStore := &managedIngressIntegrationRetirementStore{
+		transaction: applicationroutebiz.RouteRetirementTransaction{
+			RouteID: "worker-route", OrganizationID: "integration-organization",
+			Desired: applicationroutebiz.HostDesiredConfig{
+				ManagedHostID: hostID, HostRevision: 4,
+				Routes: []applicationroutebiz.GatewayRoute{}, ProbeRouteIDs: []string{},
+			},
+		},
+	}
+	retirement, err := applicationroutebiz.NewRetirementCoordinator(
+		retirementStore, routeGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		completed, retireErr := retirement.Retire(ctx, "worker-route")
+		if retireErr != nil || !completed {
+			t.Fatalf("retire managed route attempt %d = %t, %v", attempt+1, completed, retireErr)
+		}
+	}
+	if retirementStore.prepared != 1 || retirementStore.committed != 1 ||
+		retirementStore.finished != 1 {
+		t.Fatalf("route retirement phases = %d/%d/%d", retirementStore.prepared,
+			retirementStore.committed, retirementStore.finished)
+	}
+	assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusNotFound, "")
 	assertManagedIngressSecretAbsent(
 		t, applicationSecret, stateDirectory, ingressStateDirectory, socketDirectory,
 	)
@@ -369,6 +396,54 @@ type managedIngressIntegrationCutoverStore struct {
 	finished    bool
 	aborted     bool
 	failure     applicationroutebiz.FailureCode
+}
+
+type managedIngressIntegrationRetirementStore struct {
+	transaction applicationroutebiz.RouteRetirementTransaction
+	completed   bool
+	prepared    int
+	committed   int
+	finished    int
+}
+
+func (s *managedIngressIntegrationRetirementStore) Begin(
+	context.Context,
+	string,
+) (applicationroutebiz.RouteRetirementTransaction, bool, error) {
+	return s.transaction, s.completed, nil
+}
+
+func (s *managedIngressIntegrationRetirementStore) MarkPrepared(
+	_ context.Context,
+	transaction applicationroutebiz.RouteRetirementTransaction,
+	observation applicationroutebiz.GatewayObservation,
+) error {
+	if transaction.Desired.HostRevision != observation.HostRevision {
+		return applicationroutebiz.ErrRetirementConflict
+	}
+	s.prepared++
+	return nil
+}
+
+func (s *managedIngressIntegrationRetirementStore) MarkGatewayCommitted(
+	_ context.Context,
+	transaction applicationroutebiz.RouteRetirementTransaction,
+	observation applicationroutebiz.GatewayObservation,
+) error {
+	if transaction.Desired.HostRevision != observation.HostRevision {
+		return applicationroutebiz.ErrRetirementConflict
+	}
+	s.committed++
+	return nil
+}
+
+func (s *managedIngressIntegrationRetirementStore) Finish(
+	context.Context,
+	applicationroutebiz.RouteRetirementTransaction,
+) error {
+	s.finished++
+	s.completed = true
+	return nil
 }
 
 func (s *managedIngressIntegrationCutoverStore) configure(
@@ -634,3 +709,4 @@ var _ deploymentbiz.ExecutionResolver = (*managedIngressIntegrationResolver)(nil
 var _ deploymentbiz.CredentialResolver = managedIngressIntegrationCredentialResolver{}
 var _ deploymentbiz.FenceValidator = (*managedIngressIntegrationFence)(nil)
 var _ applicationroutebiz.CutoverStore = (*managedIngressIntegrationCutoverStore)(nil)
+var _ applicationroutebiz.RouteRetirementStore = (*managedIngressIntegrationRetirementStore)(nil)

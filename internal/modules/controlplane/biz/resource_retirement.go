@@ -189,15 +189,15 @@ func (u *UseCase) continueApplicationRetirement(ctx context.Context, item Applic
 	if err != nil {
 		return false, err
 	}
+	if dependenciesPending {
+		return false, nil
+	}
 	err = u.resourceRetirer.RetireProductResource(ctx, scope, principal, retirement.RequestID)
 	if errors.Is(err, ErrResourceRetirementPending) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
-	}
-	if dependenciesPending {
-		return false, nil
 	}
 	return u.completeProductResourceRetirement(
 		ctx, principal, item.ProjectID, item.ID, "application",
@@ -217,15 +217,15 @@ func (u *UseCase) continueEnvironmentRetirement(ctx context.Context, item Enviro
 	if err != nil {
 		return false, err
 	}
+	if dependenciesPending {
+		return false, nil
+	}
 	err = u.resourceRetirer.RetireProductResource(ctx, scope, principal, retirement.RequestID)
 	if errors.Is(err, ErrResourceRetirementPending) {
 		return false, nil
 	}
 	if err != nil {
 		return false, err
-	}
-	if dependenciesPending {
-		return false, nil
 	}
 	return u.completeProductResourceRetirement(
 		ctx, principal, item.ProjectID, item.ID, "environment",

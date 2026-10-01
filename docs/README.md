@@ -59,7 +59,7 @@
 | 已接受、待完成或待验收 | Evidence Worker 的客户等价出口矩阵和其他 KMS 客户矩阵；Web/官网/客户文档双语发布与正式客户 CLI；Git/Registry 品牌与客户网络兼容矩阵、Docker Inventory 双主机/客户等价 MongoDB 认证 TLS 故障切换/资源峰值/Web E2E、首个受保护 Agent Tag 的公开发行证据、enrollment/证书轮换真实故障注入、多主机升级/回滚系统验收、Terminal 真实远程 Linux/SSH 故障与浏览器 E2E |
 | 暂不支持 | 任意 YAML/Shell 流水线、Kubernetes 运行时、浏览器提供任意 Docker 地址或容器 ID、无审计的主机访问 |
 
-ApplicationRoute 的 Project-scoped desired-state API、MongoDB 唯一 hostname/revision fence、RBAC 与审计，以及默认关闭的 Agent 三阶段协议、持久 Host/Route fence、固定 Caddy Gateway 包和 Server Deployment cutover 编排已经实现；真实 Linux-kernel Gateway/Worker 组合流量门禁已经通过，原生 systemd、自动 HTTPS与客户等价流量验收尚未完成，`pending` 不属于可用入口声明。
+ApplicationRoute 的 Project-scoped desired-state API、MongoDB 唯一 hostname/revision fence、RBAC 与审计，以及默认关闭的 Agent 三阶段协议、持久 Host/Route fence、固定 Caddy Gateway 包和 Server Deployment cutover 编排已经实现。Route DELETE 使用独立可恢复 Host transaction，Application/Environment/Runtime Target 会先清理入口再删除 backend；真实 Linux-kernel Gateway/Worker 组合流量门禁已经编码，原生 systemd、自动 HTTPS与客户等价流量验收尚未完成，`pending` 不属于可用入口声明。
 
 Terminal 当前已完成五项权限、Project/Organization 访问策略、TerminalSession 状态机、固定目标解析、MongoDB 并发槽位、一次性安全 Cookie、登录会话重新确认、活动连接周期复核与撤权宽限、REST API、同域 WSS、direct/Agent 受限容器与主机 Gateway 和元数据审计；真实远程 Linux/SSH、多主机故障和浏览器 E2E 尚未完成。详见[安全终端会话](terminal-sessions.md)。
 

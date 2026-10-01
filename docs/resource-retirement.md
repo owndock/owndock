@@ -1,6 +1,6 @@
 # Application 与 Environment 退役
 
-Application 和 Environment 删除采用可恢复的生命周期工作流，不执行跨集合级联硬删除。API 首先把资源从 `active` 原子切换为 `retiring`，立即关闭 Release、Build、Deployment 和 Terminal 的新增入口；Application 退役还会有界取消已排队或执行中的 Build。Server 随后排空关联 Deployment、关闭活动容器会话、删除精确稳定运行实例并释放 Agent cutover watermark，最后把资源标记为 `retired`。
+Application 和 Environment 删除采用可恢复的生命周期工作流，不执行跨集合级联硬删除。API 首先把资源从 `active` 原子切换为 `retiring`，立即关闭 Release、Build、Deployment、ApplicationRoute 和 Terminal 的新增入口；Application 退役还会有界取消已排队或执行中的 Build。Server 先以 ApplicationRoute 的持久 Host transaction 从实际网关配置移除全部关联公网入口；只有该步骤提交完成，才排空关联 Deployment、关闭活动容器会话、删除精确稳定运行实例并释放 Agent cutover watermark，最后把资源标记为 `retired`。Runtime Target 使用相同的“入口先于 backend”顺序。
 
 `202 Accepted` 表示退役上下文已经持久化，客户端不负责驱动后续进度。后台 Worker 会按 `retirement.started_at` 有界扫描，Server 重启后继续执行。已完成的 DELETE 返回 `204 No Content`，重复删除也返回 204。
 

@@ -16,6 +16,7 @@ import (
 	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
 	applicationroutedata "github.com/owndock/owndock/internal/modules/applicationroute/data"
 	applicationrouteservice "github.com/owndock/owndock/internal/modules/applicationroute/service"
+	applicationrouteworker "github.com/owndock/owndock/internal/modules/applicationroute/worker"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
@@ -116,6 +117,7 @@ func run() error {
 	var mongoClient *platformmongo.Client
 	var productAPI *server.ProductAPI
 	var deploymentWorkerServer *lifecycle.Server
+	var applicationRouteRetirementWorkerServer *lifecycle.Server
 	var runtimeTargetRetirementWorkerServer *lifecycle.Server
 	var productResourceRetirementWorkerServer *lifecycle.Server
 	var inventoryWorkerServer *lifecycle.Server
@@ -367,8 +369,9 @@ func run() error {
 		if err != nil {
 			return fmt.Errorf("create product API: %w", err)
 		}
+		applicationRouteRepository := applicationroutedata.NewMongoRepository(mongoClient.Database())
 		applicationRouteUseCase, err := applicationroutebiz.NewUseCase(
-			applicationroutedata.NewMongoRepository(mongoClient.Database()),
+			applicationRouteRepository,
 			applicationroutedata.NewReferenceResolver(controlPlaneStore),
 			id.New,
 			time.Now,
@@ -777,6 +780,37 @@ func run() error {
 				if _, configureErr := executor.WithManagedIngress(cutover, 30*time.Second); configureErr != nil {
 					return fmt.Errorf("configure managed application ingress: %w", configureErr)
 				}
+				routeRetirementStore, storeErr := applicationroutedata.NewMongoRetirementStore(
+					mongoClient.Database(), mongoClient, time.Now,
+				)
+				if storeErr != nil {
+					return fmt.Errorf("create application route retirement store: %w", storeErr)
+				}
+				routeRetirementStore.WithAudit(auditStore, id.New)
+				routeRetirement, retirementErr := applicationroutebiz.NewRetirementCoordinator(
+					routeRetirementStore, routeGateway,
+				)
+				if retirementErr != nil {
+					return fmt.Errorf("create application route retirement coordinator: %w", retirementErr)
+				}
+				applicationRouteUseCase.WithRetirement(
+					applicationRouteRepository, routeRetirement,
+				)
+				routeRetirementLoop, loopErr := applicationrouteworker.NewRetirementLoop(
+					applicationRouteUseCase, 16, pollInterval, operationTimeout,
+					func(workerErr error) {
+						_ = logger.Log(log.LevelError,
+							"component", "application_route_retirement_worker",
+							"error", workerErr)
+					},
+				)
+				if loopErr != nil {
+					return fmt.Errorf("create application route retirement worker loop: %w", loopErr)
+				}
+				routeRetirementLoop.WithObservability(func(result string, duration time.Duration) {
+					metrics.RecordWorkerPoll("application_route_retirement", result, duration)
+				})
+				applicationRouteRetirementWorkerServer = lifecycle.NewServer(routeRetirementLoop)
 				managedIngressEnabled = true
 			}
 			retirement, retirementErr := deploymentbiz.NewRuntimeTargetRetirement(
@@ -796,8 +830,11 @@ func run() error {
 			).WithRuntimeTargetDependencies(
 				terminalUseCase,
 				runtimeTargetInventoryConvergence,
+				applicationRouteUseCase,
 			).WithProductResourceRetirement(controlPlaneStore, retirementAdapter).
-				WithProductResourceDependencies(buildRetirement, terminalUseCase)
+				WithProductResourceDependencies(
+					applicationRouteUseCase, buildRetirement, terminalUseCase,
+				)
 			retirementLoop, retirementLoopErr :=
 				controlplaneworker.NewRuntimeTargetRetirementLoop(
 					controlPlaneUseCase, 16, pollInterval, operationTimeout,
@@ -1095,6 +1132,9 @@ func run() error {
 	managedServers := []transport.Server{httpServer}
 	if deploymentWorkerServer != nil {
 		managedServers = append(managedServers, deploymentWorkerServer)
+	}
+	if applicationRouteRetirementWorkerServer != nil {
+		managedServers = append(managedServers, applicationRouteRetirementWorkerServer)
 	}
 	if runtimeTargetRetirementWorkerServer != nil {
 		managedServers = append(managedServers, runtimeTargetRetirementWorkerServer)

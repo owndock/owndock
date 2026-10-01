@@ -240,6 +240,9 @@ func TestProductResourceRetirementHandlesIdempotencyDependenciesAndCorruptMetada
 	if err != nil || completed || store.applications[0].Status != ProductResourceStatusRetiring {
 		t.Fatalf("pending dependency deletion = %t/%v/%+v", completed, err, store.applications[0])
 	}
+	if len(retirer.scopes) != 0 {
+		t.Fatalf("runtime retirement ran before dependencies converged: %+v", retirer.scopes)
+	}
 	dependency.pending = false
 	completed, err = useCase.DeleteApplication(
 		t.Context(), owner, "project-1", "application-1", "request-retry",
@@ -519,12 +522,13 @@ func TestRuntimeTargetRetirementWaitsForModuleDependencies(t *testing.T) {
 		}},
 	}
 	dependency := &runtimeTargetDependencyProbe{pending: true}
+	retirer := &runtimeTargetRetirerProbe{}
 	useCase := NewUseCase(
 		store, store, store, store, transaction.Passthrough{},
 		&fakeAudits{}, &fakeAudits{},
 		func() (string, error) { return "audit-1", nil }, time.Now,
 	).WithRuntimeTargetRetirement(
-		store, &runtimeTargetRetirerProbe{},
+		store, retirer,
 	).WithRuntimeTargetDependencies(dependency)
 	principal := security.Principal{
 		UserID: "owner-1", OrganizationID: "organization-1",
@@ -533,8 +537,9 @@ func TestRuntimeTargetRetirementWaitsForModuleDependencies(t *testing.T) {
 	completed, err := useCase.DeleteRuntimeTarget(
 		t.Context(), principal, "project-1", "target-1", "request-1",
 	)
-	if err != nil || completed || len(store.targets) != 1 || dependency.calls != 1 {
-		t.Fatalf("pending dependency delete = %t/%v, targets=%d calls=%d", completed, err, len(store.targets), dependency.calls)
+	if err != nil || completed || len(store.targets) != 1 || dependency.calls != 1 || retirer.calls != 0 {
+		t.Fatalf("pending dependency delete = %t/%v, targets=%d dependency calls=%d retirer calls=%d",
+			completed, err, len(store.targets), dependency.calls, retirer.calls)
 	}
 	dependency.pending = false
 	processed, err := useCase.ContinueRuntimeTargetRetirements(t.Context(), 1)

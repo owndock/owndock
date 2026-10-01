@@ -2367,6 +2367,31 @@ paths:
         "422": { $ref: "#/components/responses/APIError" }
         "503": { $ref: "#/components/responses/APIError" }
         "500": { $ref: "#/components/responses/APIError" }
+    delete:
+      tags: [Application Routes]
+      operationId: deleteApplicationRoute
+      summary: Retire a managed public application route
+      description: Maintainer or Owner. Admission closes before the gateway transaction starts. Returns 204 when the committed gateway no longer contains the route, or 202 while durable cleanup is waiting for the Agent or another host-level transaction.
+      security:
+        - bearerAuth: []
+      responses:
+        "202":
+          description: Route retirement was accepted and will continue asynchronously
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, enum: [retiring] }
+        "204": { description: Route is absent from the committed gateway configuration }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
   /api/v1/projects/{project_id}/signature-trust-policies:
     parameters:
       - $ref: "#/components/parameters/RequestID"

@@ -59,11 +59,12 @@ func TestApplicationRouteTransitionEnforcesLifecycle(t *testing.T) {
 	if _, err := item.ObserveReady(Observation{Revision: 2}, "controller", fixedTime.Add(2*time.Minute)); !errors.Is(err, ErrRouteConflict) {
 		t.Fatalf("stale ObserveReady() error = %v", err)
 	}
-	item, err = ready.Transition(StatusRetiring, "controller", fixedTime.Add(3*time.Minute))
-	if err != nil {
+	item, err = ready.BeginRetirement("controller", "request-1", fixedTime.Add(3*time.Minute))
+	if err != nil || item.Retirement == nil || item.Retirement.RequestID != "request-1" {
 		t.Fatal(err)
 	}
-	if _, err := item.Transition(StatusRetired, "controller", fixedTime.Add(4*time.Minute)); err != nil {
+	retired, err := item.CompleteRetirement("controller", fixedTime.Add(4*time.Minute))
+	if err != nil || retired.Status != StatusRetired || retired.Retirement != nil {
 		t.Fatal(err)
 	}
 }
@@ -230,8 +231,10 @@ func principal(role security.Role) security.Principal {
 }
 
 type fakeRepository struct {
-	item      ApplicationRoute
-	createErr error
+	item         ApplicationRoute
+	createErr    error
+	productLists int
+	targetLists  int
 }
 
 func (r *fakeRepository) Create(_ context.Context, item ApplicationRoute) (ApplicationRoute, error) {
@@ -253,6 +256,26 @@ func (r *fakeRepository) Get(context.Context, string, string, string) (Applicati
 func (r *fakeRepository) Save(_ context.Context, item ApplicationRoute, _ uint64) (ApplicationRoute, error) {
 	r.item = item
 	return item, nil
+}
+func (r *fakeRepository) ListRetiring(context.Context, int64) ([]ApplicationRoute, error) {
+	if r.item.Status == StatusRetiring {
+		return []ApplicationRoute{r.item}, nil
+	}
+	return nil, nil
+}
+func (r *fakeRepository) ListByProductResource(context.Context, string, string, string, string) ([]ApplicationRoute, error) {
+	r.productLists++
+	if r.item.ID == "" || r.item.Status == StatusRetired {
+		return nil, nil
+	}
+	return []ApplicationRoute{r.item}, nil
+}
+func (r *fakeRepository) ListByRuntimeTarget(context.Context, string, string, string) ([]ApplicationRoute, error) {
+	r.targetLists++
+	if r.item.ID == "" || r.item.Status == StatusRetired {
+		return nil, nil
+	}
+	return []ApplicationRoute{r.item}, nil
 }
 
 type fakeReferences struct {

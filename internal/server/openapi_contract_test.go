@@ -528,6 +528,11 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "delete application route without managed ingress", method: http.MethodDelete,
+			target:  "/api/v1/projects/test-id/application-routes/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusServiceUnavailable,
+		},
+		{
 			name: "create project deployment", method: http.MethodPost, target: "/api/v1/projects/test-id/deployments",
 			body: `{"release_id":"test-id","application_id":"test-id","environment_id":"test-id","runtime_target_id":"test-id"}`,
 			headers: map[string]string{

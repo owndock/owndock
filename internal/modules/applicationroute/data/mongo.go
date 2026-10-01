@@ -37,6 +37,7 @@ type routeDocument struct {
 	Revision        uint64               `bson:"revision"`
 	Version         uint64               `bson:"version"`
 	Observation     *observationDocument `bson:"observation,omitempty"`
+	Retirement      *retirementDocument  `bson:"retirement,omitempty"`
 	FailureCode     biz.FailureCode      `bson:"failure_code,omitempty"`
 	CreatedBy       string               `bson:"created_by"`
 	UpdatedBy       string               `bson:"updated_by"`
@@ -51,6 +52,28 @@ type observationDocument struct {
 	ConfigDigest      string                `bson:"config_digest"`
 	CertificateStatus biz.CertificateStatus `bson:"certificate_status"`
 	ObservedAt        time.Time             `bson:"observed_at"`
+}
+
+type retirementDocument struct {
+	ActorID   string    `bson:"actor_id"`
+	RequestID string    `bson:"request_id,omitempty"`
+	StartedAt time.Time `bson:"started_at"`
+}
+
+func retirementDocumentFromDomain(value *biz.Retirement) *retirementDocument {
+	if value == nil {
+		return nil
+	}
+	return &retirementDocument{ActorID: value.ActorID, RequestID: value.RequestID,
+		StartedAt: value.StartedAt}
+}
+
+func (d *retirementDocument) domain() *biz.Retirement {
+	if d == nil {
+		return nil
+	}
+	return &biz.Retirement{ActorID: d.ActorID, RequestID: d.RequestID,
+		StartedAt: d.StartedAt}
 }
 
 func observationDocumentFromDomain(value *biz.Observation) *observationDocument {
@@ -76,7 +99,8 @@ func documentFromDomain(item biz.ApplicationRoute) routeDocument {
 		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
 		RuntimeTargetID: item.RuntimeTargetID, Hostname: item.Hostname, PortName: item.PortName,
 		TLSMode: item.TLSMode, Status: item.Status, Revision: item.Revision, Version: item.Version,
-		Observation: observationDocumentFromDomain(item.Observation), FailureCode: item.FailureCode,
+		Observation: observationDocumentFromDomain(item.Observation),
+		Retirement:  retirementDocumentFromDomain(item.Retirement), FailureCode: item.FailureCode,
 		CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
 		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
@@ -86,7 +110,7 @@ func inputFromDomain(item biz.ApplicationRoute) biz.Input {
 		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
 		RuntimeTargetID: item.RuntimeTargetID, Hostname: item.Hostname, PortName: item.PortName,
 		TLSMode: item.TLSMode, Status: item.Status, Revision: item.Revision, Version: item.Version,
-		Observation: item.Observation, FailureCode: item.FailureCode,
+		Observation: item.Observation, Retirement: item.Retirement, FailureCode: item.FailureCode,
 		CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
 		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
@@ -95,7 +119,8 @@ func (d routeDocument) domain() (biz.ApplicationRoute, error) {
 	item, err := biz.NewApplicationRoute(biz.Input{ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID, RuntimeTargetID: d.RuntimeTargetID,
 		Hostname: d.Hostname, PortName: d.PortName, TLSMode: d.TLSMode, Status: d.Status,
-		Revision: d.Revision, Version: d.Version, Observation: d.Observation.domain(), FailureCode: d.FailureCode,
+		Revision: d.Revision, Version: d.Version, Observation: d.Observation.domain(),
+		Retirement: d.Retirement.domain(), FailureCode: d.FailureCode,
 		CreatedBy: d.CreatedBy, UpdatedBy: d.UpdatedBy, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt})
 	if err != nil {
 		return biz.ApplicationRoute{}, fmt.Errorf("decode invalid application route: %w", err)
@@ -197,6 +222,65 @@ func (r *MongoRepository) Save(ctx context.Context, item biz.ApplicationRoute, e
 	return normalized, nil
 }
 
+func (r *MongoRepository) ListRetiring(
+	ctx context.Context,
+	limit int64,
+) ([]biz.ApplicationRoute, error) {
+	return r.listForRetirement(ctx, bson.D{{Key: "status", Value: biz.StatusRetiring}}, limit)
+}
+
+func (r *MongoRepository) ListByProductResource(
+	ctx context.Context,
+	organizationID, projectID, applicationID, environmentID string,
+) ([]biz.ApplicationRoute, error) {
+	filter := bson.D{{Key: "organization_id", Value: organizationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.StatusRetired}}}}
+	if applicationID != "" {
+		filter = append(filter, bson.E{Key: "application_id", Value: applicationID})
+	} else {
+		filter = append(filter, bson.E{Key: "environment_id", Value: environmentID})
+	}
+	return r.listForRetirement(ctx, filter, biz.MaxRoutesPerProject)
+}
+
+func (r *MongoRepository) ListByRuntimeTarget(
+	ctx context.Context,
+	organizationID, projectID, runtimeTargetID string,
+) ([]biz.ApplicationRoute, error) {
+	return r.listForRetirement(ctx, bson.D{{Key: "organization_id", Value: organizationID},
+		{Key: "project_id", Value: projectID},
+		{Key: "runtime_target_id", Value: runtimeTargetID},
+		{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.StatusRetired}}}},
+		biz.MaxRoutesPerProject)
+}
+
+func (r *MongoRepository) listForRetirement(
+	ctx context.Context,
+	filter bson.D,
+	limit int64,
+) ([]biz.ApplicationRoute, error) {
+	cursor, err := r.routes.Find(ctx, filter, options.Find().
+		SetSort(bson.D{{Key: "updated_at", Value: 1}, {Key: "_id", Value: 1}}).
+		SetLimit(limit))
+	if err != nil {
+		return nil, fmt.Errorf("find application routes for retirement: %w", err)
+	}
+	defer cursor.Close(ctx)
+	var documents []routeDocument
+	if err := cursor.All(ctx, &documents); err != nil {
+		return nil, fmt.Errorf("decode application routes for retirement: %w", err)
+	}
+	items := make([]biz.ApplicationRoute, len(documents))
+	for index := range documents {
+		items[index], err = documents[index].domain()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return items, nil
+}
+
 func routeUpdate(item biz.ApplicationRoute) bson.D {
 	set := bson.D{{Key: "hostname", Value: item.Hostname}, {Key: "port_name", Value: item.PortName},
 		{Key: "tls_mode", Value: item.TLSMode}, {Key: "status", Value: item.Status},
@@ -207,6 +291,11 @@ func routeUpdate(item biz.ApplicationRoute) bson.D {
 		unset = append(unset, bson.E{Key: "observation", Value: ""})
 	} else {
 		set = append(set, bson.E{Key: "observation", Value: observationDocumentFromDomain(item.Observation)})
+	}
+	if item.Retirement == nil {
+		unset = append(unset, bson.E{Key: "retirement", Value: ""})
+	} else {
+		set = append(set, bson.E{Key: "retirement", Value: retirementDocumentFromDomain(item.Retirement)})
 	}
 	if item.FailureCode == "" {
 		unset = append(unset, bson.E{Key: "failure_code", Value: ""})
@@ -221,3 +310,4 @@ func routeUpdate(item biz.ApplicationRoute) bson.D {
 }
 
 var _ biz.Repository = (*MongoRepository)(nil)
+var _ biz.RetirementRepository = (*MongoRepository)(nil)

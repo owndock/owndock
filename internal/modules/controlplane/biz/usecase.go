@@ -977,6 +977,9 @@ func (u *UseCase) continueRuntimeTargetRetirement(
 		}
 		dependenciesPending = dependenciesPending || pending
 	}
+	if dependenciesPending {
+		return false, nil
+	}
 	if err := u.targetRetirer.RetireRuntimeTarget(
 		ctx, target, principal, retirement.RequestID,
 	); err != nil {
@@ -984,9 +987,6 @@ func (u *UseCase) continueRuntimeTargetRetirement(
 			return false, nil
 		}
 		return false, err
-	}
-	if dependenciesPending {
-		return false, nil
 	}
 	deleteAuditID, err := u.newID()
 	if err != nil {

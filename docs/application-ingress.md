@@ -67,7 +67,36 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 
 `ApplicationRoute` 属于 Project，固定 Application、Environment、Runtime Target、规范化 hostname、Release 命名 HTTP 端口和 TLS 模式。同一 Organization 中活动 hostname 唯一。API 只允许 Agent Runtime Target；`disabled` TLS 只允许 development Environment，staging/production 强制 `automatic`。一个 Project 最多保留 128 条活动 Route。
 
-控制面开放 `GET/POST /api/v1/projects/{project_id}/application-routes` 与 `GET/PATCH /api/v1/projects/{project_id}/application-routes/{route_id}`。Application、Environment 和 Runtime Target 绑定创建后不可修改；PATCH 使用 `expected_version` 乐观锁，成功后回到 `pending`。删除会依赖真实网关清理和 fence，因此在执行面完成前不开放。
+控制面开放 `GET/POST /api/v1/projects/{project_id}/application-routes` 与 `GET/PATCH/DELETE /api/v1/projects/{project_id}/application-routes/{route_id}`。Application、Environment 和 Runtime Target 绑定创建后不可修改；PATCH 使用 `expected_version` 乐观锁，成功后回到 `pending`。DELETE 先把 Route 持久化为 `retiring`，再以单调 Host revision 通过 Agent 移除 Caddy 配置；网关提交后才进入 `retired`。Agent 暂时离线或 Host 上有其他事务时返回 `202`，后台 Worker 会从 MongoDB 恢复。
+
+Application、Environment 或 Runtime Target 的退役也会先收敛关联 Route。只有公网入口已从网关提交配置中消失后，控制面才继续删除运行实例和资源元数据，避免残留入口指向已退役容器。
+
+```mermaid
+sequenceDiagram
+    participant Client
+    participant API as Server API
+    participant MongoDB
+    participant Worker as Route retirement Worker
+    participant Agent
+    participant Caddy
+
+    Client->>API: DELETE application-route
+    API->>MongoDB: status=retiring + request identity
+    API->>Worker: 尝试立即收敛
+    Worker->>MongoDB: 分配 Host revision 与完整目标配置
+    Worker->>Agent: ingress.prepare（不含被删除 Route）
+    Agent->>Caddy: 校验并加载候选配置
+    Agent-->>Worker: prepared + config digest
+    Worker->>Agent: ingress.commit
+    Agent->>Caddy: 提交候选配置
+    Worker->>MongoDB: committed config + route=retired（事务）
+    alt 当前请求内完成
+        API-->>Client: 204 No Content
+    else Agent 离线或 Host 事务占用
+        API-->>Client: 202 retiring
+        Worker->>Worker: 后台按持久状态重试
+    end
+```
 
 首期不包括 wildcard、path routing、任意 Header 改写、用户插件、自带证书、DNS-01、TCP/UDP、多 Target 负载均衡或跨主机高可用。
 

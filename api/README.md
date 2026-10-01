@@ -87,7 +87,7 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Runtime Target | `POST /api/v1/projects/{project_id}/runtime-targets/{runtime_target_id}/probe` | 显式探测 direct Docker 目标并保存安全状态 |
 | Runtime Target | `DELETE /api/v1/projects/{project_id}/runtime-targets/{runtime_target_id}` | 持久化进入 retiring 后由 Server 自动关闭容器终端、清除 Inventory、排空 Deployment、删除精确运行资源并回收 Agent 水位；后台执行期间返回 202，客户端无需驱动重试 |
 | Application Route | `GET/POST /api/v1/projects/{project_id}/application-routes` | 查询或创建 Agent managed ingress desired state；创建仅进入 `pending`，不代表公网入口已可用 |
-| Application Route | `GET/PATCH /api/v1/projects/{project_id}/application-routes/{application_route_id}` | 查询或按 `expected_version` 修改 hostname、命名端口与 TLS；Application/Environment/Target 绑定不可变 |
+| Application Route | `GET/PATCH/DELETE /api/v1/projects/{project_id}/application-routes/{application_route_id}` | 查询、按 `expected_version` 修改或退役公网路由；DELETE 先关闭准入，再通过可恢复网关事务移除入口；Application/Environment/Target 绑定不可变 |
 | Runtime Inventory | `GET /api/v1/projects/{project_id}/runtime-inventory` | 查询经成功 Deployment 核验的 Project 受管容器安全视图 |
 | Runtime Inventory | `GET /api/v1/managed-hosts/{managed_host_id}/runtime-inventory` | Owner/Maintainer 查询 Host 的四类安全资源，包括未受管资源 |
 | Terminal Policy | `GET/PUT /api/v1/terminal-policy` | Owner 查询或保存 Organization 主机终端策略 |

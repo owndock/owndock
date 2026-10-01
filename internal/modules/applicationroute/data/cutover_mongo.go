@@ -97,6 +97,9 @@ func (s *MongoCutoverStore) begin(
 	if hostExists && document.OrganizationID != request.OrganizationID {
 		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrCutoverConflict
 	}
+	if document.Retirement != nil {
+		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrCutoverConflict
+	}
 	if document.Pending != nil {
 		transactionValue, decodeErr := document.Pending.domain(request.ManagedHostID)
 		if decodeErr != nil {
@@ -130,6 +133,7 @@ func (s *MongoCutoverStore) begin(
 		updateResult, err = s.hostConfigs.UpdateOne(ctx, bson.D{
 			{Key: "_id", Value: request.ManagedHostID}, {Key: "revision", Value: document.Revision},
 			{Key: "pending", Value: bson.D{{Key: "$exists", Value: false}}},
+			{Key: "retirement", Value: bson.D{{Key: "$exists", Value: false}}},
 		}, bson.D{{Key: "$set", Value: bson.D{
 			{Key: "revision", Value: desired.HostRevision}, {Key: "pending", Value: pending},
 		}}})
@@ -470,7 +474,13 @@ func cutoverRouteFilter(request applicationroutebiz.CutoverRequest) bson.D {
 		{Key: "application_id", Value: request.ApplicationID},
 		{Key: "environment_id", Value: request.EnvironmentID},
 		{Key: "runtime_target_id", Value: request.RuntimeTargetID},
-		{Key: "status", Value: activeStatusExpression()}}
+		{Key: "status", Value: cutoverEligibleStatusExpression()}}
+}
+
+func cutoverEligibleStatusExpression() bson.D {
+	return bson.D{{Key: "$in", Value: bson.A{applicationroutebiz.StatusPending,
+		applicationroutebiz.StatusProvisioning, applicationroutebiz.StatusReady,
+		applicationroutebiz.StatusDegraded}}}
 }
 
 func buildDesiredConfig(
@@ -525,11 +535,12 @@ func pendingFilter(transactionValue applicationroutebiz.CutoverTransaction, stat
 }
 
 type hostConfigDocument struct {
-	ID             string                 `bson:"_id"`
-	OrganizationID string                 `bson:"organization_id"`
-	Revision       uint64                 `bson:"revision"`
-	Committed      []gatewayRouteDocument `bson:"committed,omitempty"`
-	Pending        *cutoverDocument       `bson:"pending,omitempty"`
+	ID             string                   `bson:"_id"`
+	OrganizationID string                   `bson:"organization_id"`
+	Revision       uint64                   `bson:"revision"`
+	Committed      []gatewayRouteDocument   `bson:"committed,omitempty"`
+	Pending        *cutoverDocument         `bson:"pending,omitempty"`
+	Retirement     *routeRetirementDocument `bson:"retirement,omitempty"`
 }
 
 type cutoverDocument struct {
