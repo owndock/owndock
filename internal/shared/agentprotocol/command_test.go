@@ -199,9 +199,13 @@ func TestCutoverReleaseCommandIsNarrowAndRoundTrips(t *testing.T) {
 }
 
 func TestIngressTransactionCommandsAreTypedBoundedAndRoundTrip(t *testing.T) {
+	backendAlias, err := DeploymentBackendAlias("deployment-2")
+	if err != nil {
+		t.Fatal(err)
+	}
 	routes := []IngressRoute{{RouteID: "route-1", Revision: 2,
 		DeploymentID: "deployment-2", CutoverSequence: 7, RuntimeTargetID: "target-1",
-		Hostname: "api.example.com", BackendAlias: "deployment-2", BackendPort: 8080,
+		Hostname: "api.example.com", BackendAlias: backendAlias, BackendPort: 8080,
 		TLSMode: IngressTLSAutomatic}}
 	digest, err := IngressConfigDigest(9, routes)
 	if err != nil {
@@ -247,9 +251,22 @@ func TestIngressTransactionCommandsAreTypedBoundedAndRoundTrip(t *testing.T) {
 	if !errors.Is(unsafe.Validate(), ErrCommandInvalid) {
 		t.Fatal("ingress accepted an arbitrary upstream")
 	}
+	otherAlias, err := DeploymentBackendAlias("deployment-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress.Routes[0].BackendAlias = otherAlias
+	unsafe.Ingress = &ingress
+	if !errors.Is(unsafe.Validate(), ErrCommandInvalid) {
+		t.Fatal("ingress accepted an alias owned by a different Deployment")
+	}
 	duplicate := append([]IngressRoute(nil), routes...)
 	second := duplicate[0]
-	second.RouteID, second.DeploymentID, second.BackendAlias = "route-2", "deployment-3", "deployment-3"
+	second.RouteID, second.DeploymentID = "route-2", "deployment-3"
+	second.BackendAlias, err = DeploymentBackendAlias(second.DeploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	duplicate = append(duplicate, second)
 	digest, err = IngressConfigDigest(10, duplicate)
 	if err != nil {

@@ -92,9 +92,13 @@ func TestDockerExecutorFailsClosedWithoutIngressGateway(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	alias, err := agentprotocol.DeploymentBackendAlias("deployment-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	routes := []agentprotocol.IngressRoute{{RouteID: "route-1", Revision: 1,
 		DeploymentID: "deployment-1", CutoverSequence: 1, RuntimeTargetID: "target-1",
-		Hostname: "app.example.com", BackendAlias: "deployment-1", BackendPort: 8080,
+		Hostname: "app.example.com", BackendAlias: alias, BackendPort: 8080,
 		TLSMode: agentprotocol.IngressTLSAutomatic}}
 	digest, err := agentprotocol.IngressConfigDigest(1, routes)
 	if err != nil {

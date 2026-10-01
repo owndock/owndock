@@ -132,9 +132,10 @@ func restrictedTempDirectory(t *testing.T) string {
 }
 
 func ingressRoute(routeID string, revision uint64, deploymentID string, cutover uint64) agentprotocol.IngressRoute {
+	alias, _ := agentprotocol.DeploymentBackendAlias(deploymentID)
 	return agentprotocol.IngressRoute{RouteID: routeID, Revision: revision,
 		DeploymentID: deploymentID, CutoverSequence: cutover, RuntimeTargetID: "target-1",
-		Hostname: routeID + ".example.com", BackendAlias: deploymentID, BackendPort: 8080,
+		Hostname: routeID + ".example.com", BackendAlias: alias, BackendPort: 8080,
 		TLSMode: agentprotocol.IngressTLSAutomatic}
 }
 

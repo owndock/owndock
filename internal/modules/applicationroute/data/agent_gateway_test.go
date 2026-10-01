@@ -13,6 +13,14 @@ import (
 )
 
 func TestAgentGatewayBuildsCanonicalTypedCommand(t *testing.T) {
+	aliasA, err := agentprotocol.DeploymentBackendAlias("deployment-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliasB, err := agentprotocol.DeploymentBackendAlias("deployment-b")
+	if err != nil {
+		t.Fatal(err)
+	}
 	dispatcher := &ingressDispatcherStub{}
 	gateway, err := NewAgentGateway(dispatcher, func() (string, error) { return "command-1", nil },
 		func() time.Time { return time.Unix(100, 0).UTC() }, time.Minute)
@@ -23,10 +31,10 @@ func TestAgentGatewayBuildsCanonicalTypedCommand(t *testing.T) {
 		ProbeRouteIDs: []string{"route-b", "route-a"},
 		Routes: []applicationroutebiz.GatewayRoute{
 			{RouteID: "route-b", Revision: 1, DeploymentID: "deployment-b", CutoverSequence: 2,
-				RuntimeTargetID: "target-1", Hostname: "b.example.com", BackendAlias: "deployment-b",
+				RuntimeTargetID: "target-1", Hostname: "b.example.com", BackendAlias: aliasB,
 				BackendPort: 8080, TLSMode: applicationroutebiz.TLSModeAutomatic},
 			{RouteID: "route-a", Revision: 1, DeploymentID: "deployment-a", CutoverSequence: 1,
-				RuntimeTargetID: "target-1", Hostname: "a.example.com", BackendAlias: "deployment-a",
+				RuntimeTargetID: "target-1", Hostname: "a.example.com", BackendAlias: aliasA,
 				BackendPort: 8080, TLSMode: applicationroutebiz.TLSModeAutomatic},
 		}}
 	dispatcher.result = func(command managedhostbiz.AgentCommand) managedhostbiz.AgentCommandResult {

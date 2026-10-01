@@ -94,10 +94,12 @@ func (c IngressCommand) Validate() error {
 }
 
 func validIngressRoute(route IngressRoute) bool {
+	expectedAlias, err := DeploymentBackendAlias(route.DeploymentID)
 	return validIdentifier(route.RouteID) && route.Revision > 0 &&
 		validIdentifier(route.DeploymentID) && route.CutoverSequence > 0 &&
 		validIdentifier(route.RuntimeTargetID) && validIngressHostname(route.Hostname) &&
-		ingressBackendAlias.MatchString(route.BackendAlias) && route.BackendPort > 0 &&
+		err == nil && ingressBackendAlias.MatchString(route.BackendAlias) &&
+		route.BackendAlias == expectedAlias && route.BackendPort > 0 &&
 		(route.TLSMode == IngressTLSAutomatic || route.TLSMode == IngressTLSDisabled)
 }
 

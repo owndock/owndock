@@ -46,7 +46,7 @@ func TestBuildCaddyConfigIsDeterministicAndConstrained(t *testing.T) {
 		`"module":"file_system"`, `"root":"/data/caddy"`,
 		`"listen":[":8080",":8443"]`, `"strict_sni_host":true`,
 		`"skip":["route-2.example.com"]`, `"status_code":404`,
-		`"dial":"deployment-1:8080"`, `"stream_close_delay":"5m"`,
+		`"dial":"` + routes[0].BackendAlias + `:8080"`, `"stream_close_delay":"5m"`,
 		`"header":{"X-OwnDock-Route-Probe"`, `"response":{"set":{"X-OwnDock-Route-Probe"`,
 	} {
 		if !strings.Contains(encoded, required) {

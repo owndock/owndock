@@ -9,6 +9,10 @@ import (
 )
 
 func TestBuildDesiredConfigPreservesOtherRoutesAndReplacesDeploymentScope(t *testing.T) {
+	otherAlias, err := agentprotocol.DeploymentBackendAlias("deployment-other")
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := applicationroutebiz.CutoverRequest{OrganizationID: "organization-1",
 		ProjectID: "project-1", ApplicationID: "application-1", EnvironmentID: "environment-1",
 		RuntimeTargetID: "target-1", ManagedHostID: "host-1", DeploymentID: "deployment-new",
@@ -17,7 +21,7 @@ func TestBuildDesiredConfigPreservesOtherRoutesAndReplacesDeploymentScope(t *tes
 	document := hostConfigDocument{ID: "host-1", Revision: 6,
 		Committed: []gatewayRouteDocument{{RouteID: "route-other", Revision: 2,
 			DeploymentID: "deployment-other", CutoverSequence: 3, RuntimeTargetID: "target-2",
-			Hostname: "other.example.com", BackendAlias: "other", BackendPort: 9090,
+			Hostname: "other.example.com", BackendAlias: otherAlias, BackendPort: 9090,
 			TLSMode: applicationroutebiz.TLSModeAutomatic}}}
 	route := cutoverTestRoute(t, "route-new", "app.example.com")
 	desired, err := buildDesiredConfig(document, request, []applicationroutebiz.ApplicationRoute{route})
@@ -34,6 +38,10 @@ func TestBuildDesiredConfigPreservesOtherRoutesAndReplacesDeploymentScope(t *tes
 }
 
 func TestCutoverDocumentRoundTripRetainsExactRuntimeFence(t *testing.T) {
+	alias, err := agentprotocol.DeploymentBackendAlias("deployment-1")
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := applicationroutebiz.CutoverRequest{OrganizationID: "organization-1",
 		ProjectID: "project-1", ApplicationID: "application-1", EnvironmentID: "environment-1",
 		RuntimeTargetID: "target-1", ManagedHostID: "host-1", DeploymentID: "deployment-1",
@@ -42,7 +50,7 @@ func TestCutoverDocumentRoundTripRetainsExactRuntimeFence(t *testing.T) {
 	desired := applicationroutebiz.HostDesiredConfig{ManagedHostID: "host-1", HostRevision: 3,
 		ProbeRouteIDs: []string{"route-1"}, Routes: []applicationroutebiz.GatewayRoute{{
 			RouteID: "route-1", Revision: 2, DeploymentID: "deployment-1", CutoverSequence: 9,
-			RuntimeTargetID: "target-1", Hostname: "app.example.com", BackendAlias: "backend",
+			RuntimeTargetID: "target-1", Hostname: "app.example.com", BackendAlias: alias,
 			BackendPort: 8080, TLSMode: applicationroutebiz.TLSModeAutomatic,
 		}}}
 	document := cutoverDocumentFromDomain(applicationroutebiz.CutoverTransaction{Request: request, Desired: desired})
