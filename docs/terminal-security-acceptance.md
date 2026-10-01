@@ -16,15 +16,16 @@ make test-terminal-security
 | --- | --- | --- |
 | 伪造容器或越过 Project | API 只接受 Deployment ID；Server 固定当前成功实例、Runtime Target 和 generation | 目标解析、跨 Project、身份不匹配测试 |
 | 将终端变成任意 Docker exec | shell 由适配器固定；拒绝任意 endpoint、container ID、command、user、env、workdir、privileged | direct 与 Agent executor 契约测试 |
-| 窃取或重放连接凭据 | 短时票据只存 SHA-256，使用限定 connect path 的 Secure/HttpOnly/SameSite Cookie 并原子消费 | ticket 生命周期和单次消费测试 |
+| 窃取或重放连接凭据 | 短时票据只存 SHA-256，使用限定 connect path 的 Secure/HttpOnly/SameSite Cookie 并原子消费 | ticket 生命周期；固定 MongoDB Replica Set 上两个独立 Repository 并发消费严格只有一个成功 |
 | Cross-Site WebSocket Hijacking | WSS 要求唯一、严格同域 Origin；不复用 REST CORS 白名单 | 缺失与跨站 Origin 测试 |
-| 登录退出、角色变化或策略收紧后保留 Shell | 活动连接每 2 秒复核权威会话、登录、角色、策略和目标；撤权通知后按当前策略宽限关闭 | 管理员终止、撤权宽限、权限恢复和复核故障测试 |
+| 登录退出、角色变化或策略收紧后保留 Shell | 活动连接每 2 秒复核权威会话、登录、角色、策略和目标；撤权通知后按当前策略宽限关闭 | 管理员终止、撤权宽限、权限恢复和复核故障测试；两个独立仓内 WSS 服务从共享权威状态发现管理员终止并分别关闭 |
 | 目标替换后仍操作旧容器 | exec 前后及连接期复核稳定容器标签、Deployment 和 cutover identity | direct 目标替换与 Agent 标签测试 |
 | 浏览器把主机终端升级为任意账号或命令执行 | Agent OPEN 只有 kind/窗口，本机配置固定有效账号与 Shell；direct SSH 四项连接信息由 Managed Host 固定 | 协议字段拒绝、固定账号、最小环境与跨层 Agent conformance |
 | SSH 中间人或错误凭据连接到其他主机 | 只用固定公钥认证并强制 SHA-256 Host Key；没有跳过校验开关 | 固定用户/客户端公钥握手、Host Key 正反向与 PEM 清零测试 |
 | 主机 Shell 结束后遗留子进程 | 独立 PTY/进程组，TERM 后关闭控制 PTY，短宽限后 KILL | 本机真实 Shell + 长时子进程回收测试 |
 | 畸形帧、超大输入或消息洪峰耗尽内存 | 严格方向/字段/序号，4 KiB 控制帧、32 KiB 数据帧、200 输入消息/秒和有界队列；只持久化稳定违规码 | 浏览器协议、Agent 协议、超大 payload 不落流和错误字段泄漏测试 |
 | Agent 断线、慢消费者或复用错 Host | 每会话序号与有界队列；WSS 输出写入有截止时间；断线关闭且不恢复旧 PTY；Registry 按固定 Host 路由 | WSS 慢读、阻塞输入、浏览器硬断线、Gateway、Registry 和竞态测试 |
+| 多 Server 同时修改策略或占用会话槽位 | 策略使用版本条件更新；活动用户/目标槽位由 MongoDB partial unique index 仲裁 | 固定 MongoDB Replica Set 上两个独立 Repository 的并发策略更新与槽位竞争均严格一胜一冲突 |
 | 终端内容进入日志、Trace、指标或 MongoDB | 普通可观测接口只接收固定 kind/mode/reason；持久化只写会话元数据和安全错误码 | 指标不受信标签归一化与泄漏断言 |
 
 ## 背压与故障如何收敛
@@ -74,7 +75,7 @@ Server `/metrics` 暴露以下低基数指标：
 
 - 仓内 WSS 已覆盖慢输出消费者、阻塞终端输入和浏览器硬断线；仍需两台真实 Agent 主机上的网络分区、Agent 重启、容器退出和跨主机背压故障注入；
 - 真实浏览器的 Cookie、反向代理、关闭码、后台标签页、网络切换和 CSP 矩阵；
-- 多 Server 实例对管理员终止、登录撤销、角色与策略变更的最大发现延迟验收；
+- 多 Server 的策略更新、Ticket 消费和槽位竞争已在固定 MongoDB Replica Set 验证；两个独立仓内 HTTP/WSS 服务也已证明无需进程内广播即可发现共享管理员终止。仍需两个真实 Server 进程经反向代理对登录撤销、角色与策略变更做默认 2 秒周期下的最大发现延迟验收；
 - 主机 PTY/direct SSH 已具备固定身份、最小环境、PTY 进程组回收、公钥认证和 SHA-256 Host Key 固定的本地/协议测试；仍需真实远程 Linux/SSH 的进程树、断网、服务重启、Host Key 轮换和秘密哨兵系统门禁；
 - 对 MongoDB、审计导出、Access Log、Trace backend、Prometheus 和测试 artifact 的端到端秘密哨兵扫描。
 

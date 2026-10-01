@@ -32,8 +32,27 @@ type wssConnectorStub struct {
 	closeDone        chan struct{}
 	review           biz.ConnectionReview
 	reviewErr        error
+	reviewSource     *wssReviewAuthority
 	reviews          int
 	connectedSession biz.TerminalSession
+}
+
+type wssReviewAuthority struct {
+	mu     sync.RWMutex
+	review biz.ConnectionReview
+	err    error
+}
+
+func (a *wssReviewAuthority) load() (biz.ConnectionReview, error) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.review, a.err
+}
+
+func (a *wssReviewAuthority) store(review biz.ConnectionReview, err error) {
+	a.mu.Lock()
+	a.review, a.err = review, err
+	a.mu.Unlock()
 }
 
 type wssObserverStub struct {
@@ -68,9 +87,14 @@ func (c *wssConnectorStub) ReviewConnectedSession(
 	_ biz.TerminalSession,
 ) (biz.ConnectionReview, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.reviews++
-	return c.review, c.reviewErr
+	source := c.reviewSource
+	review, err := c.review, c.reviewErr
+	c.mu.Unlock()
+	if source != nil {
+		return source.load()
+	}
+	return review, err
 }
 
 func (c *wssConnectorStub) ConnectWithTicket(
@@ -419,6 +443,59 @@ func TestContainerWSSClosesAfterAdministratorTerminationReview(t *testing.T) {
 	if connector.reason != biz.CloseReasonAdministratorTerminated ||
 		connector.safeCode != "" {
 		t.Fatalf("connector close = %s/%q", connector.reason, connector.safeCode)
+	}
+}
+
+func TestTerminalWSSInstancesObserveSharedAdministrativeTermination(t *testing.T) {
+	authority := &wssReviewAuthority{}
+	closeSignals := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	connectors := []*wssConnectorStub{
+		{
+			stream: newWSSStreamStub(), closeDone: closeSignals[0],
+			reviewSource: authority,
+		},
+		{
+			stream: newWSSStreamStub(), closeDone: closeSignals[1],
+			reviewSource: authority,
+		},
+	}
+	handlers := make([]*TerminalWSS, len(connectors))
+	sessionIDs := []string{"terminal-session-1", "terminal-session-2"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	connections := make([]*websocket.Conn, len(connectors))
+	for index, connector := range connectors {
+		handlers[index] = NewTerminalWSS(connector)
+		handlers[index].reviewInterval = 10 * time.Millisecond
+		connections[index] = dialOpenTerminalWSS(
+			t, ctx, handlers[index], sessionIDs[index],
+		)
+	}
+	revokedAt := time.Now()
+	authority.store(biz.ConnectionReview{
+		Terminate: true,
+		Reason:    biz.CloseReasonAdministratorTerminated,
+	}, nil)
+	for index, connection := range connections {
+		if _, _, err := connection.Read(ctx); websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+			t.Fatalf("terminal instance %d close error = %v", index+1, err)
+		}
+	}
+	for index, connector := range connectors {
+		select {
+		case <-closeSignals[index]:
+		case <-ctx.Done():
+			t.Fatalf("terminal instance %d did not persist shared termination", index+1)
+		}
+		connector.mu.Lock()
+		if connector.reason != biz.CloseReasonAdministratorTerminated ||
+			connector.safeCode != "" || connector.reviews < 1 {
+			t.Fatalf("terminal instance %d connector state = %+v", index+1, connector)
+		}
+		connector.mu.Unlock()
+	}
+	if elapsed := time.Since(revokedAt); elapsed > 500*time.Millisecond {
+		t.Fatalf("shared administrative termination took %v, want <= 500ms", elapsed)
 	}
 }
 

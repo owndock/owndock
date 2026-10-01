@@ -16,7 +16,7 @@ make test-release-candidate
 - 全仓竞态测试；
 - MongoDB 8.3.7/FCV 8.3 单节点 Replica Set 的完整产品持久化集成、最小权限应用身份认证、`requireTLS` 加密与明文/错误 CA 拒绝，以及三成员 Replica Set 在已打开 Runtime Inventory observation 时停止 Primary、重新选举、恢复 majority 事务并原子发布 current view；
 - 社区版 Compose 首次启动、最小权限数据库身份、Bootstrap、Server 重启、候选升级、基线回滚、停写备份和空卷恢复；
-- 真实本机 Docker Engine 的 direct 与 Agent 执行回归；
+- 真实本机 Docker Engine 的 direct 与 Agent 执行回归，以及两个固定 digest 的独立 Docker Engine 上的选址隔离、单 Host 故障、切换中断恢复和延迟旧命令拒绝；
 - Agent 包格式、Release manifest、真实进程控制流、证书轮换恢复和双 Host 身份隔离；
 - Terminal、Agent protocol、Gateway 与观测链路的专项竞态门禁。
 

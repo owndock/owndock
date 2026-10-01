@@ -65,7 +65,7 @@ test-changed-coverage:
 
 test-runtime-integration:
 	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run 'TestDockerGateway(Engine|MTLSEnginePartitionAndRecovery|MTLSCutoverRenameFailureAndRecovery)Integration' -count=1 -timeout=5m
-	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/agent/runtime -run TestDockerExecutorIntegration -count=1 -timeout=5m
+	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/agent/runtime -run 'TestDockerExecutor(Integration|TwoIsolatedEnginesIntegration)' -count=1 -timeout=10m
 
 test-build-integration:
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \

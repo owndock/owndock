@@ -4985,15 +4985,16 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	}
 	repository := terminaldata.NewMongoRepository(database)
 	now := time.Now().UTC().Truncate(time.Millisecond)
+	policyInput := terminalbiz.PolicyInput{
+		Enabled: true, AllowedRoles: []security.Role{security.RoleOwner, security.RoleMaintainer},
+		EnvironmentStages: []string{"development", "staging"},
+		IdleTimeout:       5 * time.Minute, MaximumDuration: time.Hour,
+		MaximumPerUser: 1, MaximumPerTarget: 1,
+		RevocationGracePeriod: 30 * time.Second,
+	}
 	policy, err := terminalbiz.NewProjectPolicy(
 		"terminal-policy-1", "terminal-organization", "terminal-project", "terminal-owner",
-		terminalbiz.PolicyInput{
-			Enabled: true, AllowedRoles: []security.Role{security.RoleOwner, security.RoleMaintainer},
-			EnvironmentStages: []string{"development", "staging"},
-			IdleTimeout:       5 * time.Minute, MaximumDuration: time.Hour,
-			MaximumPerUser: 1, MaximumPerTarget: 1,
-			RevocationGracePeriod: 30 * time.Second,
-		}, now,
+		policyInput, now,
 	)
 	if err != nil {
 		t.Fatalf("new terminal policy: %v", err)
@@ -5008,6 +5009,9 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	if _, err := repository.SavePolicy(ctx, policy, 0); !errors.Is(err, terminalbiz.ErrPolicyConflict) {
 		t.Fatalf("duplicate terminal policy error = %v", err)
 	}
+	verifyTerminalMultiRepositoryPolicyFence(
+		t, ctx, database, policy, policyInput, now,
+	)
 	target := terminalbiz.Target{
 		Kind: terminalbiz.KindContainer, OrganizationID: policy.OrganizationID, ProjectID: policy.ProjectID,
 		ApplicationID: "terminal-application", EnvironmentID: "terminal-environment",
@@ -5075,6 +5079,9 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	if err != nil || len(activeForEnvironment) != 1 || activeForEnvironment[0].ID != second.ID {
 		t.Fatalf("active terminal sessions for Environment = %+v/%v", activeForEnvironment, err)
 	}
+	verifyTerminalMultiRepositorySessionFences(
+		t, ctx, database, first, policy, now,
+	)
 	if _, err := database.Collection("product_applications").UpdateOne(
 		ctx,
 		bson.D{{Key: "_id", Value: first.ApplicationID}},
@@ -5101,6 +5108,167 @@ func verifyTerminalPersistenceIntegration(t *testing.T, ctx context.Context, dat
 	stored, err := repository.GetSession(ctx, first.OrganizationID, first.ID)
 	if err != nil || stored.Active || stored.TicketHash != "" || stored.CloseReason != terminalbiz.CloseReasonUserRequested {
 		t.Fatalf("stored closed terminal session = %+v, error = %v", stored, err)
+	}
+}
+
+func verifyTerminalMultiRepositoryPolicyFence(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+	policy terminalbiz.AccessPolicy,
+	input terminalbiz.PolicyInput,
+	now time.Time,
+) {
+	t.Helper()
+	first, err := policy.Change(input, "terminal-owner", now.Add(time.Second))
+	if err != nil {
+		t.Fatalf("build first concurrent terminal policy update: %v", err)
+	}
+	secondInput := input
+	secondInput.Enabled = false
+	second, err := policy.Change(secondInput, "terminal-owner", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("build second concurrent terminal policy update: %v", err)
+	}
+	repositories := []*terminaldata.MongoRepository{
+		terminaldata.NewMongoRepository(database),
+		terminaldata.NewMongoRepository(database),
+	}
+	updates := []terminalbiz.AccessPolicy{first, second}
+	start := make(chan struct{})
+	results := make(chan error, len(repositories))
+	var wait sync.WaitGroup
+	for index := range repositories {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			_, saveErr := repositories[index].SavePolicy(ctx, updates[index], policy.Version)
+			results <- saveErr
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(results)
+	assertOneTerminalFenceWinner(t, results, terminalbiz.ErrPolicyConflict, "policy update")
+	stored, err := repositories[0].GetProjectPolicy(ctx, policy.OrganizationID, policy.ProjectID)
+	if err != nil || stored.Version != policy.Version+1 {
+		t.Fatalf("terminal policy after concurrent update = %+v, error = %v", stored, err)
+	}
+}
+
+func verifyTerminalMultiRepositorySessionFences(
+	t *testing.T,
+	ctx context.Context,
+	database *drivermongo.Database,
+	fixture terminalbiz.TerminalSession,
+	policy terminalbiz.AccessPolicy,
+	now time.Time,
+) {
+	t.Helper()
+	repositories := []*terminaldata.MongoRepository{
+		terminaldata.NewMongoRepository(database),
+		terminaldata.NewMongoRepository(database),
+	}
+	ticketSession := fixture
+	ticketSession.ID = "terminal-session-ticket-race"
+	ticketSession.ActorID = "terminal-ticket-actor"
+	ticketSession.AuthenticationSessionID = "terminal-ticket-login"
+	ticketSession.TicketHash = strings.Repeat("d", 64)
+	ticketSession.RequestID = "terminal-ticket-request"
+	ticketSession.UserConcurrencySlot = 1
+	ticketSession.TargetConcurrencySlot = 3
+	if _, err := repositories[0].CreateSession(ctx, ticketSession); err != nil {
+		t.Fatalf("create terminal ticket race fixture: %v", err)
+	}
+	start := make(chan struct{})
+	ticketResults := make(chan error, len(repositories))
+	var wait sync.WaitGroup
+	for _, repository := range repositories {
+		wait.Add(1)
+		go func(repository *terminaldata.MongoRepository) {
+			defer wait.Done()
+			<-start
+			_, consumeErr := repository.ConsumeTicket(
+				ctx, ticketSession.OrganizationID, ticketSession.ID,
+				ticketSession.TicketHash, now.Add(4*time.Second),
+			)
+			ticketResults <- consumeErr
+		}(repository)
+	}
+	close(start)
+	wait.Wait()
+	close(ticketResults)
+	assertOneTerminalFenceWinner(t, ticketResults, terminalbiz.ErrInvalidTicket, "ticket consume")
+
+	target := terminalbiz.Target{
+		Kind: terminalbiz.KindContainer, OrganizationID: fixture.OrganizationID,
+		ProjectID: fixture.ProjectID, ApplicationID: fixture.ApplicationID,
+		EnvironmentID: fixture.EnvironmentID, ManagedHostID: fixture.ManagedHostID,
+		RuntimeTargetID: fixture.RuntimeTargetID, DeploymentID: fixture.DeploymentID,
+		RunningInstanceID:  fixture.RunningInstanceID,
+		InstanceGeneration: fixture.InstanceGeneration,
+		EnvironmentStage:   "development", ConnectionMode: fixture.ConnectionMode,
+	}
+	candidates := make([]terminalbiz.TerminalSession, len(repositories))
+	for index := range candidates {
+		candidate, err := terminalbiz.NewTerminalSession(
+			fmt.Sprintf("terminal-slot-race-%d", index+1),
+			fmt.Sprintf("terminal-slot-actor-%d", index+1),
+			fmt.Sprintf("terminal-slot-login-%d", index+1),
+			strings.Repeat(string(rune('e'+index)), 64),
+			"192.0.2.10", "OwnDock-Integration/1.0",
+			fmt.Sprintf("terminal-slot-request-%d", index+1),
+			target, policy, now.Add(5*time.Second),
+		)
+		if err != nil {
+			t.Fatalf("build terminal slot race candidate %d: %v", index, err)
+		}
+		candidate.UserConcurrencySlot = 1
+		candidate.TargetConcurrencySlot = 4
+		candidates[index] = candidate
+	}
+	start = make(chan struct{})
+	slotResults := make(chan error, len(repositories))
+	wait = sync.WaitGroup{}
+	for index := range repositories {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			<-start
+			_, createErr := repositories[index].CreateSession(ctx, candidates[index])
+			slotResults <- createErr
+		}(index)
+	}
+	close(start)
+	wait.Wait()
+	close(slotResults)
+	assertOneTerminalFenceWinner(t, slotResults, terminalbiz.ErrSessionSlotConflict, "session slot")
+}
+
+func assertOneTerminalFenceWinner(
+	t *testing.T,
+	results <-chan error,
+	wantLoser error,
+	operation string,
+) {
+	t.Helper()
+	winners, losers := 0, 0
+	for err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, wantLoser):
+			losers++
+		default:
+			t.Fatalf("concurrent terminal %s error = %v", operation, err)
+		}
+	}
+	if winners != 1 || losers != 1 {
+		t.Fatalf(
+			"concurrent terminal %s winners/losers = %d/%d, want 1/1",
+			operation, winners, losers,
+		)
 	}
 }
 
