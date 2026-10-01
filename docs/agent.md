@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY。Agent Ingress 已具备类型化协议、跨重启 fence、固定 Caddy JSON 生成器、Unix Socket `/load` 客户端和显式配置 wiring；安装包也包含固定多架构 digest 的最小权限 Gateway，但 capability 默认关闭，真实 Linux 80/443、自动 HTTPS 与升级回滚门禁尚未通过。Agent 支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、Ingress、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY。Agent Ingress 已具备类型化协议、跨重启 fence、固定 Caddy JSON 生成器、Unix Socket `/load` 客户端和显式配置 wiring；安装包也包含固定多架构 digest 的最小权限 Gateway，但 capability 默认关闭。Linux-kernel 容器中的真实 Gateway/Worker 流量门禁已通过，原生 systemd 宿主 80/443、自动 HTTPS 与升级回滚门禁尚未通过。Agent 支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、Ingress、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 

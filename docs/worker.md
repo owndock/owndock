@@ -1,6 +1,6 @@
 # Deployment Worker
 
-> 正式 Deployment Worker 已进入主进程的受管生命周期，但默认关闭。当前 Docker 适配器用于验证固定 digest、mTLS、私有 Registry 认证、运行规格、健康门禁、fenced token、幂等容器替换和安全失败分类；本地真实 Engine 和仓内 mTLS 连接/分区恢复验证已完成，在物理远程 Engine、入口流量和切换窗口故障注入完成前，不应视为生产就绪。
+> 正式 Deployment Worker 已进入主进程的受管生命周期，但默认关闭。当前 Docker 适配器用于验证固定 digest、mTLS、私有 Registry 认证、运行规格、健康门禁、fenced token、幂等容器替换和安全失败分类；本地真实 Engine、仓内 mTLS 连接/分区恢复，以及 Linux-kernel 容器中的真实 Caddy/Engine/Worker 入口切换已经验证。在物理远程 Engine、原生 systemd/自动 HTTPS 和客户等价切换窗口故障注入完成前，不应视为生产就绪。
 
 Deployment API 创建身份与目标不可变、执行状态可演进的交付记录，初始状态为 `queued`。Worker 负责消费队列并推进状态：
 
