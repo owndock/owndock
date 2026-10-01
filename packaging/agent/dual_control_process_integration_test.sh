@@ -558,20 +558,35 @@ if [ "$runtime_mode" = 1 ]; then
 	run_host_inventory_event_phase a succeeded event-recovery
 	for engine_host in a b; do
 		case "$engine_host" in
-			a) event_engine=$engine_a_id ;;
-		b) event_engine=$engine_b_id ;;
+			a)
+				event_engine=$engine_a_id
+				event_secret=event-private-sentinel-host-a
+				;;
+			b)
+				event_engine=$engine_b_id
+				event_secret=event-private-sentinel-host-b
+				;;
 		esac
 		docker exec "$event_engine" sh -ec '
 			i=0
 			while [ "$i" -lt 70 ]; do
 				docker --host tcp://127.0.0.1:2375 create \
-					--name "owndock-event-flood-$1-$i" "$2" >/dev/null
+					--name "owndock-event-flood-$1-$i" \
+					--label "private.event=$2" "$3" >/dev/null
 				i=$((i + 1))
 			done
-		' sh "$engine_host" \
+		' sh "$engine_host" "$event_secret" \
 			'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b'
 	done
 	run_dual_inventory_event_phase true event-flood
+	docker logs "$engine_a_id" >"$workspace/engine-a.log" 2>&1 || \
+		fail "could not capture Host A Engine logs for secret scan"
+	docker logs "$engine_b_id" >"$workspace/engine-b.log" 2>&1 || \
+		fail "could not capture Host B Engine logs for secret scan"
+	if find "$workspace" -type f -exec \
+		grep -E 'event-private-sentinel-host-(a|b)' {} + >/dev/null; then
+		fail "Docker Event Actor attributes leaked into Agent results or process logs"
+	fi
 
 	# An abrupt Agent process loss must not erase its independently persisted
 	# cutover watermark. Host B remains available, while Host A restarts from the
@@ -606,7 +621,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, bounded inventory Event flood, outage, restart fencing and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, secret-safe bounded inventory Event flood, outage, restart fencing and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi
