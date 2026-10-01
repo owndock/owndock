@@ -71,7 +71,8 @@ test-runtime-integration:
 test-ingress-integration:
 	@test "$$(uname -s)" = "Linux" || (echo "test-ingress-integration requires a Linux Docker host" && exit 2)
 	OWNDOCK_RUN_INGRESS_INTEGRATION=1 go test ./internal/agent/runtime \
-		-run TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration -count=1 -timeout=5m
+		-run 'Test(CaddyGatewayRealTrafficCutoverRollbackAndResume|ManagedIngressDeploymentWorkerEngineAndGateway)Integration' \
+		-count=1 -timeout=8m
 
 test-build-integration:
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \
