@@ -74,6 +74,7 @@ sequenceDiagram
 
 - 两台独立客户等价 Linux 主机上的 Agent 安装、部署、断线、升级与回滚；
 - 远程 mTLS Docker Engine 的网络分区、延迟旧命令和入口流量验证；
+- managed ingress 的 DNS/ACME/80/443、真实 Host/SNI 流量切换、回滚、长连接排空和 Agent/Gateway 升级验证；
 - Chrome/Firefox/Safari 的登录、权限即时撤销、Terminal WSS、IME、resize、慢消费者与断网 E2E；
 - 客户选择的 Registry、私有 CA、代理、KMS 和隔离网络兼容矩阵；
 - 客户等价存储上的 MongoDB Primary 切换、加密备份异地取回和版本升级演练；

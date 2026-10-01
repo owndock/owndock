@@ -8,7 +8,7 @@ Kratos 负责应用生命周期、HTTP/gRPC transport、中间件、配置和日
 
 第一阶段不使用 Google Wire。依赖在 `cmd/server` 显式组装，使资源创建、生命周期和测试替换点一眼可见，也避开已归档项目成为核心构建依赖。
 
-产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target 和 Deployment；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、Registry `anonymous/basic` 显式认证、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 与 OwnDock Registry 客户端已经支持显式自建 CA 和无凭据 HTTPS 代理，且不继承环境代理；Registry 品牌和客户网络兼容矩阵尚未完成，BuildKit/Docker daemon 的代理与 Registry CA 仍由各守护进程独立配置。早期未认证、进程内存实现的顶层资源样例已经删除。
+产品边界已经固定为 Organization 下的 Managed Host、只读内置 Template，以及 Project 下的 Source Repository、Application、Build、Artifact、Release、Environment、Runtime Target、Deployment 和计划中的 ApplicationRoute；Runtime Target 还形成 Container、Image、Network、Volume 的安全资源清单，详见 [product.md](product.md)。当前已实现 Template 目录与 Application 脱钩快照、外部 OCI 镜像入口、Source Repository/Repository Credential、Build Configuration、三类触发入口、Build 状态机/Mongo lease，以及独立 `owndock-build-worker` 的固定 Git 2.55.0 HTTPS/SSH 精确 Commit 检出、rootless BuildKit 构建、Registry `anonymous/basic` 显式认证、Artifact/Release 交接和有界脱敏日志。Release、Registry Credential 和 Environment 配置绑定通过纯 Go 共享运行契约连接控制面与执行适配器。Deployment 具备默认关闭的受管 Worker 与基础 Docker 执行适配器。Runtime Inventory 已有独立领域、分代 MongoDB Repository、四类 Docker 安全投影、Agent 传输与受管 Worker；真实双主机、容量与事件洪峰系统验收仍未完成。Git 与 OwnDock Registry 客户端已经支持显式自建 CA 和无凭据 HTTPS 代理，且不继承环境代理；Registry 品牌和客户网络兼容矩阵尚未完成，BuildKit/Docker daemon 的代理与 Registry CA 仍由各守护进程独立配置。早期未认证、进程内存实现的顶层资源样例已经删除。
 
 平台触发链也已落地：通用 Trigger Token 适合任意能发出 HTTPS 请求的自动化系统；GitHub、GitLab、Gitea 和 Forgejo 使用独立 Build Hook。Build Hook 固定平台、Build Configuration 和允许 ref，使用与 Git 读取凭据分离的 Secret 引用，先对原始 body 验签再解析，并按 delivery 长期去重。
 
@@ -75,6 +75,14 @@ Deployment `biz` 只定义 Execution Resolver、Credential Resolver、Executor �
 Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host 上 Docker Engine 的显式使用绑定。两者连接模式必须一致。Agent enrollment token 只返回一次且数据库仅存哈希，CSR 由 Agent 在本地私钥上生成；Server 颁发只含 `clientAuth` 的固定身份，并在原子事务中消费 token、绑定 Host 和写审计。Agent hello 成功后 Host 进入 `online`，断线或 heartbeat timeout 后条件更新为 `offline`；session fence 防止旧连接覆盖新连接状态。Host 禁用会吊销数据库身份、使未使用 token 失效并取消当前进程连接。Agent prober 与 Deployment Gateway 在 Agent Control Server 启用时配套注册，因此只有连接到可执行当前协议的 Agent 才能把 Target 探测为 `ready`；离线不会回退 direct。direct Host 的 SSH 地址、固定用户、SHA-256 Host Key 指纹和外部私钥引用采用全有或全无约束；私钥原文不进入 Host 文档。
 
 基础 Docker 适配器使用作用域稳定的容器名、Deployment 标签、同 Deployment 的 lease fencing token 和跨 Deployment 的 cutover sequence 实现幂等及安全取消。cutover sequence 由 MongoDB 在创建同一 Project/Application/Environment/Runtime Target 槽位的 Deployment 时单调分配，并写入 Docker 标签；因此较旧 Deployment 的延迟命令不能覆盖已激活的新版本。适配器会应用 Release 声明的端口、环境变量、资源限制和 Docker HEALTHCHECK：候选容器启动并进入 healthy 后，Worker 再验证 MongoDB 活跃租约、移除旧容器并把候选容器改为稳定名称。不健康候选会被清理且旧容器保持运行。该策略仍需在真实 Engine、入口路由和端口所有权场景中验证实际停机窗口。
+
+## Application Ingress Boundary
+
+应用入口已经固定为独立 `ApplicationRoute` 边界，不能由 Release 端口、Docker `ExposedPorts` 或稳定容器名隐式产生。推荐的 managed 模式只服务 Agent Runtime Target：每台 Host 使用独立 Ingress Gateway 监听 80/443，Agent 通过权限受限 Unix Socket 提交完整确定性 route 配置；Gateway 不获得 Docker Socket、MongoDB、Agent 身份或应用 Secret。external 模式由客户管理入口，OwnDock 不把容器成功描述为流量 ready。
+
+目标切换顺序是 candidate health、Mongo lease/Route revision/cutover fence、原子 route load、Host-header 私有探测、成功提交、有界 drain、旧 backend 回收。配置拒绝保留旧 route；加载成功后的探测失败必须在旧容器停止前回滚。Agent 为 Host 配置和 Route 保存不可淘汰水位，迟到命令不能覆盖较新 route。自动 HTTPS 还要求客户 DNS、80/443、公网/ACME 可达和持久证书卷；这些条件未满足时 Route 不能为 ready。
+
+该边界目前是已接受但未实现的架构，代码仍只创建无宿主端口绑定的容器。领域、Mongo/API、Agent capability、固定 digest Gateway 和真实流量门禁完成前，不得宣称应用入口已交付。详细契约见 [Application ingress](application-ingress.md)。
 
 ## Terminal Boundary
 

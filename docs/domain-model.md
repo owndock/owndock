@@ -21,6 +21,7 @@ Artifact 1 --* Artifact Evidence
 Artifact 1 --0..1 Release
 Release 1 --* Deployment *--1 Environment
 Deployment *--1 Runtime Target
+Application Route *--1 Application / Environment / Runtime Target
 Release *--0..1 Registry Credential
 Runtime Target 1 --* Runtime Inventory Observation
 Runtime Inventory Observation 1 --* Container/Image/Network/Volume
@@ -41,6 +42,7 @@ Managed Host 1 --* Host Terminal Session
 - Release 是不可变可部署版本，并固定 OCI image digest；
 - Environment 是 dev/staging/prod 等逻辑阶段；
 - Runtime Target 是 Project 获准使用某台 Managed Host 上 Docker Engine 的部署入口；
+- Application Route 固定 Application、Environment、Runtime Target、hostname 和 Release 命名端口；只有 route observed state、证书和实际网关探测匹配时才表示用户入口 ready，当前尚未进入公开 API；
 - Deployment 是不可变部署操作，重试和回滚产生新操作；
 - Runtime Inventory Observation 是一次完整 Docker 资源观测 generation，只有全部分块完成后才能事务更新 Current State；
 - Runtime Inventory Current State 保存资源最后安全摘要与 `present/absent` 时间线，不完整批次不能修改它；
