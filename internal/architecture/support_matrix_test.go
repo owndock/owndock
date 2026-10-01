@@ -23,6 +23,12 @@ func TestSupportMatrixTracksLockedBaselines(t *testing.T) {
 		!strings.Contains(communityVerifier, "owndock-community-compatibility-v2") {
 		t.Fatal("community release verifier does not enforce the Agent host support baseline")
 	}
+	communityPreflight := readSupportFile(t, filepath.Join(root, "deploy", "preflight-community.sh"))
+	if !strings.Contains(communityPreflight, `[ "$docker_engine" = `+agentpreflight.SupportedDockerVersion+` ]`) ||
+		!strings.Contains(readSupportFile(t, filepath.Join(root, ".github", "workflows", "release.yml")),
+			"deploy/preflight-community.sh") {
+		t.Fatal("community deployment bundle does not enforce or include the host support baseline")
+	}
 
 	for _, baseline := range []struct {
 		name   string

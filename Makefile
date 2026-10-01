@@ -141,7 +141,7 @@ test-terminal-process:
 # external KMS/Registry matrices remain explicit system acceptance gates.
 test-community-deployment:
 	go test ./deploy -count=1
-	sh -n deploy/prepare-community-secrets.sh deploy/backup-community.sh \
+	sh -n deploy/preflight-community.sh deploy/prepare-community-secrets.sh deploy/backup-community.sh \
 		deploy/restore-community.sh deploy/community_process_integration_test.sh \
 		deploy/mongodb/init-replica-set.sh
 	@command -v docker >/dev/null 2>&1 || (echo "docker CLI is required to validate the community Compose file" >&2; exit 2)

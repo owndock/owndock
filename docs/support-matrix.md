@@ -30,6 +30,8 @@ Docker Engine 首发不声明一个未经验证的宽版本区间。29.6.1 是�
 
 Agent 安装包提供 `owndock-agentctl preflight`，生产安装和 enrollment 会在写入前重复执行。预检失败关闭地核对上表中的 OS、CPU、systemd、cgroup v2、Docker Engine 和本地 Unix Socket；回滚刻意不受预检阻断，避免主机环境漂移后失去恢复路径。
 
+社区版发布包同样包含 `deploy/preflight-community.sh`，必须在创建 Secret 和启动 Compose 前执行；它额外验证 Docker Compose v2。该脚本与 Agent 预检使用同一首发候选版本，但不会把一次本机通过提升为“已认证”。
+
 ## 仓库锁定基线
 
 | 组件 | 精确基线 | 仓库来源 |

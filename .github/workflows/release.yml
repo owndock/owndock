@@ -92,6 +92,7 @@ jobs:
             deploy/community.config.yaml \
             deploy/backup-community.sh \
             deploy/mongodb/init-replica-set.sh \
+            deploy/preflight-community.sh \
             deploy/prepare-community-secrets.sh \
             deploy/restore-community.sh \
             docs/community-installation.md \

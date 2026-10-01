@@ -2,6 +2,14 @@
 
 本文给出面向首次试用和小型团队的单节点 Docker Compose 基线。它使用固定 MongoDB 8.3.7 Replica Set 与 FCV 8.3、已签名的 OwnDock 镜像 digest、文件型 Secret、只监听 loopback 的 HTTP 入口，以及默认开启的 Deployment/Inventory Worker。
 
+正式生产安装先执行发布包内的支持矩阵预检：
+
+```bash
+sudo sh deploy/preflight-community.sh
+```
+
+脚本在创建 Secret 或启动容器前失败关闭地验证 Ubuntu Server 24.04 LTS、`amd64/arm64`、systemd、cgroup v2、Docker Engine 29.6.1、本地非符号链接 Unix Socket 与 Docker Compose v2。成功只输出不含主机身份和路径的 JSON。开发机可以阅读和验证 Compose，但不通过预检就不属于正式生产支持范围。
+
 该拓扑不是高可用方案。正式对外服务前仍必须完成客户环境的 TLS 入口、备份恢复、远程 Runtime Target 和故障演练；缺少这些证据时按 pre-release 使用。
 
 ## 准备发行制品

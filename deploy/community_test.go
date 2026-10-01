@@ -86,6 +86,28 @@ func TestPrepareCommunitySecrets(t *testing.T) {
 	}
 }
 
+func TestCommunityPreflightEnforcesInitialSupportBaseline(t *testing.T) {
+	contents, err := os.ReadFile("preflight-community.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(contents)
+	for _, required := range []string{
+		"Ubuntu Server 24.04 LTS is required",
+		`[ -d /run/systemd/system ]`,
+		`[ -s /sys/fs/cgroup/cgroup.controllers ]`,
+		`[ -S /var/run/docker.sock ] && [ ! -L /var/run/docker.sock ]`,
+		`[ "$docker_engine" = 29.6.1 ]`,
+		`[ "$docker_cgroup" = 2 ]`,
+		`/usr/bin/docker compose version`,
+		`"docker_socket":true,"docker_compose":true`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("community preflight is missing %q", required)
+		}
+	}
+}
+
 func TestCommunityMongoInitializationPinsFeatureCompatibilityVersion(t *testing.T) {
 	contents, err := os.ReadFile("mongodb/init-replica-set.sh")
 	if err != nil {
