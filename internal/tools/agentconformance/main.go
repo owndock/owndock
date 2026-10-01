@@ -122,7 +122,7 @@ type serverFrame struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|rotation-serve"))
+		fatal(errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|docker-proxy|rotation-serve"))
 	}
 	var err error
 	switch os.Args[1] {
@@ -136,10 +136,12 @@ func main() {
 		err = runServer(os.Args[2:])
 	case "serve-dual":
 		err = runDualServer(os.Args[2:])
+	case "docker-proxy":
+		err = runDockerProxy(os.Args[2:])
 	case "rotation-serve":
 		err = runRotationServer(os.Args[2:])
 	default:
-		err = errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|rotation-serve")
+		err = errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|docker-proxy|rotation-serve")
 	}
 	if err != nil {
 		fatal(err)
@@ -255,10 +257,11 @@ func initializeMaterialDirectory(paths materialPaths) error {
 
 func runConfig(arguments []string) error {
 	flags := flag.NewFlagSet("config", flag.ContinueOnError)
-	var output, endpoint, fixtureHostID, fixtureIdentityID, fixtureInstanceID string
+	var output, endpoint, dockerSocket, fixtureHostID, fixtureIdentityID, fixtureInstanceID string
 	var enableRotation bool
 	flags.StringVar(&output, "output", "", "absolute material directory")
 	flags.StringVar(&endpoint, "endpoint", "", "Agent control HTTPS endpoint")
+	flags.StringVar(&dockerSocket, "docker-socket", "/var/run/docker.sock", "absolute Docker Engine Unix socket")
 	flags.BoolVar(&enableRotation, "enable-rotation", false, "enable immediate conformance rotation")
 	flags.StringVar(&fixtureHostID, "host-id", hostID, "fixture managed host ID")
 	flags.StringVar(&fixtureIdentityID, "identity-id", identityID, "fixture Agent identity ID")
@@ -278,6 +281,10 @@ func runConfig(arguments []string) error {
 	if err != nil || parsed.Scheme != "https" || parsed.Hostname() != "127.0.0.1" ||
 		parsed.Path != "/api/v1/agent/connect" || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return errors.New("conformance endpoint is invalid")
+	}
+	if !filepath.IsAbs(dockerSocket) || filepath.Clean(dockerSocket) != dockerSocket ||
+		len(dockerSocket) > 4096 || strings.ContainsRune(dockerSocket, '\x00') {
+		return errors.New("conformance Docker socket path is invalid")
 	}
 	for _, required := range []string{
 		paths.ca, paths.clientCert, paths.clientKey, paths.bootID,
@@ -305,6 +312,7 @@ func runConfig(arguments []string) error {
 	config.Control.ReconnectMaximum = "500ms"
 	config.Control.ReconnectStableAfter = "1s"
 	config.Control.Capabilities = []string{agentprotocol.CapabilityRuntimeProbe}
+	config.Runtime.DockerSocket = dockerSocket
 	config.Runtime.StateDirectory = paths.state
 	config.CertificateRotation.Enabled = enableRotation
 	if enableRotation {
@@ -425,7 +433,8 @@ func runServer(arguments []string) error {
 func runDualServer(arguments []string) error {
 	flags := flag.NewFlagSet("serve-dual", flag.ContinueOnError)
 	var listen, materialDirectory, readyFile, resultA, resultB string
-	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost string
+	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
+	var commandSuffix string
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
 	flags.StringVar(&materialDirectory, "materials", "", "authority material directory")
@@ -437,9 +446,13 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&fixtureIdentityID, "identity-id", identityID, "fixture Agent identity ID")
 	flags.StringVar(&fixtureInstanceID, "instance-id", instanceID, "fixture Agent instance ID")
 	flags.StringVar(&onlyHost, "only-host", "", "temporarily accept only this Host")
+	flags.StringVar(&runtimeProbe, "runtime-probe", "expired", "expected runtime probe result: expired, ready, or unreachable")
+	flags.StringVar(&commandSuffix, "command-suffix", "", "optional unique command ID suffix")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
-		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB {
+		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
+		runtimeProbe != "expired" && runtimeProbe != "ready" && runtimeProbe != "unreachable" ||
+		commandSuffix != "" && !validCommandSuffix(commandSuffix) {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	if !strings.HasPrefix(listen, "127.0.0.1:") {
@@ -493,10 +506,17 @@ func runDualServer(arguments []string) error {
 		return err
 	}
 	completed := make(chan error, 1)
+	runtimeDeadline := time.Time{}
+	if runtimeProbe != "expired" {
+		runtimeDeadline = time.Now().Add(timeout + 30*time.Second).UTC()
+	}
 	handler := &dualConformanceHandler{
 		identities: map[string]fixtureIdentity{hostA: identityA, hostB: identityB},
 		results:    map[string]string{hostA: resultA, hostB: resultB},
-		onlyHost:   onlyHost, states: make(map[string]bool), completed: completed,
+		onlyHost:   onlyHost, runtimeProbe: runtimeProbe,
+		commandSuffix:   commandSuffix,
+		runtimeDeadline: runtimeDeadline,
+		states:          make(map[string]bool), completed: completed,
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	tlsListener := tls.NewListener(listener, &tls.Config{
@@ -526,13 +546,16 @@ func runDualServer(arguments []string) error {
 }
 
 type dualConformanceHandler struct {
-	identities map[string]fixtureIdentity
-	results    map[string]string
-	onlyHost   string
-	states     map[string]bool
-	completed  chan<- error
-	mu         sync.Mutex
-	once       sync.Once
+	identities      map[string]fixtureIdentity
+	results         map[string]string
+	onlyHost        string
+	runtimeProbe    string
+	commandSuffix   string
+	runtimeDeadline time.Time
+	states          map[string]bool
+	completed       chan<- error
+	mu              sync.Mutex
+	once            sync.Once
 }
 
 func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -551,7 +574,11 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 	handler.mu.Lock()
 	if handler.states[host] {
 		handler.mu.Unlock()
-		child := &conformanceHandler{resultFile: handler.results[host], identity: identity}
+		child := &conformanceHandler{
+			resultFile: handler.results[host], identity: identity,
+			runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
+			runtimeDeadline: handler.runtimeDeadline,
+		}
 		if err := child.handle(writer, request); err != nil {
 			handler.once.Do(func() { handler.completed <- err })
 		}
@@ -559,7 +586,11 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 	}
 	handler.states[host] = true
 	handler.mu.Unlock()
-	child := &conformanceHandler{resultFile: handler.results[host], identity: identity}
+	child := &conformanceHandler{
+		resultFile: handler.results[host], identity: identity,
+		runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
+		runtimeDeadline: handler.runtimeDeadline,
+	}
 	err := child.handle(writer, request)
 	if err != nil {
 		handler.mu.Lock()
@@ -629,6 +660,84 @@ func fixtureIdentityURI(identity fixtureIdentity) string {
 	return "spiffe://owndock/organizations/" + identity.organizationID +
 		"/managed-hosts/" + identity.hostID + "/agents/" + identity.identityID +
 		"/instances/" + identity.instanceID
+}
+
+func runDockerProxy(arguments []string) error {
+	flags := flag.NewFlagSet("docker-proxy", flag.ContinueOnError)
+	var listen, upstream, readyFile string
+	flags.StringVar(&listen, "listen", "", "absolute Unix socket path")
+	flags.StringVar(&upstream, "upstream", "", "loopback Docker Engine TCP address")
+	flags.StringVar(&readyFile, "ready-file", "", "absolute readiness output file")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		return errors.New("docker-proxy arguments are invalid")
+	}
+	if !filepath.IsAbs(listen) || filepath.Clean(listen) != listen || len(listen) > 100 {
+		return errors.New("docker-proxy Unix socket path is invalid")
+	}
+	host, port, err := net.SplitHostPort(upstream)
+	if err != nil || port == "" {
+		return errors.New("docker-proxy upstream address is invalid")
+	}
+	address := net.ParseIP(host)
+	if address == nil || !address.IsLoopback() {
+		return errors.New("docker-proxy upstream must use a loopback IP address")
+	}
+	readyFile, err = cleanAbsoluteOutput(readyFile)
+	if err != nil {
+		return fmt.Errorf("docker-proxy ready output: %w", err)
+	}
+	parent, err := os.Lstat(filepath.Dir(listen))
+	if err != nil || !parent.IsDir() || parent.Mode()&os.ModeSymlink != 0 {
+		return errors.New("docker-proxy socket directory must be a real directory")
+	}
+	if _, err := os.Lstat(listen); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("docker-proxy Unix socket path already exists")
+	}
+	listener, err := net.Listen("unix", listen)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = listener.Close()
+		_ = os.Remove(listen)
+	}()
+	if err := os.Chmod(listen, 0o600); err != nil {
+		return err
+	}
+	if err := writeFile(readyFile, []byte(listen+"\n"), 0o600); err != nil {
+		return err
+	}
+	for {
+		local, err := listener.Accept()
+		if err != nil {
+			return err
+		}
+		go proxyDockerConnection(local, upstream)
+	}
+}
+
+func proxyDockerConnection(local net.Conn, upstream string) {
+	remote, err := net.DialTimeout("tcp", upstream, 5*time.Second)
+	if err != nil {
+		_ = local.Close()
+		return
+	}
+	var closeOnce sync.Once
+	closeBoth := func() {
+		_ = local.Close()
+		_ = remote.Close()
+	}
+	copyDone := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(remote, local)
+		copyDone <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(local, remote)
+		copyDone <- struct{}{}
+	}()
+	<-copyDone
+	closeOnce.Do(closeBoth)
 }
 
 type rotationRequest struct {
@@ -915,6 +1024,9 @@ type conformanceHandler struct {
 	completed            chan<- error
 	expectedClientSerial int64
 	identity             fixtureIdentity
+	runtimeProbe         string
+	commandSuffix        string
+	runtimeDeadline      time.Time
 	once                 sync.Once
 }
 
@@ -983,13 +1095,27 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	if err := controller.Flush(); err != nil {
 		return err
 	}
+	commandID := "conformance-probe-" + h.identity.hostID
+	if h.commandSuffix != "" {
+		commandID += "-" + h.commandSuffix
+	}
 	command := agentprotocol.AgentCommand{
-		ID:       "conformance-probe-" + h.identity.hostID,
+		ID:       commandID,
 		Kind:     agentprotocol.AgentCommandRuntimeProbe,
 		Deadline: time.Unix(1, 0).UTC(),
 		RuntimeProbe: &agentprotocol.RuntimeProbeCommand{
 			RuntimeTargetID: "conformance-target-" + h.identity.hostID,
 		},
+	}
+	expectedRuntimeProbe := h.runtimeProbe
+	if expectedRuntimeProbe == "" {
+		expectedRuntimeProbe = "expired"
+	}
+	if expectedRuntimeProbe != "expired" {
+		command.Deadline = h.runtimeDeadline
+		if command.Deadline.IsZero() {
+			return errors.New("live Agent conformance command deadline is missing")
+		}
 	}
 	if err := command.Validate(); err != nil {
 		return fmt.Errorf("create Agent conformance command: %w", err)
@@ -1048,8 +1174,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 				}
 			}
 			if err := result.Validate(command); err != nil ||
-				result.Status != agentprotocol.AgentCommandFailed ||
-				result.ErrorCode != "command_expired" {
+				!validConformanceRuntimeProbe(result, expectedRuntimeProbe) {
 				return errors.New("Agent conformance command result is invalid")
 			}
 			commandResultReceived = true
@@ -1069,14 +1194,54 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		}
 	}
 	result := fmt.Sprintf(
-		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\ncommand_id=%s\ncommand_status=command_expired\nstatus=passed\n",
+		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\ncommand_id=%s\ncommand_status=%s\nstatus=passed\n",
 		hello.AgentVersion,
 		hello.ProtocolVersion,
 		hello.ManagedHostID,
 		peer.SerialNumber.String(),
 		command.ID,
+		conformanceRuntimeProbeStatus(expectedRuntimeProbe),
 	)
 	return writeFile(h.resultFile, []byte(result), 0o600)
+}
+
+func validConformanceRuntimeProbe(
+	result agentprotocol.AgentCommandResult,
+	expected string,
+) bool {
+	if expected == "expired" {
+		return result.Status == agentprotocol.AgentCommandFailed &&
+			result.ErrorCode == "command_expired" && result.RuntimeProbe == nil
+	}
+	if result.Status != agentprotocol.AgentCommandSucceeded || result.ErrorCode != "" ||
+		result.RuntimeProbe == nil {
+		return false
+	}
+	return expected == "ready" &&
+		result.RuntimeProbe.Status == agentprotocol.RuntimeProbeReady ||
+		expected == "unreachable" &&
+			result.RuntimeProbe.Status == agentprotocol.RuntimeProbeUnreachable
+}
+
+func conformanceRuntimeProbeStatus(expected string) string {
+	if expected == "expired" {
+		return "command_expired"
+	}
+	return "runtime_" + expected
+}
+
+func validCommandSuffix(value string) bool {
+	if value == "" || len(value) > 48 || value[0] == '-' || value[len(value)-1] == '-' {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' ||
+			character >= '0' && character <= '9' || character == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func decodeStrict(value []byte, target any) error {

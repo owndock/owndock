@@ -289,7 +289,7 @@ func stopIsolatedAgentDockerNode(
 	description string,
 ) {
 	t.Helper()
-	stopTimeout := 5 * time.Second
+	stopTimeout := 20 * time.Second
 	if err := node.container.Stop(ctx, &stopTimeout); err != nil {
 		t.Fatalf("stop isolated %s Docker Engine: %v", description, err)
 	}
@@ -307,7 +307,10 @@ func restartIsolatedAgentDockerNode(
 		logs, logErr := node.container.Logs(context.Background())
 		if logErr == nil {
 			defer logs.Close()
-			logExcerpt, _ = io.ReadAll(io.LimitReader(logs, 16*1024))
+			logExcerpt, _ = io.ReadAll(io.LimitReader(logs, 128*1024))
+			if len(logExcerpt) > 16*1024 {
+				logExcerpt = logExcerpt[len(logExcerpt)-16*1024:]
+			}
 		}
 		t.Fatalf("restart isolated %s Docker Engine: %v; logs=%q", description, err, logExcerpt)
 	}

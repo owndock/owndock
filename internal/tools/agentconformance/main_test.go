@@ -70,7 +70,12 @@ func TestMaterialsAndConfigCreateStrictRunnableInputs(t *testing.T) {
 	}
 
 	endpoint := "https://127.0.0.1:18443/api/v1/agent/connect"
-	if err := runConfig([]string{"--output", directory, "--endpoint", endpoint}); err != nil {
+	dockerSocket := filepath.Join(directory, "docker.sock")
+	if err := runConfig([]string{
+		"--output", directory,
+		"--endpoint", endpoint,
+		"--docker-socket", dockerSocket,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	config, err := agentconfig.Load(paths.config)
@@ -82,10 +87,78 @@ func TestMaterialsAndConfigCreateStrictRunnableInputs(t *testing.T) {
 		config.Control.ManagedHostID != hostID ||
 		config.Control.IdentityID != identityID ||
 		config.Control.InstanceID != instanceID ||
+		config.Runtime.DockerSocket != dockerSocket ||
 		len(config.Control.Capabilities) != 1 ||
 		config.Control.Capabilities[0] != agentprotocol.CapabilityRuntimeProbe ||
 		config.CertificateRotation.Enabled {
 		t.Fatalf("generated config = %+v", config)
+	}
+}
+
+func TestConformanceRuntimeProbeExpectations(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		expected string
+		result   agentprotocol.AgentCommandResult
+		valid    bool
+		status   string
+	}{
+		{
+			name: "expired", expected: "expired", valid: true,
+			status: "command_expired",
+			result: agentprotocol.AgentCommandResult{
+				Status: agentprotocol.AgentCommandFailed, ErrorCode: "command_expired",
+			},
+		},
+		{
+			name: "ready", expected: "ready", valid: true, status: "runtime_ready",
+			result: agentprotocol.AgentCommandResult{
+				Status: agentprotocol.AgentCommandSucceeded,
+				RuntimeProbe: &agentprotocol.RuntimeProbeResult{
+					Status: agentprotocol.RuntimeProbeReady,
+				},
+			},
+		},
+		{
+			name: "unreachable", expected: "unreachable", valid: true,
+			status: "runtime_unreachable",
+			result: agentprotocol.AgentCommandResult{
+				Status: agentprotocol.AgentCommandSucceeded,
+				RuntimeProbe: &agentprotocol.RuntimeProbeResult{
+					Status: agentprotocol.RuntimeProbeUnreachable,
+				},
+			},
+		},
+		{
+			name: "wrong status", expected: "ready",
+			result: agentprotocol.AgentCommandResult{
+				Status: agentprotocol.AgentCommandSucceeded,
+				RuntimeProbe: &agentprotocol.RuntimeProbeResult{
+					Status: agentprotocol.RuntimeProbeUnreachable,
+				},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if actual := validConformanceRuntimeProbe(test.result, test.expected); actual != test.valid {
+				t.Fatalf("valid = %t, want %t", actual, test.valid)
+			}
+			if test.valid && conformanceRuntimeProbeStatus(test.expected) != test.status {
+				t.Fatalf("status = %q", conformanceRuntimeProbeStatus(test.expected))
+			}
+		})
+	}
+}
+
+func TestCommandSuffixValidation(t *testing.T) {
+	for value, expected := range map[string]bool{
+		"initial": true, "host-a-recovery": true,
+		"": false, "-prefix": false, "suffix-": false,
+		"UPPER": false, "contains/slash": false,
+	} {
+		if actual := validCommandSuffix(value); actual != expected {
+			t.Fatalf("validCommandSuffix(%q) = %t, want %t", value, actual, expected)
+		}
 	}
 }
 
@@ -105,6 +178,13 @@ func TestConformanceInputsFailClosed(t *testing.T) {
 		"--endpoint", "https://example.com/api/v1/agent/connect",
 	}); err == nil {
 		t.Fatal("non-loopback conformance endpoint unexpectedly succeeded")
+	}
+	if err := runConfig([]string{
+		"--output", directory,
+		"--endpoint", "https://127.0.0.1:18443/api/v1/agent/connect",
+		"--docker-socket", "relative.sock",
+	}); err == nil {
+		t.Fatal("relative Docker socket unexpectedly succeeded")
 	}
 	if _, err := pathsFor("relative"); err == nil {
 		t.Fatal("relative conformance directory unexpectedly succeeded")

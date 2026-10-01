@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个固定 digest 的独立 Docker Engine 验证了选址隔离、单 Host 故障、切换中断恢复和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障及进程不停机恢复，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -222,14 +222,45 @@ sequenceDiagram
 
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)，产品版本、控制协议和相邻版本升级规则见[Agent 与 Server 版本兼容策略](agent-compatibility.md)。
 
-双 Agent 进程门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；命令故意使用固定的过期 deadline，因此不依赖测试机 Docker Engine，同时会验证重连时“同 ID、同完整命令”可安全重放。随后控制面只服务 Host B，Host A 必须收到临时不可用、保持进程存活且不能生成成功结果；恢复同一入口后 Host A 必须重新完成自己的命令链。独立的双 Engine 门禁进一步验证真实 Docker 部署、单 Host 故障、activate 中断恢复和网络层延迟旧命令；两者组合仍不替代两台客户主机上的完整进程与网络验收。
+双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。独立执行器门禁进一步验证真实 Docker 部署、activate 中断恢复和网络层延迟旧命令；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
+
+```mermaid
+sequenceDiagram
+    participant C as TLS Control Fixture
+    participant A as Agent A Process
+    participant DA as Isolated Engine A
+    participant B as Agent B Process
+    participant DB as Isolated Engine B
+
+    A->>C: mTLS hello (Host A)
+    B->>C: mTLS hello (Host B)
+    C->>A: runtime.probe initial-A
+    A->>DA: Ping via Host A Unix Socket
+    DA-->>A: ready
+    A-->>C: runtime_ready
+    C->>B: runtime.probe initial-B
+    B->>DB: Ping via Host B Unix Socket
+    DB-->>B: ready
+    B-->>C: runtime_ready
+    C--xA: temporarily reject Host A
+    B->>C: reconnect independently
+    Note over A,DA: Stop Engine A; Agent A stays alive
+    C->>A: runtime.probe outage-A
+    A-xDA: Ping fails
+    A-->>C: runtime_unreachable
+    Note over A,DA: Restart Engine A and refresh local proxy
+    C->>A: runtime.probe recovery-A
+    A->>DA: Ping via unchanged Unix Socket path
+    DA-->>A: ready
+    A-->>C: runtime_ready
+```
 
 ## 当前不能做什么
 
 - 首次私钥生成、enrollment 兑换和配置/身份材料安全落盘已经自动化，但仍需真实发行网络、私有 CA 和进程崩溃点系统验收；
 - 版本化包、systemd 安装和发行签名流水线已经实现；CI 已加入真实 Agent 进程的 mTLS hello/heartbeat/断线重连，以及真实 systemd 的启动、相邻测试版本升级、启动崩溃恢复、状态保留和回滚门禁，但 Linux 首次执行证据、正式相邻 Tag、真实 Agent 命令升级中断和多主机灰度/回滚验收仍未完成；
 - 自动证书轮换已经有代码级竞态和响应丢失恢复测试，但尚未完成真实双主机、跨控制面实例、进程崩溃点和升级/回滚系统验收；
-- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开、切换中断恢复和延迟旧命令，仍需两台客户等价主机、真实 Agent 进程到 Engine 的网络分区与控制面多实例验收；
+- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个真实 Agent 进程与两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开和进程不停机恢复，执行器门禁覆盖切换中断与延迟旧命令；仍需两台客户等价主机上的实际部署、网络分区、升级回滚与控制面多实例验收；
 - 容器和主机终端已支持 Agent 模式，但仍需真实远程 Linux、两主机和浏览器故障矩阵验收；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
 - Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标和两个 Runner 竞争；Project/Host 权限查询 API 已实现，真实双主机断线/洪峰系统验收尚未完成。
