@@ -179,13 +179,28 @@ func (e *RuntimeExecutor) abortManagedCutover(
 	e.observeManagedIngress("runtime_cancel", started, nil)
 	started = time.Now()
 	if err := e.ingress.FinalizeAbort(
-		ctx, deploymentID, applicationroutebiz.FailureCodeFromError(cause),
+		ctx, deploymentID, managedIngressFailureCode(cause),
 	); err != nil {
 		e.observeManagedIngress("cutover_abort", started, err)
 		return errors.Join(biz.ErrExecutionRetryable, cause, err)
 	}
 	e.observeManagedIngress("cutover_abort", started, nil)
 	return cause
+}
+
+func managedIngressFailureCode(err error) applicationroutebiz.FailureCode {
+	code := applicationroutebiz.FailureCodeFromError(err)
+	if code != applicationroutebiz.FailureUnknown {
+		return code
+	}
+	switch biz.CategorizeExecutionError(err, biz.FailureUnknown) {
+	case biz.FailureConfiguration, biz.FailureCredential, biz.FailureUnsupportedTarget:
+		return applicationroutebiz.FailureConfiguration
+	case biz.FailureTargetUnreachable, biz.FailureImagePull, biz.FailureRuntime:
+		return applicationroutebiz.FailureRuntimeUnavailable
+	default:
+		return applicationroutebiz.FailureUnknown
+	}
 }
 
 // MarkControlPlaneCommitted is called inside the same transaction that moves

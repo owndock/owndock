@@ -76,6 +76,7 @@ type FailureCode string
 
 const (
 	FailureGatewayUnavailable     FailureCode = "gateway_unavailable"
+	FailureRuntimeUnavailable     FailureCode = "runtime_unavailable"
 	FailurePortConflict           FailureCode = "port_conflict"
 	FailureCertificateUnavailable FailureCode = "certificate_unavailable"
 	FailureBackendUnhealthy       FailureCode = "backend_unhealthy"
@@ -88,7 +89,7 @@ const (
 
 func (c FailureCode) Valid() bool {
 	switch c {
-	case FailureGatewayUnavailable, FailurePortConflict,
+	case FailureGatewayUnavailable, FailureRuntimeUnavailable, FailurePortConflict,
 		FailureCertificateUnavailable, FailureBackendUnhealthy,
 		FailureFenceConflict, FailureStateFull, FailureConfiguration,
 		FailureCanceled, FailureUnknown:

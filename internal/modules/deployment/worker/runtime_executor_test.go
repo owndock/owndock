@@ -502,6 +502,28 @@ func TestRuntimeExecutorCleansCandidateAfterDeterministicRouteFailure(t *testing
 	}
 }
 
+func TestManagedIngressFailureCodeUsesOnlySafeExecutionCategories(t *testing.T) {
+	tests := []struct {
+		err  error
+		want applicationroutebiz.FailureCode
+	}{
+		{err: applicationroutebiz.ErrGatewayCertificateUnavailable,
+			want: applicationroutebiz.FailureCertificateUnavailable},
+		{err: &biz.ExecutionError{Category: biz.FailureTargetUnreachable,
+			Cause: errors.New("private endpoint")}, want: applicationroutebiz.FailureRuntimeUnavailable},
+		{err: &biz.ExecutionError{Category: biz.FailureImagePull,
+			Cause: errors.New("private registry")}, want: applicationroutebiz.FailureRuntimeUnavailable},
+		{err: &biz.ExecutionError{Category: biz.FailureCredential,
+			Cause: errors.New("private credential")}, want: applicationroutebiz.FailureConfiguration},
+		{err: errors.New("private unknown"), want: applicationroutebiz.FailureUnknown},
+	}
+	for _, test := range tests {
+		if got := managedIngressFailureCode(test.err); got != test.want {
+			t.Fatalf("managedIngressFailureCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
 type workerCutoverStore struct {
 	transaction applicationroutebiz.CutoverTransaction
 	finished    bool
