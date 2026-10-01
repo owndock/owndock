@@ -41,6 +41,9 @@ func run(ctx context.Context, arguments []string) error {
 	if len(arguments) > 0 && arguments[0] == "enroll" {
 		return runEnrollment(ctx, arguments[1:])
 	}
+	if len(arguments) > 0 && arguments[0] == "inspect-config" {
+		return runConfigInspection(arguments[1:], os.Stdout, os.Stderr)
+	}
 	flags := flag.NewFlagSet(serviceName, flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	var configPath string

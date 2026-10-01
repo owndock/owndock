@@ -107,3 +107,21 @@ func TestIngressSystemdUnitUsesDedicatedIdentityAndLocalSocket(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentInstallerRestoresIngressSelectionFromValidatedConfig(t *testing.T) {
+	repository := repositoryRoot(t)
+	value, err := os.ReadFile(filepath.Join(repository, "packaging", "agent", "owndock-agentctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(value)
+	for _, required := range []string{
+		"agent_ingress_enabled()", "inspect-config --conf", `'{"managed_ingress":true}'`,
+		`'{"managed_ingress":false}'`, `systemctl enable --now "$INGRESS_SERVICE"`,
+		`systemctl disable --now "$INGRESS_SERVICE"`,
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("Agent installer is missing recovered Ingress behavior %q", required)
+		}
+	}
+}

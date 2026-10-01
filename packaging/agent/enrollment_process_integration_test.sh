@@ -82,6 +82,7 @@ enroll() {
         --server-ca-file "$materials/ca.pem" \
         --token-file "$token_file" \
         --instance-id conformance-instance \
+        --enable-ingress \
         --timeout 5s
 }
 
@@ -137,6 +138,8 @@ grep -Fq "managed_host_id: conformance-host" /etc/owndock/agent.yaml || \
     fail "installed config has the wrong host"
 grep -Fq "identity_id: conformance-identity" /etc/owndock/agent.yaml || \
     fail "installed config has the wrong identity"
+[ "$("$agent" inspect-config --conf /etc/owndock/agent.yaml)" = '{"managed_ingress":true}' ] || \
+    fail "recovery lost the managed Ingress selection"
 if grep -R -F "$token" /etc/owndock /var/lib/owndock-agent "$workspace"/*.log >/dev/null; then
     fail "enrollment token leaked after recovery"
 fi

@@ -84,7 +84,7 @@ sudo owndock-agentctl enroll \
 sudo owndock-agentctl enroll --recover
 ```
 
-恢复流程不再读取或重用 token，只验证本地 pending 中的证书链、私钥配对、有效期和固定 SPIFFE Organization/Host/Identity/instance，然后完成落盘并启动服务。损坏、过期、权限过宽或符号链接形式的 token、pending、identity 都会失败关闭。完整身份模型见[首次安全接入](agent-enrollment.md)。
+恢复流程不再读取或重用 token，只验证本地 pending 中的证书链、私钥配对、有效期和固定 SPIFFE Organization/Host/Identity/instance，然后完成落盘。安装器随后通过 Agent 二进制读取并验证新配置，只取不含身份、端点或凭据路径的 `managed_ingress` 布尔状态：原 enrollment 选择了 `--enable-ingress` 时会恢复并启动 Gateway；未选择时则不会因恢复命令缺少原参数而改变授权。最后才启动 Agent。损坏、过期、权限过宽或符号链接形式的 token、pending、identity 或配置都会失败关闭。完整身份模型见[首次安全接入](agent-enrollment.md)。
 
 ## 文件布局
 

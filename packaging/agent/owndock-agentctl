@@ -47,7 +47,8 @@ configuration, machine identity and runtime state are never rolled back.
 enroll reads the one-time token only from a private regular file, creates the
 private key locally, validates the returned certificate identity, installs the
 configuration and starts the service. --recover completes a response already
-persisted locally after an interrupted installation and does not reuse a token.
+persisted locally after an interrupted installation, restores its exact feature
+selection and does not reuse a token.
 EOF
 }
 
@@ -273,6 +274,16 @@ ingress_service_active() {
     [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$INGRESS_SERVICE"
 }
 
+agent_ingress_enabled() {
+    inspection=$("$CURRENT_LINK/owndock-agent" inspect-config --conf "$CONFIG_DIR/agent.yaml") ||
+        fail "installed Agent configuration could not be inspected"
+    case "$inspection" in
+        '{"managed_ingress":true}') return 0 ;;
+        '{"managed_ingress":false}') return 1 ;;
+        *) fail "installed Agent configuration inspection was invalid" ;;
+    esac
+}
+
 restart_ingress_stably() {
     systemctl restart "$INGRESS_SERVICE" || return 1
     [ -S /run/owndock-ingress/admin.sock ] && systemctl is-active --quiet "$INGRESS_SERVICE"
@@ -416,10 +427,6 @@ enroll_agent() {
     verify_installed_release "$version"
     [ -L "$UNIT_PATH" ] || fail "install the Agent systemd unit before enrollment"
     [ -L "$INGRESS_UNIT_PATH" ] || fail "install the Ingress systemd unit before enrollment"
-    enable_ingress=false
-    for argument in "$@"; do
-        [ "$argument" != --enable-ingress ] || enable_ingress=true
-    done
     "$CURRENT_LINK/owndock-agent" enroll "$@"
     for installed in "$CONFIG_DIR/agent.yaml" "$CONFIG_DIR/agent-ca.pem"; do
         [ -f "$installed" ] && [ ! -L "$installed" ] || fail "Agent enrollment did not install required files"
@@ -433,11 +440,15 @@ enroll_agent() {
     chown "$AGENT_USER":"$AGENT_GROUP" "$identity" "$instance"
     chmod 0600 "$identity" "$instance"
     systemctl daemon-reload
-    if [ "$enable_ingress" = true ]; then
+    if agent_ingress_enabled; then
         [ -x /usr/bin/docker ] || fail "Docker must be installed at /usr/bin/docker for managed ingress"
         docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required for managed ingress"
         if ! systemctl enable --now "$INGRESS_SERVICE"; then
             fail "Agent enrollment completed but the managed Ingress Gateway failed to start"
+        fi
+    elif ingress_service_active || systemctl is-enabled --quiet "$INGRESS_SERVICE"; then
+        if ! systemctl disable --now "$INGRESS_SERVICE"; then
+            fail "Agent enrollment disabled managed Ingress but its Gateway could not be stopped"
         fi
     fi
     if ! restart_service_stably; then
