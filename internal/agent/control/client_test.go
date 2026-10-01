@@ -320,6 +320,48 @@ type reconnectTransport struct {
 	closeCalls atomic.Int32
 }
 
+type stalledResponseHeadersTransport struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (t *stalledResponseHeadersTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	t.once.Do(func() { close(t.started) })
+	<-request.Context().Done()
+	return nil, request.Context().Err()
+}
+
+func TestClientBoundsStreamingRequestBeforeResponseHeaders(t *testing.T) {
+	transport := &stalledResponseHeadersTransport{started: make(chan struct{})}
+	client, err := NewClient(
+		&http.Client{Transport: transport},
+		&probeExecutorStub{},
+		ClientConfig{
+			Endpoint: "https://control.example.com/api/v1/agent/connect",
+			Identity: testIdentity(), HandshakeTimeout: 50 * time.Millisecond,
+			ServerSilenceTimeout: time.Second, MaxFrameBytes: 64 * 1024,
+			MaxConcurrentCommands: 1,
+			Capabilities:          []string{agentprotocol.CapabilityRuntimeProbe},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Now()
+	err = client.Run(t.Context())
+	if !errors.Is(err, ErrConnectionUnavailable) {
+		t.Fatalf("stalled response headers error = %v", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("stalled response headers took %v", elapsed)
+	}
+	select {
+	case <-transport.started:
+	default:
+		t.Fatal("control request was not attempted")
+	}
+}
+
 func (t *reconnectTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	responseReader, responseWriter := io.Pipe()
 	go func() {

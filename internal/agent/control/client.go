@@ -244,8 +244,10 @@ func (c *Client) Run(ctx context.Context) (result error) {
 		writerErrors,
 	)
 
+	requestContext, cancelRequest := context.WithCancel(sessionContext)
+	defer cancelRequest()
 	request, err := http.NewRequestWithContext(
-		sessionContext,
+		requestContext,
 		http.MethodPost,
 		c.config.Endpoint,
 		requestReader,
@@ -255,7 +257,28 @@ func (c *Client) Run(ctx context.Context) (result error) {
 	}
 	request.Header.Set("Content-Type", contentType)
 	request.Header.Set("Accept", contentType)
+	responseHeaders := make(chan struct{})
+	handshakeGuardDone := make(chan struct{})
+	go func() {
+		defer close(handshakeGuardDone)
+		timer := time.NewTimer(c.config.HandshakeTimeout)
+		defer timer.Stop()
+		select {
+		case <-responseHeaders:
+		case <-sessionContext.Done():
+			_ = requestWriter.CloseWithError(sessionContext.Err())
+			cancelRequest()
+		case <-timer.C:
+			// A streaming HTTP request body can otherwise leave net/http waiting
+			// for the body producer after a connection fails before response
+			// headers arrive. Close both sides so RoundTrip is always bounded.
+			_ = requestWriter.CloseWithError(ErrConnectionUnavailable)
+			cancelRequest()
+		}
+	}()
 	response, err := c.httpClient.Do(request)
+	close(responseHeaders)
+	<-handshakeGuardDone
 	if err != nil {
 		return ErrConnectionUnavailable
 	}

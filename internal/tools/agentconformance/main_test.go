@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,43 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 		"conformance-deployment-host-b"
 	if _, err := handler.conformanceInventoryDetails(result); err == nil {
 		t.Fatal("cross-Host inventory ownership unexpectedly passed")
+	}
+
+	handler.inventoryCommand = string(agentprotocol.AgentCommandInventoryEvents)
+	handler.inventoryEventID = strings.Repeat("a", 64)
+	handler.inventoryForbiddenID = strings.Repeat("b", 64)
+	eventCommand, err := handler.conformanceCommand("ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eventCommand.Validate(); err != nil {
+		t.Fatalf("inventory Event validation: %v", err)
+	}
+	if eventCommand.Inventory.ObservationID != "" {
+		t.Fatalf("inventory Event observation ID = %q", eventCommand.Inventory.ObservationID)
+	}
+	if eventCommand.Inventory.EventSince.IsZero() ||
+		eventCommand.Inventory.EventWaitSeconds != 2 {
+		t.Fatalf("inventory Event window = %+v", eventCommand.Inventory)
+	}
+	eventResult := agentprotocol.AgentCommandResult{
+		Inventory: &agentprotocol.RuntimeInventoryResult{
+			Events: &runtimeinventory.EventBatch{Events: []runtimeinventory.Event{{
+				Kind:       runtimeinventory.KindContainer,
+				RuntimeID:  handler.inventoryEventID,
+				Action:     runtimeinventory.EventActionCreate,
+				OccurredAt: time.Now().UTC(),
+			}}},
+		},
+	}
+	details, err = handler.conformanceInventoryDetails(eventResult)
+	if err != nil || details != "inventory_events=1\ninventory_event_runtime_id="+
+		handler.inventoryEventID+"\n" {
+		t.Fatalf("inventory Event details = %q, %v", details, err)
+	}
+	eventResult.Inventory.Events.Events[0].RuntimeID = handler.inventoryForbiddenID
+	if _, err := handler.conformanceInventoryDetails(eventResult); err == nil {
+		t.Fatal("cross-Host inventory Event unexpectedly passed")
 	}
 }
 

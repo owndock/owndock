@@ -224,6 +224,51 @@ run_dual_inventory_phase() {
 	done
 }
 
+run_dual_inventory_event_phase() {
+	phase_ready=$workspace/inventory-events-ready
+	phase_result_a=$workspace/inventory-events-result-a
+	phase_result_b=$workspace/inventory-events-result-b
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$phase_result_a" \
+		--result-b "$phase_result_b" --runtime-probe ready \
+		--deployment-capabilities=true --inventory-capabilities=true \
+		--inventory-command runtime.inventory.events \
+		--inventory-event-id-a "$event_id_a" --inventory-event-id-b "$event_id_b" \
+		--command-suffix dual-runtime --timeout 4m \
+		>"$workspace/inventory-events-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	wait_for_file "$phase_result_a" 2100
+	wait_for_file "$phase_result_b" 2100
+	wait "$server_pid" || fail "dual Agent runtime.inventory.events phase failed"
+	server_pid=
+	for host in a b; do
+		case "$host" in
+			a)
+				phase_result=$phase_result_a
+				expected_event_id=$event_id_a
+				forbidden_event_id=$event_id_b
+				;;
+			b)
+				phase_result=$phase_result_b
+				expected_event_id=$event_id_b
+				forbidden_event_id=$event_id_a
+				;;
+		esac
+		grep -qx "managed_host_id=conformance-host-$host" "$phase_result" || \
+			fail "inventory events crossed Host $host identity"
+		grep -qx "command_id=conformance-inventory-events-conformance-host-$host-dual-runtime" \
+			"$phase_result" || fail "inventory events reached the wrong Host"
+		grep -qx 'command_status=inventory_succeeded' "$phase_result" || \
+			fail "inventory events did not succeed on Host $host"
+		grep -qx "inventory_event_runtime_id=$expected_event_id" "$phase_result" || \
+			fail "inventory events omitted Host $host expected Runtime ID"
+		if grep -q "$forbidden_event_id" "$phase_result"; then
+			fail "inventory events exposed the other Host Runtime ID to Host $host"
+		fi
+	done
+}
+
 materials_a=$workspace/materials-a
 materials_b=$workspace/materials-b
 "$tool" materials --output "$materials_a" --host-id conformance-host-a
@@ -404,6 +449,20 @@ if [ "$runtime_mode" = 1 ]; then
 	run_dual_inventory_phase runtime.inventory.prepare
 	run_dual_inventory_phase runtime.inventory.chunk
 	run_dual_inventory_phase runtime.inventory.release
+	event_id_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		create --name owndock-event-a \
+		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b')
+	event_id_b=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
+		create --name owndock-event-b \
+		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b')
+	case "$event_id_a:$event_id_b" in
+		*[!0-9a-f:]* | "$event_id_a:$event_id_a")
+			fail "isolated Docker Event Runtime IDs are invalid"
+			;;
+	esac
+	[ "${#event_id_a}" -eq 64 ] && [ "${#event_id_b}" -eq 64 ] || \
+		fail "isolated Docker Event Runtime IDs have invalid lengths"
+	run_dual_inventory_event_phase
 
 	# An abrupt Agent process loss must not erase its independently persisted
 	# cutover watermark. Host B remains available, while Host A restarts from the
@@ -438,7 +497,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, inventory, outage, restart fencing and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, inventory events, outage, restart fencing and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi
