@@ -379,6 +379,19 @@ run_host_inventory_event_phase() {
 	esac
 }
 
+start_host_a_terminal_container() {
+	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 run -d \
+		--name "$terminal_container" \
+		--label net.owndock.deployment_id="$terminal_deployment_id" \
+		--label net.owndock.cutover_sequence=1 \
+		--label net.owndock.project_id=conformance-project \
+		--label net.owndock.application_id=conformance-application \
+		--label net.owndock.environment_id=conformance-environment \
+		--env TERMINAL_PRIVATE=terminal-private-sentinel-host-a \
+		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b' \
+		>/dev/null
+}
+
 run_host_container_terminal_fault_phase() {
 	fault=$1
 	phase_ready=$workspace/container-terminal-$fault-ready
@@ -415,6 +428,19 @@ run_host_container_terminal_fault_phase() {
 			kill -TERM "$proxy_a_pid" >/dev/null 2>&1 || true
 			wait "$proxy_a_pid" >/dev/null 2>&1 || true
 			proxy_a_pid=
+			;;
+		target-replacement)
+			original_container_id=$(docker exec "$engine_a_id" \
+				docker --host tcp://127.0.0.1:2375 inspect \
+				--format '{{.Id}}' "$terminal_container")
+			docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+				rm -f "$terminal_container" >/dev/null
+			start_host_a_terminal_container
+			replacement_container_id=$(docker exec "$engine_a_id" \
+				docker --host tcp://127.0.0.1:2375 inspect \
+				--format '{{.Id}}' "$terminal_container")
+			[ "$replacement_container_id" != "$original_container_id" ] || \
+				fail "Host A terminal target replacement preserved the old container ID"
 			;;
 		*) fail "container terminal fault is invalid" ;;
 	esac
@@ -735,16 +761,7 @@ if [ "$runtime_mode" = 1 ]; then
 		owndock-[0-9a-f][0-9a-f]*) ;;
 		*) fail "canonical Host A terminal container name is invalid" ;;
 	esac
-	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 run -d \
-		--name "$terminal_container" \
-		--label net.owndock.deployment_id="$terminal_deployment_id" \
-		--label net.owndock.cutover_sequence=1 \
-		--label net.owndock.project_id=conformance-project \
-		--label net.owndock.application_id=conformance-application \
-		--label net.owndock.environment_id=conformance-environment \
-		--env TERMINAL_PRIVATE=terminal-private-sentinel-host-a \
-		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b' \
-		>/dev/null
+	start_host_a_terminal_container
 	run_host_container_terminal_fault_phase exit
 	attempt=0
 	while [ "$attempt" -lt 100 ]; do
@@ -770,6 +787,13 @@ if [ "$runtime_mode" = 1 ]; then
 	proxy_a_pid=$!
 	wait_for_file "$proxy_a_ready"
 	run_host_a_probe_after_terminal runtime-disconnect
+	run_host_container_terminal_fault_phase target-replacement
+	terminal_replacement_running=$(docker exec "$engine_a_id" \
+		docker --host tcp://127.0.0.1:2375 inspect \
+		--format '{{.State.Running}}' "$replacement_container_id")
+	[ "$terminal_replacement_running" = true ] || \
+		fail "Host A replacement terminal target did not remain running"
+	run_host_a_probe_after_terminal target-replacement
 	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
 		"$deployment_container")
@@ -791,7 +815,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi
