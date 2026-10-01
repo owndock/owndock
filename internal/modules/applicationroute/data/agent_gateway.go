@@ -114,6 +114,8 @@ func mapAgentIngressResultError(code string) error {
 		return applicationroutebiz.ErrGatewayStateFull
 	case "ingress_port_conflict":
 		return applicationroutebiz.ErrGatewayPortConflict
+	case "ingress_certificate_unavailable":
+		return applicationroutebiz.ErrGatewayCertificateUnavailable
 	case "ingress_backend_unhealthy":
 		return applicationroutebiz.ErrGatewayBackendUnhealthy
 	case "ingress_configuration":

@@ -213,6 +213,12 @@ func (e *DockerExecutor) executeIngress(ctx context.Context, command agentprotoc
 		return agentprotocol.AgentCommandResult{CommandID: command.ID,
 			Status: agentprotocol.AgentCommandSucceeded, Ingress: &observation}, nil
 	}
+	code := ingressExecutionErrorCode(err)
+	return agentprotocol.AgentCommandResult{CommandID: command.ID,
+		Status: agentprotocol.AgentCommandFailed, ErrorCode: code}, nil
+}
+
+func ingressExecutionErrorCode(err error) string {
 	code := "ingress_gateway_unavailable"
 	switch {
 	case errors.Is(err, ErrIngressFenceStale):
@@ -223,13 +229,14 @@ func (e *DockerExecutor) executeIngress(ctx context.Context, command agentprotoc
 		code = "ingress_state_full"
 	case errors.Is(err, ErrIngressPortConflict):
 		code = "ingress_port_conflict"
+	case errors.Is(err, ErrIngressCertificateUnavailable):
+		code = "ingress_certificate_unavailable"
 	case errors.Is(err, ErrIngressBackendUnhealthy):
 		code = "ingress_backend_unhealthy"
 	case errors.Is(err, ErrInvalidIngressStore), errors.Is(err, ErrIngressConfiguration):
 		code = "ingress_configuration"
 	}
-	return agentprotocol.AgentCommandResult{CommandID: command.ID,
-		Status: agentprotocol.AgentCommandFailed, ErrorCode: code}, nil
+	return code
 }
 
 func (e *DockerExecutor) releaseCutover(

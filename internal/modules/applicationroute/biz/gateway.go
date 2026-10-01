@@ -6,13 +6,14 @@ import (
 )
 
 var (
-	ErrGatewayUnavailable      = errors.New("application ingress gateway is unavailable")
-	ErrGatewayFenceStale       = errors.New("application ingress gateway fence is stale")
-	ErrGatewayFenceConflict    = errors.New("application ingress gateway fence conflicts")
-	ErrGatewayConfiguration    = errors.New("application ingress gateway configuration is invalid")
-	ErrGatewayStateFull        = errors.New("application ingress gateway state is full")
-	ErrGatewayPortConflict     = errors.New("application ingress public ports are unavailable")
-	ErrGatewayBackendUnhealthy = errors.New("application ingress backend private probe failed")
+	ErrGatewayUnavailable            = errors.New("application ingress gateway is unavailable")
+	ErrGatewayFenceStale             = errors.New("application ingress gateway fence is stale")
+	ErrGatewayFenceConflict          = errors.New("application ingress gateway fence conflicts")
+	ErrGatewayConfiguration          = errors.New("application ingress gateway configuration is invalid")
+	ErrGatewayStateFull              = errors.New("application ingress gateway state is full")
+	ErrGatewayPortConflict           = errors.New("application ingress public ports are unavailable")
+	ErrGatewayCertificateUnavailable = errors.New("application ingress automatic certificate is unavailable")
+	ErrGatewayBackendUnhealthy       = errors.New("application ingress backend private probe failed")
 )
 
 type GatewayRoute struct {

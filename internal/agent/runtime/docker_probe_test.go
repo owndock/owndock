@@ -43,6 +43,23 @@ func (e dockerProbeEngineStub) Ping(
 
 func (dockerProbeEngineStub) Close() error { return nil }
 
+func TestIngressExecutionErrorCodeIsStable(t *testing.T) {
+	tests := []struct {
+		err  error
+		want string
+	}{
+		{err: ErrIngressCertificateUnavailable, want: "ingress_certificate_unavailable"},
+		{err: ErrIngressBackendUnhealthy, want: "ingress_backend_unhealthy"},
+		{err: ErrIngressPortConflict, want: "ingress_port_conflict"},
+		{err: errors.New("raw private error"), want: "ingress_gateway_unavailable"},
+	}
+	for _, test := range tests {
+		if got := ingressExecutionErrorCode(test.err); got != test.want {
+			t.Fatalf("ingressExecutionErrorCode(%v) = %q, want %q", test.err, got, test.want)
+		}
+	}
+}
+
 func TestDockerExecutorReturnsAndCachesReady(t *testing.T) {
 	cache, err := NewFileResultCache(
 		filepath.Join(t.TempDir(), "state"),

@@ -168,7 +168,7 @@ func (g *CaddyGateway) Probe(ctx context.Context, command agentprotocol.IngressC
 		request.Header.Set(caddyProbeHeader, token)
 		response, err := g.probeClient.Do(request)
 		if err != nil {
-			return ErrIngressBackendUnhealthy
+			return classifyCaddyProbeError(probeContext, route, err)
 		}
 		readBytes, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maximumCaddyResponse+1))
 		closeErr := response.Body.Close()
@@ -178,6 +178,30 @@ func (g *CaddyGateway) Probe(ctx context.Context, command agentprotocol.IngressC
 		}
 	}
 	return nil
+}
+
+func classifyCaddyProbeError(
+	ctx context.Context,
+	route agentprotocol.IngressRoute,
+	err error,
+) error {
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) {
+		return ErrIngressGatewayUnavailable
+	}
+	var networkError *net.OpError
+	hasNetworkError := errors.As(err, &networkError)
+	var certificateError *tls.CertificateVerificationError
+	certificateFailure := errors.As(err, &certificateError) ||
+		hasNetworkError && networkError.Op == "remote error"
+	// Certificate verification failures and TLS alerts occur only after the
+	// local HTTPS listener accepted the connection. Backend failures happen
+	// after TLS and return an unmarked HTTP response instead. Other transport
+	// failures stay gateway-unavailable rather than being guessed as ACME.
+	if route.TLSMode == agentprotocol.IngressTLSAutomatic && certificateFailure {
+		return ErrIngressCertificateUnavailable
+	}
+	return ErrIngressGatewayUnavailable
 }
 
 func (g *CaddyGateway) isCurrent(ctx context.Context, configID string) (bool, error) {

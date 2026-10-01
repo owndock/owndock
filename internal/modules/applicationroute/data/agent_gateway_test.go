@@ -67,6 +67,19 @@ func TestAgentGatewayMapsSafeFenceErrors(t *testing.T) {
 	}
 }
 
+func TestAgentGatewayMapsCertificateFailure(t *testing.T) {
+	dispatcher := &ingressDispatcherStub{result: func(command managedhostbiz.AgentCommand) managedhostbiz.AgentCommandResult {
+		return managedhostbiz.AgentCommandResult{CommandID: command.ID,
+			Status: agentprotocol.AgentCommandFailed, ErrorCode: "ingress_certificate_unavailable"}
+	}}
+	gateway, _ := NewAgentGateway(dispatcher, func() (string, error) { return "command-1", nil },
+		func() time.Time { return time.Unix(100, 0).UTC() }, time.Minute)
+	desired := applicationroutebiz.HostDesiredConfig{ManagedHostID: "host-1", HostRevision: 1}
+	if _, err := gateway.Prepare(context.Background(), desired); !errors.Is(err, applicationroutebiz.ErrGatewayCertificateUnavailable) {
+		t.Fatalf("certificate result error = %v", err)
+	}
+}
+
 func TestAgentGatewayDispatchesCommitAndAbort(t *testing.T) {
 	dispatcher := &ingressDispatcherStub{}
 	dispatcher.result = func(command managedhostbiz.AgentCommand) managedhostbiz.AgentCommandResult {

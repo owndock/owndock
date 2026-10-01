@@ -9,10 +9,11 @@ import (
 )
 
 var (
-	ErrIngressGatewayUnavailable = errors.New("Agent ingress gateway is unavailable")
-	ErrIngressConfiguration      = errors.New("Agent ingress gateway configuration was rejected")
-	ErrIngressPortConflict       = errors.New("Agent ingress public ports are unavailable")
-	ErrIngressBackendUnhealthy   = errors.New("Agent ingress backend private probe failed")
+	ErrIngressGatewayUnavailable     = errors.New("Agent ingress gateway is unavailable")
+	ErrIngressConfiguration          = errors.New("Agent ingress gateway configuration was rejected")
+	ErrIngressPortConflict           = errors.New("Agent ingress public ports are unavailable")
+	ErrIngressCertificateUnavailable = errors.New("Agent ingress automatic certificate is unavailable")
+	ErrIngressBackendUnhealthy       = errors.New("Agent ingress backend private probe failed")
 )
 
 type IngressGateway interface {

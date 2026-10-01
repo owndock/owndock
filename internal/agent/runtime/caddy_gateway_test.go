@@ -2,6 +2,7 @@ package agentruntime
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -89,6 +90,54 @@ func TestCaddyGatewayPrivateProbeUsesHostTLSAndExactMarker(t *testing.T) {
 	})}
 	if err := gateway.Probe(t.Context(), command); !errors.Is(err, ErrIngressBackendUnhealthy) {
 		t.Fatalf("unmarked response error = %v", err)
+	}
+}
+
+func TestCaddyGatewayPrivateProbeClassifiesTLSAndListenerFailures(t *testing.T) {
+	automatic := ingressCommand(t, 2,
+		[]agentprotocol.IngressRoute{ingressRoute("route-1", 1, "deployment-1", 1)})
+	automatic.ProbeRouteIDs = []string{"route-1"}
+	tests := []struct {
+		name    string
+		command agentprotocol.IngressCommand
+		err     error
+		want    error
+	}{
+		{name: "automatic TLS handshake", command: automatic,
+			err:  &tls.CertificateVerificationError{Err: errors.New("safe synthetic TLS failure")},
+			want: ErrIngressCertificateUnavailable},
+		{name: "automatic remote TLS alert", command: automatic,
+			err:  &net.OpError{Op: "remote error", Net: "tcp", Err: errors.New("safe synthetic alert")},
+			want: ErrIngressCertificateUnavailable},
+		{name: "automatic listener unavailable", command: automatic,
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("safe synthetic refusal")},
+			want: ErrIngressGatewayUnavailable},
+		{name: "automatic unknown transport failure", command: automatic,
+			err: errors.New("safe synthetic transport failure"), want: ErrIngressGatewayUnavailable},
+	}
+	disabledRoute := ingressRoute("route-1", 1, "deployment-1", 1)
+	disabledRoute.TLSMode = agentprotocol.IngressTLSDisabled
+	disabled := ingressCommand(t, 2, []agentprotocol.IngressRoute{disabledRoute})
+	disabled.ProbeRouteIDs = []string{"route-1"}
+	tests = append(tests, struct {
+		name    string
+		command agentprotocol.IngressCommand
+		err     error
+		want    error
+	}{name: "HTTP listener unavailable", command: disabled,
+		err: errors.New("safe synthetic HTTP failure"), want: ErrIngressGatewayUnavailable})
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			gateway := &CaddyGateway{timeout: time.Second, probeClient: &http.Client{
+				Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+					return nil, test.err
+				}),
+			}}
+			if err := gateway.Probe(t.Context(), test.command); !errors.Is(err, test.want) {
+				t.Fatalf("Probe() error = %v, want %v", err, test.want)
+			}
+		})
 	}
 }
 

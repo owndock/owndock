@@ -262,7 +262,7 @@ Route 从 committed 完整配置中移除时转为持久 tombstone，高水位�
 }
 ```
 
-稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_backend_unhealthy`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关/应用错误不进入 wire 或持久结果。三阶段 capability、Agent 持久事务、固定 Gateway adapter、显式本机 wiring，以及 Server 持久 cutover/Route observation/Deployment `committing` 编排已实现，但默认配置不会宣告该能力；真实流量验收完成前不能据此报告生产入口就绪。
+稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_certificate_unavailable`、`ingress_backend_unhealthy`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`。自动 TLS 路由已连接本机 HTTPS listener、但在收到 HTTP 响应前握手失败时使用 `ingress_certificate_unavailable`；本机 listener 无法连接仍是 `ingress_gateway_unavailable`，TLS 已建立但 marker 缺失才是 `ingress_backend_unhealthy`。原始 TLS、网关或应用错误不进入 wire 或持久结果。三阶段 capability、Agent 持久事务、固定 Gateway adapter、显式本机 wiring，以及 Server 持久 cutover/Route observation/Deployment `committing` 编排已实现，但默认配置不会宣告该能力；真实流量验收完成前不能据此报告生产入口就绪。
 
 ## 终端会话复用
 
