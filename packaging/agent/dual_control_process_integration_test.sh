@@ -52,6 +52,7 @@ case "$runtime_mode" in
 		outage_command_suffix=
 		deployment_capabilities=false
 		inventory_capabilities=false
+		terminal_capabilities=false
 		;;
 	1)
 		initial_runtime_probe=ready
@@ -61,6 +62,7 @@ case "$runtime_mode" in
 		outage_command_suffix='host-a-outage'
 		deployment_capabilities=true
 		inventory_capabilities=true
+		terminal_capabilities=true
 		;;
 	*) fail "OWNDOCK_DUAL_AGENT_RUNTIME must be 0 or 1" ;;
 esac
@@ -71,6 +73,9 @@ wait_for_file() {
     attempt=0
     while [ "$attempt" -lt "$limit" ]; do
         [ -s "$path" ] && return
+		if [ -n "$server_pid" ] && ! kill -0 "$server_pid" >/dev/null 2>&1; then
+			fail "process stopped before writing $path"
+		fi
         attempt=$((attempt + 1))
         sleep 0.1
     done
@@ -110,6 +115,7 @@ run_dual_deployment_phase() {
 		--ready-file "$phase_ready" --result-a "$phase_result_a" \
 		--result-b "$phase_result_b" --runtime-probe ready \
 		--deployment-capabilities=true --deployment-command "$deployment_kind" \
+		--terminal-capabilities=true \
 		--inventory-capabilities=true \
 		--deployment-container "$deployment_container" --command-suffix dual-runtime \
 		--timeout 4m >"$workspace/deployment-$deployment_operation-server.log" 2>&1 &
@@ -161,6 +167,7 @@ run_host_deployment_phase() {
 		--ready-file "$phase_ready" --result-a "$result_a" --result-b "$result_b" \
 		--only-host "$only_host" --runtime-probe ready \
 		--deployment-capabilities=true --inventory-capabilities=true \
+		--terminal-capabilities=true \
 		--deployment-command "$deployment_kind" --deployment-container "$deployment_container" \
 		--deployment-sequence "$sequence" --deployment-result "$expected_result" \
 		--command-suffix "$command_suffix" --timeout 4m \
@@ -194,6 +201,7 @@ run_dual_inventory_phase() {
 		--ready-file "$phase_ready" --result-a "$phase_result_a" \
 		--result-b "$phase_result_b" --runtime-probe ready \
 		--deployment-capabilities=true --inventory-capabilities=true \
+		--terminal-capabilities=true \
 		--inventory-command "$inventory_kind" --deployment-container "$deployment_container" \
 		--command-suffix dual-runtime --timeout 4m \
 		>"$workspace/inventory-$inventory_operation-server.log" 2>&1 &
@@ -236,6 +244,7 @@ run_dual_inventory_event_phase() {
 		--ready-file "$phase_ready" --result-a "$phase_result_a" \
 		--result-b "$phase_result_b" --runtime-probe ready \
 		--deployment-capabilities=true --inventory-capabilities=true \
+		--terminal-capabilities=true \
 		--inventory-command runtime.inventory.events \
 		--inventory-event-id-a "$event_id_a" --inventory-event-id-b "$event_id_b" \
 		--inventory-event-since-a "$event_since_a" \
@@ -324,6 +333,7 @@ run_host_inventory_event_phase() {
 		--ready-file "$phase_ready" --result-a "$result_a" --result-b "$result_b" \
 		--only-host "$only_host" --runtime-probe ready \
 		--deployment-capabilities=true --inventory-capabilities=true \
+		--terminal-capabilities=true \
 		--inventory-command runtime.inventory.events --inventory-result "$expected_result" \
 		--inventory-event-id-a "$event_id_a" --inventory-event-id-b "$event_id_b" \
 		--command-suffix "$command_suffix" --timeout 4m \
@@ -369,6 +379,69 @@ run_host_inventory_event_phase() {
 	esac
 }
 
+run_host_container_terminal_exit_phase() {
+	phase_ready=$workspace/container-terminal-exit-ready
+	phase_result=$workspace/container-terminal-exit-result-a
+	unused_result=$workspace/container-terminal-exit-unused-b
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$phase_result" \
+		--result-b "$unused_result" --only-host conformance-host-a \
+		--runtime-probe ready --deployment-capabilities=true \
+		--inventory-capabilities=true --terminal-capabilities=true \
+		--terminal-container "$terminal_container" \
+		--terminal-deployment-id "$terminal_deployment_id" \
+		--terminal-cutover-sequence 1 --timeout 20s \
+		>"$workspace/container-terminal-exit-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	sleep 10
+	terminal_processes=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		top "$terminal_container" -eo pid,args)
+	case "$terminal_processes" in
+		*'/bin/sh'*) ;;
+		*)
+		docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+			top "$terminal_container" -eo pid,args >&2 || true
+		fail "Host A container terminal shell did not open"
+			;;
+	esac
+	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		stop --time 5 "$terminal_container" >/dev/null
+	wait_for_file "$phase_result" 200
+	wait "$server_pid" || fail "Host A container terminal exit phase failed"
+	server_pid=
+	[ ! -e "$unused_result" ] || fail "container terminal crossed Host identity"
+	grep -qx 'managed_host_id=conformance-host-a' "$phase_result" || \
+		fail "container terminal reached the wrong Host"
+	grep -qx 'terminal_session_id=conformance-container-terminal' "$phase_result" || \
+		fail "container terminal returned the wrong session"
+	grep -qx 'terminal_status=frames_sent' "$phase_result" || \
+		fail "container terminal frames were not sent"
+}
+
+run_host_a_probe_after_terminal() {
+	phase_ready=$workspace/container-terminal-recovery-ready
+	phase_result=$workspace/container-terminal-recovery-result-a
+	unused_result=$workspace/container-terminal-recovery-unused-b
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$phase_result" \
+		--result-b "$unused_result" --only-host conformance-host-a \
+		--runtime-probe ready --command-suffix terminal-recovery \
+		--deployment-capabilities=true --inventory-capabilities=true \
+		--terminal-capabilities=true --timeout 45s \
+		>"$workspace/container-terminal-recovery-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	wait_for_file "$phase_result" 450
+	wait "$server_pid" || fail "Host A did not reconnect after terminal target exit"
+	server_pid=
+	[ ! -e "$unused_result" ] || fail "terminal recovery probe crossed Host identity"
+	grep -qx 'managed_host_id=conformance-host-a' "$phase_result" || \
+		fail "terminal recovery probe reached the wrong Host"
+	grep -qx 'command_status=runtime_ready' "$phase_result" || \
+		fail "Host A runtime did not recover after terminal target exit"
+}
+
 materials_a=$workspace/materials-a
 materials_b=$workspace/materials-b
 "$tool" materials --output "$materials_a" --host-id conformance-host-a
@@ -410,6 +483,7 @@ result_b_one=$workspace/result-b-one
 	--command-suffix "$initial_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
 	--inventory-capabilities="$inventory_capabilities" \
+	--terminal-capabilities="$terminal_capabilities" \
 	>"$workspace/server-one.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_one"
@@ -419,11 +493,13 @@ listen=${listen%/api/v1/agent/connect}
 "$tool" config --output "$materials_a" --endpoint "$endpoint" \
 	--host-id conformance-host-a --docker-socket "$docker_socket_a" \
 	--deployment-capabilities="$deployment_capabilities" \
-	--inventory-capabilities="$inventory_capabilities"
+	--inventory-capabilities="$inventory_capabilities" \
+	--terminal-capabilities="$terminal_capabilities"
 "$tool" config --output "$materials_b" --endpoint "$endpoint" \
 	--host-id conformance-host-b --docker-socket "$docker_socket_b" \
 	--deployment-capabilities="$deployment_capabilities" \
-	--inventory-capabilities="$inventory_capabilities"
+	--inventory-capabilities="$inventory_capabilities" \
+	--terminal-capabilities="$terminal_capabilities"
 
 "$agent" -conf "$materials_a/agent.yaml" >"$workspace/agent-a.log" 2>&1 &
 agent_a_pid=$!
@@ -455,6 +531,7 @@ result_b_two=$workspace/result-b-two
 	--command-suffix "$reconnect_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
 	--inventory-capabilities="$inventory_capabilities" \
+	--terminal-capabilities="$terminal_capabilities" \
     >"$workspace/server-two.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_two"
@@ -483,6 +560,7 @@ result_a_three=$workspace/result-a-three
 	--command-suffix "$outage_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
 	--inventory-capabilities="$inventory_capabilities" \
+	--terminal-capabilities="$terminal_capabilities" \
 	--timeout 45s \
     >"$workspace/server-three.log" 2>&1 &
 server_pid=$!
@@ -518,6 +596,7 @@ if [ "$runtime_mode" = 1 ]; then
 		--runtime-probe ready --command-suffix host-a-recovery \
 		--deployment-capabilities=true \
 		--inventory-capabilities=true \
+		--terminal-capabilities=true \
 		--timeout 45s \
 		>"$workspace/server-four.log" 2>&1 &
 	server_pid=$!
@@ -633,6 +712,49 @@ if [ "$runtime_mode" = 1 ]; then
 		fail "Host A did not preserve its cutover watermark across Agent restart: $state_a"
 	[ "$state_b" = 'true conformance-deployment-conformance-host-b 1' ] || \
 		fail "Host A Agent restart changed Host B deployment: $state_b"
+
+	terminal_deployment_id=conformance-terminal-deployment-a
+	terminal_container=$("$tool" container-name \
+		--project conformance-project \
+		--application conformance-application \
+		--environment conformance-environment \
+		--runtime-target conformance-target-conformance-host-a)
+	case "$terminal_container" in
+		owndock-[0-9a-f][0-9a-f]*) ;;
+		*) fail "canonical Host A terminal container name is invalid" ;;
+	esac
+	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 run -d \
+		--name "$terminal_container" \
+		--label net.owndock.deployment_id="$terminal_deployment_id" \
+		--label net.owndock.cutover_sequence=1 \
+		--label net.owndock.project_id=conformance-project \
+		--label net.owndock.application_id=conformance-application \
+		--label net.owndock.environment_id=conformance-environment \
+		--env TERMINAL_PRIVATE=terminal-private-sentinel-host-a \
+		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b' \
+		>/dev/null
+	run_host_container_terminal_exit_phase
+	attempt=0
+	while [ "$attempt" -lt 100 ]; do
+		terminal_running=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+			inspect --format '{{.State.Running}}' "$terminal_container")
+		[ "$terminal_running" = false ] && break
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
+	[ "$terminal_running" = false ] || fail "Host A terminal target did not exit"
+	run_host_a_probe_after_terminal
+	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
+		"$deployment_container")
+	[ "$state_b_after_terminal" = 'true conformance-deployment-conformance-host-b 1' ] || \
+		fail "Host A terminal target exit changed Host B deployment"
+	docker logs "$engine_a_id" >"$workspace/engine-a-after-terminal.log" 2>&1 || \
+		fail "could not capture Host A Engine logs after terminal exit"
+	if find "$workspace" -type f -exec \
+		grep -F 'terminal-private-sentinel-host-a' {} + >/dev/null; then
+		fail "container terminal exposed private environment data in process logs"
+	fi
 fi
 
 kill -TERM "$agent_a_pid"
@@ -643,7 +765,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, secret-safe bounded inventory Event flood, outage, restart fencing and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit, secret-safe bounded inventory Event flood, outage, restart fencing and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

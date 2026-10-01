@@ -85,6 +85,8 @@ direct Docker exec 只连接 Server 根据当前成功 Deployment 推导出的�
 
 Agent 模式复用同一授权和目标解析结果，但 Server 不连接远端 Docker 地址。它通过现有 mTLS Agent 控制连接发送 `terminal.container` 有界帧；`OPEN` 只包含已解析的 Deployment、Project、Application、Environment、Runtime Target、稳定容器名、cutover sequence 和窗口尺寸。Agent 再次推导容器名、核对运行状态与标签后，才在本机 Unix Socket 上启动同一组固定 shell。stdin、TTY stdout 和 resize 使用每会话连续序号传输；每台 Agent 的容器与主机终端合计最多 16 个，连接和发送队列都有上限，断线不会自动恢复旧 PTY。该通道不会携带 Docker endpoint、socket、任意命令、用户、环境变量、工作目录或特权开关。
 
+进程级门禁会把两个真实 Agent 分别连接到两个隔离 Engine，只在 Host A 创建符合稳定身份契约的 canonical 容器并打开固定 Shell。测试从 Engine 侧停止该目标后，要求 Host A 会话释放并重新连接控制流，随后 `runtime.probe` 仍为 `ready`；Host B 的稳定部署身份保持不变，目标容器中的私密环境哨兵不得进入任何进程日志。
+
 ## 主机终端如何限制权限
 
 Agent 主机终端使用单独的 `terminal.host` capability，不能用 `terminal.container` 权限代替。Server 发出的 `OPEN` 只有 `kind=host` 和窗口尺寸，不含用户名、Shell、命令、环境变量或工作目录。主机上的可信配置固定 `host_terminal.user` 和 `host_terminal.shell`；Agent 必须本来就以该系统账号运行，不调用 `sudo`、`su` 或 `setuid` 临时切换身份。首版只接受本机配置中的 `/bin/sh`、`/bin/bash` 或 `/bin/ash`，并拒绝可被 group/world 写入的 Shell 文件。

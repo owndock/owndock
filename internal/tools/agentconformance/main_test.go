@@ -182,7 +182,7 @@ func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
 			t.Fatalf("%s result was not accepted", kind)
 		}
 	}
-	capabilities := conformanceCapabilities(true, false)
+	capabilities := conformanceCapabilities(true, false, false)
 	if len(capabilities) != 5 ||
 		capabilities[0] != agentprotocol.CapabilityRuntimeProbe ||
 		capabilities[4] != agentprotocol.CapabilityDeploymentCancel {
@@ -252,10 +252,11 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 			t.Fatalf("%s inventory identity = %+v", kind, command.Inventory)
 		}
 	}
-	capabilities := conformanceCapabilities(true, true)
-	if len(capabilities) != 9 ||
+	capabilities := conformanceCapabilities(true, true, true)
+	if len(capabilities) != 10 ||
 		capabilities[5] != agentprotocol.CapabilityInventoryPrepare ||
-		capabilities[8] != agentprotocol.CapabilityInventoryEvents {
+		capabilities[8] != agentprotocol.CapabilityInventoryEvents ||
+		capabilities[9] != agentprotocol.CapabilityTerminalContainer {
 		t.Fatalf("combined capabilities = %v", capabilities)
 	}
 

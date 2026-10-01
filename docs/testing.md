@@ -27,6 +27,8 @@ make test-changed-coverage COVERAGE_BASE=<完整或可解析的 commit SHA>
 
 CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、MongoDB 集成测试、API 契约、构建、Agent 进程测试和 race 检测。`make test-integration` 同时运行单节点完整产品持久化回归、启用认证且只有目标数据库 `readWrite` 权限的应用身份回归、认证 + `requireTLS` 的加密/明文拒绝/错误 CA 回归，以及三成员 Replica Set 的全员就绪、Primary 停止、不同成员接管、切换后 majority 事务恢复和跨切换 Runtime Inventory current view 提交。`make test-runtime-integration` 除本机 Docker/mTLS 回归外，还启动两个固定 digest 的独立 Docker 29.6.1 Engine，验证双目标不串线、单 Host 故障、切换中断恢复与延迟旧命令拒绝；同一门禁还启动两个真实 `owndock-agent` 进程，通过各自 Unix Socket 连接隔离 Engine，验证实时 probe、控制面单 Host 拒绝、Engine 停止后的 `unreachable`、Engine 恢复后无需重启 Agent 即回到 `ready`，以及两个 Host 分别完成 `prepare → stage → activate` 后各自持有同名、不同 Deployment 身份的运行容器。部署完成后，两条真实 Agent 连接还分别执行 Runtime Inventory `prepare → chunk → release`，要求 manifest 有界、chunk 包含本 Host 的稳定容器及 Deployment Label，并拒绝跨 Host 归属；两端的 `runtime.inventory.events` 还必须只返回各自 Engine 新建容器的 Runtime ID，并用第一次返回的 Docker `occurred_at` 作为第二次 `Since`，验证 inclusive cursor 会安全重放同一 Event。Host A Event 读取期间会被切断本地 Docker 通道并返回 `inventory_unavailable`，同时 Host B 仍成功；重建 A 的同路径代理后，不重启 Agent 即可读取新事件。两个 Engine 各自产生 70 条带私密 Label 哨兵的 create Event 时，每端必须恰好返回协议上限 64 条并设置 `truncated`，所有结果与进程日志还必须不含 Actor attributes。随后以 `SIGKILL` 中断并从原状态目录重启 Host A Agent，验证更高 cutover sequence 生效、延迟旧 activate 被拒绝且 Host B 不受影响。流式控制请求在收到响应头前失效时由握手超时同步关闭请求管道和上下文，避免存活 Agent 永久卡在 `net/http` 而停止重连。架构测试还要求生产代码中的每个 Driver `WithTransaction` 显式使用统一耐久选项。定时/手动双架构安全 Job 继续重复执行供应链真实 Registry/KMS 门禁，防止只在相关源码发生变化时运行。变更覆盖率只是其中一道门禁。
 
+双 Agent 门禁尾部还会在 Host A 的隔离 Engine 创建 canonical 容器，通过真实 Agent 打开固定 Shell，再从 Engine 侧停止该容器。测试要求会话收敛后同一 Agent 能重新连接并返回 `runtime_ready`，Host B 的稳定部署保持不变，容器私密环境哨兵不进入任何夹具进程日志。
+
 正式 Tag 会执行更完整的仓库内发布候选组合门禁：
 
 ```bash

@@ -28,6 +28,7 @@ import (
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeidentity"
 	"github.com/owndock/owndock/internal/shared/runtimeinventory"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
@@ -83,10 +84,11 @@ func newFixtureIdentity(host, identity, instance string) (fixtureIdentity, error
 }
 
 type agentFrame struct {
-	Type          string              `json:"type"`
-	Sequence      uint64              `json:"sequence"`
-	Hello         *agentHello         `json:"hello,omitempty"`
-	CommandResult *agentCommandResult `json:"command_result,omitempty"`
+	Type          string                       `json:"type"`
+	Sequence      uint64                       `json:"sequence"`
+	Hello         *agentHello                  `json:"hello,omitempty"`
+	CommandResult *agentCommandResult          `json:"command_result,omitempty"`
+	Terminal      *agentprotocol.TerminalFrame `json:"terminal,omitempty"`
 }
 
 type agentHello struct {
@@ -139,11 +141,12 @@ type serverFrame struct {
 	ServerTime               time.Time                      `json:"server_time,omitzero"`
 	CommandID                string                         `json:"command_id,omitempty"`
 	Command                  *agentprotocol.CommandDocument `json:"command,omitempty"`
+	Terminal                 *agentprotocol.TerminalFrame   `json:"terminal,omitempty"`
 }
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal(errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|docker-proxy|rotation-serve"))
+		fatal(errors.New("usage: agentconformance materials|identity|config|container-name|serve|serve-dual|docker-proxy|rotation-serve"))
 	}
 	var err error
 	switch os.Args[1] {
@@ -153,6 +156,8 @@ func main() {
 		err = runIdentity(os.Args[2:])
 	case "config":
 		err = runConfig(os.Args[2:])
+	case "container-name":
+		err = runContainerName(os.Args[2:])
 	case "serve":
 		err = runServer(os.Args[2:])
 	case "serve-dual":
@@ -162,7 +167,7 @@ func main() {
 	case "rotation-serve":
 		err = runRotationServer(os.Args[2:])
 	default:
-		err = errors.New("usage: agentconformance materials|identity|config|serve|serve-dual|docker-proxy|rotation-serve")
+		err = errors.New("usage: agentconformance materials|identity|config|container-name|serve|serve-dual|docker-proxy|rotation-serve")
 	}
 	if err != nil {
 		fatal(err)
@@ -172,6 +177,29 @@ func main() {
 func fatal(err error) {
 	_, _ = fmt.Fprintln(os.Stderr, err)
 	os.Exit(1)
+}
+
+func runContainerName(arguments []string) error {
+	flags := flag.NewFlagSet("container-name", flag.ContinueOnError)
+	var projectID, applicationID, environmentID, runtimeTargetID string
+	flags.StringVar(&projectID, "project", "", "project ID")
+	flags.StringVar(&applicationID, "application", "", "application ID")
+	flags.StringVar(&environmentID, "environment", "", "environment ID")
+	flags.StringVar(&runtimeTargetID, "runtime-target", "", "runtime target ID")
+	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 {
+		return errors.New("container-name arguments are invalid")
+	}
+	name, err := runtimeidentity.ContainerName(
+		projectID,
+		applicationID,
+		environmentID,
+		runtimeTargetID,
+	)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, name)
+	return err
 }
 
 func runMaterials(arguments []string) error {
@@ -279,13 +307,14 @@ func initializeMaterialDirectory(paths materialPaths) error {
 func runConfig(arguments []string) error {
 	flags := flag.NewFlagSet("config", flag.ContinueOnError)
 	var output, endpoint, dockerSocket, fixtureHostID, fixtureIdentityID, fixtureInstanceID string
-	var enableRotation, deploymentCapabilities, inventoryCapabilities bool
+	var enableRotation, deploymentCapabilities, inventoryCapabilities, terminalCapabilities bool
 	flags.StringVar(&output, "output", "", "absolute material directory")
 	flags.StringVar(&endpoint, "endpoint", "", "Agent control HTTPS endpoint")
 	flags.StringVar(&dockerSocket, "docker-socket", "/var/run/docker.sock", "absolute Docker Engine Unix socket")
 	flags.BoolVar(&enableRotation, "enable-rotation", false, "enable immediate conformance rotation")
 	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "enable deployment command capabilities")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "enable runtime inventory capabilities")
+	flags.BoolVar(&terminalCapabilities, "terminal-capabilities", false, "enable container terminal capability")
 	flags.StringVar(&fixtureHostID, "host-id", hostID, "fixture managed host ID")
 	flags.StringVar(&fixtureIdentityID, "identity-id", identityID, "fixture Agent identity ID")
 	flags.StringVar(&fixtureInstanceID, "instance-id", instanceID, "fixture Agent instance ID")
@@ -337,6 +366,7 @@ func runConfig(arguments []string) error {
 	config.Control.Capabilities = conformanceCapabilities(
 		deploymentCapabilities,
 		inventoryCapabilities,
+		terminalCapabilities,
 	)
 	config.Runtime.DockerSocket = dockerSocket
 	config.Runtime.StateDirectory = paths.state
@@ -461,10 +491,12 @@ func runDualServer(arguments []string) error {
 	var listen, materialDirectory, readyFile, resultA, resultB string
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
 	var commandSuffix, deploymentCommand, deploymentContainer, deploymentResult, inventoryCommand string
+	var terminalContainer, terminalDeploymentID string
 	var inventoryEventIDA, inventoryEventIDB, inventoryResult string
 	var inventoryEventSinceA, inventoryEventSinceB string
-	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated bool
+	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated, terminalCapabilities bool
 	var deploymentSequence uint64
+	var terminalCutoverSequence uint64
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
 	flags.StringVar(&materialDirectory, "materials", "", "authority material directory")
@@ -491,6 +523,10 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&inventoryResult, "inventory-result", "succeeded", "expected inventory result: succeeded or unavailable")
 	flags.BoolVar(&inventoryEventsTruncated, "inventory-events-truncated", false, "expect a truncated inventory Event batch")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
+	flags.BoolVar(&terminalCapabilities, "terminal-capabilities", false, "expect container terminal capability")
+	flags.StringVar(&terminalContainer, "terminal-container", "", "optional canonical container terminal target")
+	flags.StringVar(&terminalDeploymentID, "terminal-deployment-id", "", "container terminal deployment ID")
+	flags.Uint64Var(&terminalCutoverSequence, "terminal-cutover-sequence", 0, "container terminal cutover sequence")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
 		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
@@ -514,7 +550,11 @@ func runDualServer(arguments []string) error {
 				inventoryEventIDA == inventoryEventIDB) ||
 		inventoryCommand != string(agentprotocol.AgentCommandInventoryEvents) &&
 			(inventoryEventIDA != "" || inventoryEventIDB != "" || inventoryEventsTruncated) ||
-		deploymentCommand != "" && inventoryCommand != "" {
+		deploymentCommand != "" && inventoryCommand != "" ||
+		terminalContainer != "" && (!terminalCapabilities || onlyHost == "" ||
+			deploymentCommand != "" || inventoryCommand != "" ||
+			terminalDeploymentID == "" || terminalCutoverSequence == 0) ||
+		terminalContainer == "" && (terminalDeploymentID != "" || terminalCutoverSequence != 0) {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	eventSinceA, eventSinceB, err := parseInventoryEventCursors(
@@ -595,6 +635,10 @@ func runDualServer(arguments []string) error {
 		deploymentResult:         deploymentResult,
 		deploymentSequence:       deploymentSequence,
 		deploymentCapabilities:   deploymentCapabilities,
+		terminalCapabilities:     terminalCapabilities,
+		terminalContainer:        terminalContainer,
+		terminalDeploymentID:     terminalDeploymentID,
+		terminalCutoverSequence:  terminalCutoverSequence,
 		inventoryCommand:         inventoryCommand,
 		inventoryCapabilities:    inventoryCapabilities,
 		inventoryResult:          inventoryResult,
@@ -648,6 +692,10 @@ type dualConformanceHandler struct {
 	deploymentResult         string
 	deploymentSequence       uint64
 	deploymentCapabilities   bool
+	terminalCapabilities     bool
+	terminalContainer        string
+	terminalDeploymentID     string
+	terminalCutoverSequence  uint64
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -682,6 +730,10 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		deploymentResult:         handler.deploymentResult,
 		deploymentSequence:       handler.deploymentSequence,
 		deploymentCapabilities:   handler.deploymentCapabilities,
+		terminalCapabilities:     handler.terminalCapabilities,
+		terminalContainer:        handler.terminalContainer,
+		terminalDeploymentID:     handler.terminalDeploymentID,
+		terminalCutoverSequence:  handler.terminalCutoverSequence,
 		inventoryCommand:         handler.inventoryCommand,
 		inventoryCapabilities:    handler.inventoryCapabilities,
 		inventoryResult:          handler.inventoryResult,
@@ -1129,6 +1181,10 @@ type conformanceHandler struct {
 	deploymentResult         string
 	deploymentSequence       uint64
 	deploymentCapabilities   bool
+	terminalCapabilities     bool
+	terminalContainer        string
+	terminalDeploymentID     string
+	terminalCutoverSequence  uint64
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -1185,6 +1241,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	expectedCapabilities := conformanceCapabilities(
 		h.deploymentCapabilities,
 		h.inventoryCapabilities,
+		h.terminalCapabilities,
 	)
 	if hello.OrganizationID != h.identity.organizationID || hello.ManagedHostID != h.identity.hostID ||
 		hello.AgentIdentityID != h.identity.identityID || hello.InstanceID != h.identity.instanceID ||
@@ -1206,6 +1263,14 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	}
 	if err := controller.Flush(); err != nil {
 		return err
+	}
+	if h.terminalContainer != "" {
+		return h.handleContainerTerminal(
+			encoder,
+			controller,
+			hello,
+			peer,
+		)
 	}
 	expectedRuntimeProbe := h.runtimeProbe
 	if expectedRuntimeProbe == "" {
@@ -1290,9 +1355,15 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 					}
 				}
 			}
-			if err := result.Validate(command); err != nil ||
-				!h.validConformanceResult(result, expectedRuntimeProbe) {
-				return errors.New("Agent conformance command result is invalid")
+			if err := result.Validate(command); err != nil {
+				return fmt.Errorf("Agent conformance command result is invalid: %w", err)
+			}
+			if !h.validConformanceResult(result, expectedRuntimeProbe) {
+				return fmt.Errorf(
+					"Agent conformance command result is unexpected: status=%s code=%s",
+					result.Status,
+					result.ErrorCode,
+				)
 			}
 			validatedResult = result
 			commandResultReceived = true
@@ -1327,6 +1398,75 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		}
 		result += inventoryDetails
 	}
+	return writeFile(h.resultFile, []byte(result), 0o600)
+}
+
+func (h *conformanceHandler) handleContainerTerminal(
+	encoder *json.Encoder,
+	controller *http.ResponseController,
+	hello *agentHello,
+	peer *x509.Certificate,
+) error {
+	const sessionID = "conformance-container-terminal"
+	open := agentprotocol.TerminalOpen{
+		Kind:            agentprotocol.TerminalKindContainer,
+		DeploymentID:    h.terminalDeploymentID,
+		ProjectID:       "conformance-project",
+		ApplicationID:   "conformance-application",
+		EnvironmentID:   "conformance-environment",
+		RuntimeTargetID: "conformance-target-" + h.identity.hostID,
+		ContainerName:   h.terminalContainer,
+		CutoverSequence: h.terminalCutoverSequence,
+		Columns:         100,
+		Rows:            30,
+	}
+	if err := open.Validate(); err != nil {
+		return fmt.Errorf("create Agent conformance terminal: %w", err)
+	}
+	serverSequence := uint64(2)
+	if err := encoder.Encode(serverFrame{
+		Type: "terminal", Sequence: serverSequence,
+		Terminal: &agentprotocol.TerminalFrame{
+			SessionID: sessionID, Sequence: 1,
+			Type: agentprotocol.TerminalFrameOpen, Open: &open,
+		},
+	}); err != nil {
+		return err
+	}
+	for _, outbound := range []agentprotocol.TerminalFrame{
+		{
+			SessionID: sessionID, Sequence: 2,
+			Type: agentprotocol.TerminalFrameStdin,
+			Data: []byte("printf 'owndock-terminal-container-open\\n'\\n"),
+		},
+		{
+			SessionID: sessionID, Sequence: 3,
+			Type:    agentprotocol.TerminalFrameResize,
+			Columns: 120, Rows: 40,
+		},
+	} {
+		serverSequence++
+		frame := outbound
+		if err := encoder.Encode(serverFrame{
+			Type: "terminal", Sequence: serverSequence, Terminal: &frame,
+		}); err != nil {
+			return err
+		}
+	}
+	if err := controller.Flush(); err != nil {
+		return err
+	}
+	timer := time.NewTimer(15 * time.Second)
+	defer timer.Stop()
+	<-timer.C
+	result := fmt.Sprintf(
+		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\nterminal_session_id=%s\nterminal_status=frames_sent\nstatus=passed\n",
+		hello.AgentVersion,
+		hello.ProtocolVersion,
+		hello.ManagedHostID,
+		peer.SerialNumber.String(),
+		sessionID,
+	)
 	return writeFile(h.resultFile, []byte(result), 0o600)
 }
 
@@ -1592,7 +1732,7 @@ func parseInventoryEventCursors(
 	return parsedA.UTC(), parsedB.UTC(), nil
 }
 
-func conformanceCapabilities(deployment, inventory bool) []string {
+func conformanceCapabilities(deployment, inventory, terminal bool) []string {
 	capabilities := []string{agentprotocol.CapabilityRuntimeProbe}
 	if deployment {
 		capabilities = append(
@@ -1611,6 +1751,9 @@ func conformanceCapabilities(deployment, inventory bool) []string {
 			agentprotocol.CapabilityInventoryRelease,
 			agentprotocol.CapabilityInventoryEvents,
 		)
+	}
+	if terminal {
+		capabilities = append(capabilities, agentprotocol.CapabilityTerminalContainer)
 	}
 	return capabilities
 }
