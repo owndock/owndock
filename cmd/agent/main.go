@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	agentcontrol "github.com/owndock/owndock/internal/agent/control"
@@ -96,6 +97,12 @@ func run(ctx context.Context, arguments []string) error {
 	if err != nil {
 		return fmt.Errorf("create Agent cutover store: %w", err)
 	}
+	terminalExecutions, err := agentruntime.NewFileTerminalExecutionStore(
+		config.Runtime.StateDirectory,
+	)
+	if err != nil {
+		return fmt.Errorf("create Agent terminal execution store: %w", err)
+	}
 	executor, err := agentruntime.NewDockerExecutor(
 		config.Runtime.DockerSocket,
 		cache,
@@ -103,6 +110,15 @@ func run(ctx context.Context, arguments []string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("create Agent Docker runtime: %w", err)
+	}
+	if err := executor.WithTerminalExecutionStore(terminalExecutions); err != nil {
+		return fmt.Errorf("configure Agent terminal recovery: %w", err)
+	}
+	terminalRecoveryContext, cancelTerminalRecovery := context.WithTimeout(ctx, 10*time.Second)
+	err = executor.RecoverContainerTerminals(terminalRecoveryContext)
+	cancelTerminalRecovery()
+	if err != nil {
+		return fmt.Errorf("recover Agent container terminals: %w", err)
 	}
 	var hostTerminal *agentruntime.HostTerminalExecutor
 	if config.HostTerminal.Enabled {

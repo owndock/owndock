@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -71,6 +70,24 @@ func (e *dockerTerminalEngineStub) ExecAttach(
 	)}, nil
 }
 
+func (e *dockerTerminalEngineStub) ExecInspect(
+	_ context.Context,
+	execID string,
+	_ mobyclient.ExecInspectOptions,
+) (mobyclient.ExecInspectResult, error) {
+	return mobyclient.ExecInspectResult{
+		ID: execID, ContainerID: e.inspect.Container.ID, Running: false,
+	}, nil
+}
+
+func (e *dockerTerminalEngineStub) ExecStart(
+	context.Context,
+	string,
+	mobyclient.ExecStartOptions,
+) (mobyclient.ExecStartResult, error) {
+	return mobyclient.ExecStartResult{}, nil
+}
+
 func (e *dockerTerminalEngineStub) ExecResize(
 	_ context.Context,
 	_ string,
@@ -110,7 +127,11 @@ func TestDockerExecutorOpensConstrainedContainerTerminal(t *testing.T) {
 	if !created.TTY || !created.AttachStdin || !created.AttachStdout || !created.AttachStderr ||
 		created.Privileged || created.User != "" || created.WorkingDir != "" ||
 		len(created.Env) != 0 || created.DetachKeys != "" ||
-		!slices.Equal(created.Cmd, []string{"/bin/sh"}) ||
+		len(created.Cmd) != 6 || created.Cmd[0] != "/bin/sh" ||
+		created.Cmd[1] != "-c" || created.Cmd[2] != terminalShellWrapper ||
+		created.Cmd[3] != "owndock-terminal" ||
+		!terminalMarkerRule.MatchString(created.Cmd[4]) ||
+		created.Cmd[5] != "/bin/sh" ||
 		created.ConsoleSize.Width != 120 || created.ConsoleSize.Height != 30 {
 		t.Fatalf("unsafe or unexpected exec options: %#v", created)
 	}

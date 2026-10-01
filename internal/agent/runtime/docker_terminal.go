@@ -2,11 +2,14 @@ package agentruntime
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	cerrdefs "github.com/containerd/errdefs"
 	mobyclient "github.com/moby/moby/client"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
@@ -36,6 +39,16 @@ type dockerTerminalEngine interface {
 		string,
 		mobyclient.ExecAttachOptions,
 	) (mobyclient.ExecAttachResult, error)
+	ExecInspect(
+		context.Context,
+		string,
+		mobyclient.ExecInspectOptions,
+	) (mobyclient.ExecInspectResult, error)
+	ExecStart(
+		context.Context,
+		string,
+		mobyclient.ExecStartOptions,
+	) (mobyclient.ExecStartResult, error)
 	ExecResize(
 		context.Context,
 		string,
@@ -84,7 +97,12 @@ func (e *DockerExecutor) OpenContainerTerminal(
 	}
 	var attachment mobyclient.ExecAttachResult
 	var execID string
+	var execution terminalExecution
 	for _, shell := range []string{"/bin/sh", "/bin/bash", "/bin/ash"} {
+		marker, markerErr := newTerminalMarker()
+		if markerErr != nil {
+			return nil, ErrTerminalStreamUnavailable
+		}
 		created, createErr := engine.ExecCreate(
 			ctx,
 			initial.Container.ID,
@@ -93,11 +111,23 @@ func (e *DockerExecutor) OpenContainerTerminal(
 				ConsoleSize: mobyclient.ConsoleSize{
 					Height: uint(open.Rows), Width: uint(open.Columns),
 				},
-				Cmd: []string{shell},
+				Cmd: []string{
+					shell, "-c", terminalShellWrapper,
+					"owndock-terminal", marker, shell,
+				},
 			},
 		)
 		if createErr != nil || created.ID == "" {
 			continue
+		}
+		execution = terminalExecution{
+			execID: created.ID, containerID: initial.Container.ID,
+			marker: marker, shell: shell,
+		}
+		if e.terminalExecutions != nil {
+			if storeErr := e.terminalExecutions.Add(execution); storeErr != nil {
+				return nil, ErrTerminalStreamUnavailable
+			}
 		}
 		attached, attachErr := engine.ExecAttach(
 			ctx,
@@ -110,6 +140,9 @@ func (e *DockerExecutor) OpenContainerTerminal(
 			},
 		)
 		if attachErr != nil {
+			if e.terminalExecutions != nil {
+				_ = e.terminalExecutions.Remove(created.ID)
+			}
 			continue
 		}
 		attachment, execID = attached, created.ID
@@ -120,18 +153,171 @@ func (e *DockerExecutor) OpenContainerTerminal(
 	}
 	current, err := inspectAgentTerminalContainer(ctx, engine, open)
 	if err != nil || current.Container.ID != initial.Container.ID {
-		attachment.Close()
+		requestTerminalExit(&attachment)
+		if e.terminalExecutions != nil {
+			cleanupContext, cancel := context.WithTimeout(ctx, 4*time.Second)
+			_ = signalTerminalExecutionStop(cleanupContext, engine, execution)
+			if waitForTerminalExecutionStop(cleanupContext, engine, execID) == nil {
+				_ = e.terminalExecutions.Remove(execID)
+			}
+			cancel()
+		}
 		return nil, ErrTerminalTargetUnavailable
 	}
 	streamContext, cancel := context.WithCancel(ctx)
 	stream := &dockerTerminalStream{
 		engine: engine, attachment: attachment, execID: execID,
 		containerID: initial.Container.ID, open: open, cancel: cancel,
-		closed: make(chan struct{}),
+		terminalExecutions: e.terminalExecutions,
+		execution:          execution,
+		closed:             make(chan struct{}),
 	}
 	closeEngine = false
 	go stream.watchContainer(streamContext, e.pollInterval)
 	return stream, nil
+}
+
+const terminalShellWrapper = `marker=$1
+shell=$2
+/bin/mkdir -- "$marker" || exit 125
+(
+	trap '' HUP
+	while [ -d "$marker" ]; do sleep 1; done
+	kill -TERM "$$" 2>/dev/null || true
+	sleep 1
+	kill -KILL "$$" 2>/dev/null || true
+) </dev/null >/dev/null 2>&1 &
+exec "$shell"
+`
+
+func newTerminalMarker() (string, error) {
+	var token [16]byte
+	if _, err := rand.Read(token[:]); err != nil {
+		return "", err
+	}
+	return "/tmp/.owndock-terminal-" + hex.EncodeToString(token[:]), nil
+}
+
+// RecoverContainerTerminals closes every fixed-shell exec left in the durable
+// registry by an abruptly terminated Agent. A terminal stays fail-closed until
+// the old process has stopped and its record is durably removed.
+func (e *DockerExecutor) RecoverContainerTerminals(ctx context.Context) error {
+	if e.terminalExecutions == nil {
+		return nil
+	}
+	entries, err := e.terminalExecutions.List()
+	if err != nil {
+		return fmt.Errorf("list terminal recovery records: %w", ErrTerminalStreamUnavailable)
+	}
+	if len(entries) == 0 {
+		return nil
+	}
+	engine, err := e.newTerminalEngine(e.socketPath)
+	if err != nil {
+		return fmt.Errorf("open terminal recovery engine: %w", ErrTerminalStreamUnavailable)
+	}
+	defer func() { _ = engine.Close() }()
+	for _, entry := range entries {
+		if err := recoverTerminalExecution(ctx, engine, entry); err != nil {
+			return err
+		}
+		if err := e.terminalExecutions.Remove(entry.execID); err != nil {
+			return fmt.Errorf("commit terminal recovery: %w", ErrTerminalStreamUnavailable)
+		}
+	}
+	return nil
+}
+
+func recoverTerminalExecution(
+	ctx context.Context,
+	engine dockerTerminalEngine,
+	entry terminalExecution,
+) error {
+	inspection, err := engine.ExecInspect(
+		ctx,
+		entry.execID,
+		mobyclient.ExecInspectOptions{},
+	)
+	if cerrdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil || inspection.ID != entry.execID ||
+		inspection.ContainerID != entry.containerID {
+		return fmt.Errorf("inspect terminal recovery target: %w", ErrTerminalStreamUnavailable)
+	}
+	if !inspection.Running {
+		return nil
+	}
+	if err := signalTerminalExecutionStop(ctx, engine, entry); err != nil {
+		return fmt.Errorf("signal terminal recovery target: %w", ErrTerminalStreamUnavailable)
+	}
+	if err := waitForTerminalExecutionStop(ctx, engine, entry.execID); err != nil {
+		return fmt.Errorf("wait for terminal recovery target: %w", ErrTerminalStreamUnavailable)
+	}
+	return nil
+}
+
+func signalTerminalExecutionStop(
+	ctx context.Context,
+	engine dockerTerminalEngine,
+	entry terminalExecution,
+) error {
+	created, err := engine.ExecCreate(
+		ctx,
+		entry.containerID,
+		mobyclient.ExecCreateOptions{
+			Cmd: []string{"/bin/rmdir", "--", entry.marker},
+		},
+	)
+	if err != nil || created.ID == "" {
+		return ErrTerminalStreamUnavailable
+	}
+	if _, err := engine.ExecStart(
+		ctx,
+		created.ID,
+		mobyclient.ExecStartOptions{Detach: true},
+	); err != nil {
+		return ErrTerminalStreamUnavailable
+	}
+	return nil
+}
+
+func requestTerminalExit(attachment *mobyclient.ExecAttachResult) {
+	_ = attachment.Conn.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+	_, _ = attachment.Conn.Write([]byte("exit\n"))
+	_ = attachment.CloseWrite()
+	attachment.Close()
+}
+
+func waitForTerminalExecutionStop(
+	ctx context.Context,
+	engine dockerTerminalEngine,
+	execID string,
+) error {
+	deadline := time.NewTimer(3 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		inspection, err := engine.ExecInspect(
+			ctx,
+			execID,
+			mobyclient.ExecInspectOptions{},
+		)
+		if cerrdefs.IsNotFound(err) || err == nil && !inspection.Running {
+			return nil
+		}
+		if err != nil {
+			return ErrTerminalStreamUnavailable
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return ErrTerminalStreamUnavailable
+		case <-ticker.C:
+		}
+	}
 }
 
 func inspectAgentTerminalContainer(
@@ -167,14 +353,16 @@ func matchesAgentTerminalContainer(
 }
 
 type dockerTerminalStream struct {
-	engine      dockerTerminalEngine
-	attachment  mobyclient.ExecAttachResult
-	execID      string
-	containerID string
-	open        agentprotocol.TerminalOpen
-	cancel      context.CancelFunc
-	closeOnce   sync.Once
-	closed      chan struct{}
+	engine             dockerTerminalEngine
+	attachment         mobyclient.ExecAttachResult
+	execID             string
+	containerID        string
+	open               agentprotocol.TerminalOpen
+	terminalExecutions terminalExecutionStore
+	execution          terminalExecution
+	cancel             context.CancelFunc
+	closeOnce          sync.Once
+	closed             chan struct{}
 }
 
 func (s *dockerTerminalStream) Read(payload []byte) (int, error) {
@@ -210,7 +398,15 @@ func (s *dockerTerminalStream) Resize(
 func (s *dockerTerminalStream) Close() error {
 	s.closeOnce.Do(func() {
 		s.cancel()
-		s.attachment.Close()
+		requestTerminalExit(&s.attachment)
+		if s.terminalExecutions != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			_ = signalTerminalExecutionStop(ctx, s.engine, s.execution)
+			if waitForTerminalExecutionStop(ctx, s.engine, s.execID) == nil {
+				_ = s.terminalExecutions.Remove(s.execID)
+			}
+			cancel()
+		}
 		_ = s.engine.Close()
 		close(s.closed)
 	})

@@ -38,10 +38,23 @@ type DockerExecutor struct {
 	newTerminalEngine   dockerTerminalEngineFactory
 	cache               ResultCache
 	cutovers            CutoverStore
+	terminalExecutions  terminalExecutionStore
 	now                 func() time.Time
 	pollInterval        time.Duration
 	pending             map[string]*pendingProbeExecution
 	inventorySnapshots  map[string]*inventorySnapshot
+}
+
+// WithTerminalExecutionStore enables crash recovery for fixed-shell Docker
+// exec sessions. It must be configured before the executor is shared.
+func (e *DockerExecutor) WithTerminalExecutionStore(
+	store *FileTerminalExecutionStore,
+) error {
+	if store == nil {
+		return ErrRuntimeExecutorMissing
+	}
+	e.terminalExecutions = store
+	return nil
 }
 
 type pendingProbeExecution struct {

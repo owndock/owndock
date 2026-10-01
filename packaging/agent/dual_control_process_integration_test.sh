@@ -442,6 +442,12 @@ run_host_container_terminal_fault_phase() {
 			[ "$replacement_container_id" != "$original_container_id" ] || \
 				fail "Host A terminal target replacement preserved the old container ID"
 			;;
+		agent-restart)
+			kill -KILL "$agent_a_pid" >/dev/null 2>&1 || \
+				fail "could not interrupt Host A Agent during its terminal session"
+			wait "$agent_a_pid" >/dev/null 2>&1 || true
+			agent_a_pid=
+			;;
 		*) fail "container terminal fault is invalid" ;;
 	esac
 	wait_for_file "$phase_result" 200
@@ -471,13 +477,13 @@ run_host_a_probe_after_terminal() {
 	server_pid=$!
 	wait_for_file "$phase_ready"
 	wait_for_file "$phase_result" 450
-	wait "$server_pid" || fail "Host A did not reconnect after terminal target exit"
+	wait "$server_pid" || fail "Host A did not reconnect after terminal $fault fault"
 	server_pid=
 	[ ! -e "$unused_result" ] || fail "terminal recovery probe crossed Host identity"
 	grep -qx 'managed_host_id=conformance-host-a' "$phase_result" || \
 		fail "terminal recovery probe reached the wrong Host"
 	grep -qx 'command_status=runtime_ready' "$phase_result" || \
-		fail "Host A runtime did not recover after terminal target exit"
+		fail "Host A runtime did not recover after terminal $fault fault"
 }
 
 materials_a=$workspace/materials-a
@@ -794,6 +800,31 @@ if [ "$runtime_mode" = 1 ]; then
 	[ "$terminal_replacement_running" = true ] || \
 		fail "Host A replacement terminal target did not remain running"
 	run_host_a_probe_after_terminal target-replacement
+	run_host_container_terminal_fault_phase agent-restart
+	"$agent" -conf "$materials_a/agent.yaml" >>"$workspace/agent-a.log" 2>&1 &
+	agent_a_pid=$!
+	attempt=0
+	while [ "$attempt" -lt 100 ]; do
+		if ! kill -0 "$agent_a_pid" >/dev/null 2>&1; then
+			tail -20 "$workspace/agent-a.log" >&2 || true
+			fail "Host A Agent exited while recovering its terminal shell"
+		fi
+		terminal_processes=$(docker exec "$engine_a_id" \
+			docker --host tcp://127.0.0.1:2375 top "$terminal_container" -eo pid,args)
+		case "$terminal_processes" in
+			*'/bin/sh'*) ;;
+			*) break ;;
+		esac
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
+	case "$terminal_processes" in
+		*'/bin/sh'*) fail "Host A Agent restart left its terminal shell running" ;;
+	esac
+	grep -qx '{"version":1,"entries":\[\]}' \
+		"$materials_a/state/terminal-executions.json" || \
+		fail "Host A Agent restart did not clear terminal recovery records"
+	run_host_a_probe_after_terminal agent-restart
 	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
 		"$deployment_container")
@@ -815,7 +846,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement/Agent-restart recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi
