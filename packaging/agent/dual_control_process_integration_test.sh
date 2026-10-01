@@ -227,6 +227,8 @@ run_dual_inventory_phase() {
 run_dual_inventory_event_phase() {
 	expected_truncated=${1:-false}
 	command_suffix=${2:-dual-runtime}
+	event_since_a=${3:-}
+	event_since_b=${4:-}
 	phase_ready=$workspace/inventory-events-$command_suffix-ready
 	phase_result_a=$workspace/inventory-events-$command_suffix-result-a
 	phase_result_b=$workspace/inventory-events-$command_suffix-result-b
@@ -236,6 +238,8 @@ run_dual_inventory_event_phase() {
 		--deployment-capabilities=true --inventory-capabilities=true \
 		--inventory-command runtime.inventory.events \
 		--inventory-event-id-a "$event_id_a" --inventory-event-id-b "$event_id_b" \
+		--inventory-event-since-a "$event_since_a" \
+		--inventory-event-since-b "$event_since_b" \
 		--inventory-events-truncated="$expected_truncated" \
 		--command-suffix "$command_suffix" --timeout 4m \
 		>"$workspace/inventory-events-$command_suffix-server.log" 2>&1 &
@@ -266,6 +270,22 @@ run_dual_inventory_event_phase() {
 			fail "inventory events did not succeed on Host $host"
 		grep -qx "inventory_event_runtime_id=$expected_event_id" "$phase_result" || \
 			fail "inventory events omitted Host $host expected Runtime ID"
+		event_occurred_at=$(sed -n 's/^inventory_event_occurred_at=//p' "$phase_result")
+		[ -n "$event_occurred_at" ] || \
+			fail "inventory events omitted Host $host Docker-owned cursor"
+		case "$host" in
+			a)
+				event_cursor_a=$event_occurred_at
+				expected_since=$event_since_a
+				;;
+			b)
+				event_cursor_b=$event_occurred_at
+				expected_since=$event_since_b
+				;;
+		esac
+		if [ -n "$expected_since" ] && [ "$event_occurred_at" != "$expected_since" ]; then
+			fail "inventory events did not inclusively replay Host $host cursor"
+		fi
 		grep -qx "inventory_events_truncated=$expected_truncated" "$phase_result" || \
 			fail "inventory events returned the wrong truncation state on Host $host"
 		if [ "$expected_truncated" = true ]; then
@@ -543,6 +563,8 @@ if [ "$runtime_mode" = 1 ]; then
 	[ "${#event_id_a}" -eq 64 ] && [ "${#event_id_b}" -eq 64 ] || \
 		fail "isolated Docker Event Runtime IDs have invalid lengths"
 	run_dual_inventory_event_phase false dual-runtime
+	run_dual_inventory_event_phase false inclusive-replay \
+		"$event_cursor_a" "$event_cursor_b"
 	run_host_inventory_event_phase a unavailable event-outage
 	run_host_inventory_event_phase b succeeded host-a-outage
 	rm -f "$docker_socket_a"

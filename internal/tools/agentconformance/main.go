@@ -462,6 +462,7 @@ func runDualServer(arguments []string) error {
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
 	var commandSuffix, deploymentCommand, deploymentContainer, deploymentResult, inventoryCommand string
 	var inventoryEventIDA, inventoryEventIDB, inventoryResult string
+	var inventoryEventSinceA, inventoryEventSinceB string
 	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated bool
 	var deploymentSequence uint64
 	var timeout time.Duration
@@ -485,6 +486,8 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&inventoryCommand, "inventory-command", "", "optional runtime inventory command kind")
 	flags.StringVar(&inventoryEventIDA, "inventory-event-id-a", "", "expected Host A Docker event runtime ID")
 	flags.StringVar(&inventoryEventIDB, "inventory-event-id-b", "", "expected Host B Docker event runtime ID")
+	flags.StringVar(&inventoryEventSinceA, "inventory-event-since-a", "", "Host A Docker event inclusive cursor")
+	flags.StringVar(&inventoryEventSinceB, "inventory-event-since-b", "", "Host B Docker event inclusive cursor")
 	flags.StringVar(&inventoryResult, "inventory-result", "succeeded", "expected inventory result: succeeded or unavailable")
 	flags.BoolVar(&inventoryEventsTruncated, "inventory-events-truncated", false, "expect a truncated inventory Event batch")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
@@ -513,6 +516,14 @@ func runDualServer(arguments []string) error {
 			(inventoryEventIDA != "" || inventoryEventIDB != "" || inventoryEventsTruncated) ||
 		deploymentCommand != "" && inventoryCommand != "" {
 		return errors.New("serve-dual arguments are invalid")
+	}
+	eventSinceA, eventSinceB, err := parseInventoryEventCursors(
+		inventoryCommand,
+		inventoryEventSinceA,
+		inventoryEventSinceB,
+	)
+	if err != nil {
+		return err
 	}
 	if !strings.HasPrefix(listen, "127.0.0.1:") {
 		return errors.New("dual conformance server must listen on IPv4 loopback")
@@ -592,6 +603,10 @@ func runDualServer(arguments []string) error {
 			hostA: inventoryEventIDA,
 			hostB: inventoryEventIDB,
 		},
+		inventoryEventSince: map[string]time.Time{
+			hostA: eventSinceA,
+			hostB: eventSinceB,
+		},
 		states: make(map[string]bool), completed: completed,
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
@@ -638,6 +653,7 @@ type dualConformanceHandler struct {
 	inventoryResult          string
 	inventoryEventsTruncated bool
 	inventoryEventIDs        map[string]string
+	inventoryEventSince      map[string]time.Time
 	states                   map[string]bool
 	completed                chan<- error
 	mu                       sync.Mutex
@@ -671,6 +687,7 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		inventoryResult:          handler.inventoryResult,
 		inventoryEventsTruncated: handler.inventoryEventsTruncated,
 		inventoryEventID:         handler.inventoryEventIDs[host],
+		inventoryEventSince:      handler.inventoryEventSince[host],
 		inventoryForbiddenID:     handler.inventoryEventIDs[otherFixtureHost(handler.identities, host)],
 	}
 	err := child.handle(writer, request)
@@ -1117,6 +1134,7 @@ type conformanceHandler struct {
 	inventoryResult          string
 	inventoryEventsTruncated bool
 	inventoryEventID         string
+	inventoryEventSince      time.Time
 	inventoryForbiddenID     string
 	once                     sync.Once
 }
@@ -1340,7 +1358,10 @@ func (h *conformanceHandler) conformanceCommand(
 		case agentprotocol.AgentCommandInventoryRelease:
 			inventory.ObservationID = "conformance-observation-" + h.identity.hostID
 		case agentprotocol.AgentCommandInventoryEvents:
-			inventory.EventSince = time.Now().UTC().Add(-5 * time.Minute)
+			inventory.EventSince = h.inventoryEventSince
+			if inventory.EventSince.IsZero() {
+				inventory.EventSince = time.Now().UTC().Add(-5 * time.Minute)
+			}
 			inventory.EventWaitSeconds = 2
 		default:
 			return agentprotocol.AgentCommand{}, errors.New("inventory conformance kind is invalid")
@@ -1517,26 +1538,58 @@ func (h *conformanceHandler) conformanceInventoryDetails(
 			return "", errors.New("Agent conformance inventory Event batch is invalid")
 		}
 		found := false
+		var expectedOccurredAt time.Time
 		for _, event := range batch.Events {
 			if event.RuntimeID == h.inventoryForbiddenID {
 				return "", errors.New("Agent conformance inventory Event crossed Host ownership")
 			}
 			if event.RuntimeID == h.inventoryEventID {
 				found = true
+				expectedOccurredAt = event.OccurredAt.UTC()
 			}
 		}
 		if !found {
 			return "", errors.New("Agent conformance expected Docker Event is absent")
 		}
 		return fmt.Sprintf(
-			"inventory_events=%d\ninventory_events_truncated=%t\ninventory_event_runtime_id=%s\n",
+			"inventory_events=%d\ninventory_events_truncated=%t\ninventory_event_runtime_id=%s\ninventory_event_occurred_at=%s\n",
 			len(batch.Events),
 			batch.Truncated,
 			h.inventoryEventID,
+			expectedOccurredAt.Format(time.RFC3339Nano),
 		), nil
 	default:
 		return "", errors.New("Agent conformance inventory command is invalid")
 	}
+}
+
+func parseInventoryEventCursors(
+	inventoryCommand, valueA, valueB string,
+) (time.Time, time.Time, error) {
+	if inventoryCommand != string(agentprotocol.AgentCommandInventoryEvents) {
+		if valueA != "" || valueB != "" {
+			return time.Time{}, time.Time{}, errors.New(
+				"inventory Event cursors require an Event command",
+			)
+		}
+		return time.Time{}, time.Time{}, nil
+	}
+	if (valueA == "") != (valueB == "") {
+		return time.Time{}, time.Time{}, errors.New(
+			"both inventory Event cursors are required",
+		)
+	}
+	if valueA == "" {
+		return time.Time{}, time.Time{}, nil
+	}
+	parsedA, errA := time.Parse(time.RFC3339Nano, valueA)
+	parsedB, errB := time.Parse(time.RFC3339Nano, valueB)
+	if errA != nil || errB != nil || parsedA.IsZero() || parsedB.IsZero() {
+		return time.Time{}, time.Time{}, errors.New(
+			"inventory Event cursors must be RFC3339 timestamps",
+		)
+	}
+	return parsedA.UTC(), parsedB.UTC(), nil
 }
 
 func conformanceCapabilities(deployment, inventory bool) []string {

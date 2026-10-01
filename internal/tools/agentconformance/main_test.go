@@ -284,6 +284,7 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 	handler.inventoryCommand = string(agentprotocol.AgentCommandInventoryEvents)
 	handler.inventoryEventID = strings.Repeat("a", 64)
 	handler.inventoryForbiddenID = strings.Repeat("b", 64)
+	handler.inventoryEventSince = time.Date(2026, 10, 1, 4, 0, 0, 123, time.UTC)
 	eventCommand, err := handler.conformanceCommand("ready")
 	if err != nil {
 		t.Fatal(err)
@@ -294,23 +295,25 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 	if eventCommand.Inventory.ObservationID != "" {
 		t.Fatalf("inventory Event observation ID = %q", eventCommand.Inventory.ObservationID)
 	}
-	if eventCommand.Inventory.EventSince.IsZero() ||
+	if !eventCommand.Inventory.EventSince.Equal(handler.inventoryEventSince) ||
 		eventCommand.Inventory.EventWaitSeconds != 2 {
 		t.Fatalf("inventory Event window = %+v", eventCommand.Inventory)
 	}
+	eventOccurredAt := handler.inventoryEventSince.Add(time.Second)
 	eventResult := agentprotocol.AgentCommandResult{
 		Inventory: &agentprotocol.RuntimeInventoryResult{
 			Events: &runtimeinventory.EventBatch{Events: []runtimeinventory.Event{{
 				Kind:       runtimeinventory.KindContainer,
 				RuntimeID:  handler.inventoryEventID,
 				Action:     runtimeinventory.EventActionCreate,
-				OccurredAt: time.Now().UTC(),
+				OccurredAt: eventOccurredAt,
 			}}},
 		},
 	}
 	details, err = handler.conformanceInventoryDetails(eventResult)
 	if err != nil || details != "inventory_events=1\ninventory_events_truncated=false\ninventory_event_runtime_id="+
-		handler.inventoryEventID+"\n" {
+		handler.inventoryEventID+"\ninventory_event_occurred_at="+
+		eventOccurredAt.Format(time.RFC3339Nano)+"\n" {
 		t.Fatalf("inventory Event details = %q, %v", details, err)
 	}
 	handler.inventoryEventsTruncated = true
@@ -336,6 +339,34 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 	if !handler.validConformanceResult(unavailable, "ready") ||
 		handler.conformanceCommandStatus("ready") != "inventory_unavailable" {
 		t.Fatal("inventory unavailable result was not accepted")
+	}
+}
+
+func TestParseInventoryEventCursorsRequiresValidPair(t *testing.T) {
+	command := string(agentprotocol.AgentCommandInventoryEvents)
+	valueA := "2026-10-01T04:00:00.000000123Z"
+	valueB := "2026-10-01T04:00:01+00:00"
+	cursorA, cursorB, err := parseInventoryEventCursors(command, valueA, valueB)
+	if err != nil || cursorA.Format(time.RFC3339Nano) != valueA ||
+		cursorB.Format(time.RFC3339Nano) != "2026-10-01T04:00:01Z" {
+		t.Fatalf("parsed Event cursors = %s/%s, %v", cursorA, cursorB, err)
+	}
+	for _, test := range []struct {
+		command string
+		valueA  string
+		valueB  string
+	}{
+		{command: command, valueA: valueA},
+		{command: command, valueA: "invalid", valueB: valueB},
+		{command: string(agentprotocol.AgentCommandInventoryPrepare), valueA: valueA, valueB: valueB},
+	} {
+		if _, _, err := parseInventoryEventCursors(
+			test.command,
+			test.valueA,
+			test.valueB,
+		); err == nil {
+			t.Fatalf("Event cursor pair unexpectedly accepted: %+v", test)
+		}
 	}
 }
 
