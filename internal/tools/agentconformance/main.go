@@ -21,20 +21,23 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
 const (
-	organizationID = "conformance-organization"
-	hostID         = "conformance-host"
-	identityID     = "conformance-identity"
-	instanceID     = "conformance-instance"
-	contentType    = "application/x-ndjson"
+	organizationID  = "conformance-organization"
+	hostID          = "conformance-host"
+	identityID      = "conformance-identity"
+	instanceID      = "conformance-instance"
+	contentType     = "application/x-ndjson"
+	deploymentImage = "nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b"
 )
 
 type materialPaths struct {
@@ -258,11 +261,12 @@ func initializeMaterialDirectory(paths materialPaths) error {
 func runConfig(arguments []string) error {
 	flags := flag.NewFlagSet("config", flag.ContinueOnError)
 	var output, endpoint, dockerSocket, fixtureHostID, fixtureIdentityID, fixtureInstanceID string
-	var enableRotation bool
+	var enableRotation, deploymentCapabilities bool
 	flags.StringVar(&output, "output", "", "absolute material directory")
 	flags.StringVar(&endpoint, "endpoint", "", "Agent control HTTPS endpoint")
 	flags.StringVar(&dockerSocket, "docker-socket", "/var/run/docker.sock", "absolute Docker Engine Unix socket")
 	flags.BoolVar(&enableRotation, "enable-rotation", false, "enable immediate conformance rotation")
+	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "enable deployment command capabilities")
 	flags.StringVar(&fixtureHostID, "host-id", hostID, "fixture managed host ID")
 	flags.StringVar(&fixtureIdentityID, "identity-id", identityID, "fixture Agent identity ID")
 	flags.StringVar(&fixtureInstanceID, "instance-id", instanceID, "fixture Agent instance ID")
@@ -312,6 +316,9 @@ func runConfig(arguments []string) error {
 	config.Control.ReconnectMaximum = "500ms"
 	config.Control.ReconnectStableAfter = "1s"
 	config.Control.Capabilities = []string{agentprotocol.CapabilityRuntimeProbe}
+	if deploymentCapabilities {
+		config.Control.Capabilities = conformanceDeploymentCapabilities()
+	}
 	config.Runtime.DockerSocket = dockerSocket
 	config.Runtime.StateDirectory = paths.state
 	config.CertificateRotation.Enabled = enableRotation
@@ -434,7 +441,8 @@ func runDualServer(arguments []string) error {
 	flags := flag.NewFlagSet("serve-dual", flag.ContinueOnError)
 	var listen, materialDirectory, readyFile, resultA, resultB string
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
-	var commandSuffix string
+	var commandSuffix, deploymentCommand, deploymentContainer string
+	var deploymentCapabilities bool
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
 	flags.StringVar(&materialDirectory, "materials", "", "authority material directory")
@@ -448,15 +456,24 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&onlyHost, "only-host", "", "temporarily accept only this Host")
 	flags.StringVar(&runtimeProbe, "runtime-probe", "expired", "expected runtime probe result: expired, ready, or unreachable")
 	flags.StringVar(&commandSuffix, "command-suffix", "", "optional unique command ID suffix")
+	flags.StringVar(&deploymentCommand, "deployment-command", "", "optional deployment command kind")
+	flags.StringVar(&deploymentContainer, "deployment-container", "owndock-conformance", "stable deployment container name")
+	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "expect deployment command capabilities")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
 		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
 		runtimeProbe != "expired" && runtimeProbe != "ready" && runtimeProbe != "unreachable" ||
-		commandSuffix != "" && !validCommandSuffix(commandSuffix) {
+		commandSuffix != "" && !validCommandSuffix(commandSuffix) ||
+		!validConformanceDeploymentCommand(deploymentCommand) ||
+		deploymentCommand != "" && !deploymentCapabilities {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	if !strings.HasPrefix(listen, "127.0.0.1:") {
 		return errors.New("dual conformance server must listen on IPv4 loopback")
+	}
+	if deploymentCommand != "" &&
+		(deploymentContainer == "" || len(deploymentContainer) > 128) {
+		return errors.New("dual conformance deployment container is invalid")
 	}
 	identityA, err := newFixtureIdentity(hostA, fixtureIdentityID, fixtureInstanceID)
 	if err != nil {
@@ -507,16 +524,19 @@ func runDualServer(arguments []string) error {
 	}
 	completed := make(chan error, 1)
 	runtimeDeadline := time.Time{}
-	if runtimeProbe != "expired" {
+	if runtimeProbe != "expired" || deploymentCommand != "" {
 		runtimeDeadline = time.Now().Add(timeout + 30*time.Second).UTC()
 	}
 	handler := &dualConformanceHandler{
 		identities: map[string]fixtureIdentity{hostA: identityA, hostB: identityB},
 		results:    map[string]string{hostA: resultA, hostB: resultB},
 		onlyHost:   onlyHost, runtimeProbe: runtimeProbe,
-		commandSuffix:   commandSuffix,
-		runtimeDeadline: runtimeDeadline,
-		states:          make(map[string]bool), completed: completed,
+		commandSuffix:          commandSuffix,
+		runtimeDeadline:        runtimeDeadline,
+		deploymentCommand:      deploymentCommand,
+		deploymentContainer:    deploymentContainer,
+		deploymentCapabilities: deploymentCapabilities,
+		states:                 make(map[string]bool), completed: completed,
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	tlsListener := tls.NewListener(listener, &tls.Config{
@@ -546,16 +566,19 @@ func runDualServer(arguments []string) error {
 }
 
 type dualConformanceHandler struct {
-	identities      map[string]fixtureIdentity
-	results         map[string]string
-	onlyHost        string
-	runtimeProbe    string
-	commandSuffix   string
-	runtimeDeadline time.Time
-	states          map[string]bool
-	completed       chan<- error
-	mu              sync.Mutex
-	once            sync.Once
+	identities             map[string]fixtureIdentity
+	results                map[string]string
+	onlyHost               string
+	runtimeProbe           string
+	commandSuffix          string
+	runtimeDeadline        time.Time
+	deploymentCommand      string
+	deploymentContainer    string
+	deploymentCapabilities bool
+	states                 map[string]bool
+	completed              chan<- error
+	mu                     sync.Mutex
+	once                   sync.Once
 }
 
 func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -577,7 +600,10 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		child := &conformanceHandler{
 			resultFile: handler.results[host], identity: identity,
 			runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
-			runtimeDeadline: handler.runtimeDeadline,
+			runtimeDeadline:        handler.runtimeDeadline,
+			deploymentCommand:      handler.deploymentCommand,
+			deploymentContainer:    handler.deploymentContainer,
+			deploymentCapabilities: handler.deploymentCapabilities,
 		}
 		if err := child.handle(writer, request); err != nil {
 			handler.once.Do(func() { handler.completed <- err })
@@ -589,7 +615,10 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 	child := &conformanceHandler{
 		resultFile: handler.results[host], identity: identity,
 		runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
-		runtimeDeadline: handler.runtimeDeadline,
+		runtimeDeadline:        handler.runtimeDeadline,
+		deploymentCommand:      handler.deploymentCommand,
+		deploymentContainer:    handler.deploymentContainer,
+		deploymentCapabilities: handler.deploymentCapabilities,
 	}
 	err := child.handle(writer, request)
 	if err != nil {
@@ -1020,14 +1049,17 @@ func issueRotatedCertificate(
 }
 
 type conformanceHandler struct {
-	resultFile           string
-	completed            chan<- error
-	expectedClientSerial int64
-	identity             fixtureIdentity
-	runtimeProbe         string
-	commandSuffix        string
-	runtimeDeadline      time.Time
-	once                 sync.Once
+	resultFile             string
+	completed              chan<- error
+	expectedClientSerial   int64
+	identity               fixtureIdentity
+	runtimeProbe           string
+	commandSuffix          string
+	runtimeDeadline        time.Time
+	deploymentCommand      string
+	deploymentContainer    string
+	deploymentCapabilities bool
+	once                   sync.Once
 }
 
 func (h *conformanceHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -1073,12 +1105,15 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		return errors.New("Agent hello shape is invalid")
 	}
 	hello := helloFrame.Hello
+	expectedCapabilities := []string{agentprotocol.CapabilityRuntimeProbe}
+	if h.deploymentCapabilities {
+		expectedCapabilities = conformanceDeploymentCapabilities()
+	}
 	if hello.OrganizationID != h.identity.organizationID || hello.ManagedHostID != h.identity.hostID ||
 		hello.AgentIdentityID != h.identity.identityID || hello.InstanceID != h.identity.instanceID ||
 		hello.BootID != "conformance-boot" || hello.AgentVersion == "" ||
 		hello.ProtocolVersion != agentprotocol.Version ||
-		len(hello.Capabilities) != 1 ||
-		hello.Capabilities[0] != agentprotocol.CapabilityRuntimeProbe {
+		!slices.Equal(hello.Capabilities, expectedCapabilities) {
 		return errors.New("Agent hello identity, version, or capabilities are invalid")
 	}
 	writer.Header().Set("Content-Type", contentType)
@@ -1095,27 +1130,13 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	if err := controller.Flush(); err != nil {
 		return err
 	}
-	commandID := "conformance-probe-" + h.identity.hostID
-	if h.commandSuffix != "" {
-		commandID += "-" + h.commandSuffix
-	}
-	command := agentprotocol.AgentCommand{
-		ID:       commandID,
-		Kind:     agentprotocol.AgentCommandRuntimeProbe,
-		Deadline: time.Unix(1, 0).UTC(),
-		RuntimeProbe: &agentprotocol.RuntimeProbeCommand{
-			RuntimeTargetID: "conformance-target-" + h.identity.hostID,
-		},
-	}
 	expectedRuntimeProbe := h.runtimeProbe
 	if expectedRuntimeProbe == "" {
 		expectedRuntimeProbe = "expired"
 	}
-	if expectedRuntimeProbe != "expired" {
-		command.Deadline = h.runtimeDeadline
-		if command.Deadline.IsZero() {
-			return errors.New("live Agent conformance command deadline is missing")
-		}
+	command, err := h.conformanceCommand(expectedRuntimeProbe)
+	if err != nil {
+		return err
 	}
 	if err := command.Validate(); err != nil {
 		return fmt.Errorf("create Agent conformance command: %w", err)
@@ -1148,7 +1169,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		serverSequence++
 		switch frame.Type {
 		case "heartbeat":
-			if frame.CommandResult != nil || heartbeatReceived {
+			if frame.CommandResult != nil {
 				return errors.New("Agent heartbeat shape is invalid")
 			}
 			heartbeatReceived = true
@@ -1174,7 +1195,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 				}
 			}
 			if err := result.Validate(command); err != nil ||
-				!validConformanceRuntimeProbe(result, expectedRuntimeProbe) {
+				!h.validConformanceResult(result, expectedRuntimeProbe) {
 				return errors.New("Agent conformance command result is invalid")
 			}
 			commandResultReceived = true
@@ -1200,9 +1221,113 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		hello.ManagedHostID,
 		peer.SerialNumber.String(),
 		command.ID,
-		conformanceRuntimeProbeStatus(expectedRuntimeProbe),
+		h.conformanceCommandStatus(expectedRuntimeProbe),
 	)
 	return writeFile(h.resultFile, []byte(result), 0o600)
+}
+
+func (h *conformanceHandler) conformanceCommand(
+	expectedRuntimeProbe string,
+) (agentprotocol.AgentCommand, error) {
+	if h.deploymentCommand == "" {
+		commandID := "conformance-probe-" + h.identity.hostID
+		if h.commandSuffix != "" {
+			commandID += "-" + h.commandSuffix
+		}
+		deadline := time.Unix(1, 0).UTC()
+		if expectedRuntimeProbe != "expired" {
+			deadline = h.runtimeDeadline
+		}
+		if deadline.IsZero() {
+			return agentprotocol.AgentCommand{},
+				errors.New("live Agent conformance command deadline is missing")
+		}
+		return agentprotocol.AgentCommand{
+			ID: commandID, Kind: agentprotocol.AgentCommandRuntimeProbe,
+			Deadline: deadline,
+			RuntimeProbe: &agentprotocol.RuntimeProbeCommand{
+				RuntimeTargetID: "conformance-target-" + h.identity.hostID,
+			},
+		}, nil
+	}
+	if h.runtimeDeadline.IsZero() {
+		return agentprotocol.AgentCommand{},
+			errors.New("deployment conformance command deadline is missing")
+	}
+	operation := strings.TrimPrefix(h.deploymentCommand, "deployment.")
+	commandID := "conformance-deployment-" + operation + "-" + h.identity.hostID
+	if h.commandSuffix != "" {
+		commandID += "-" + h.commandSuffix
+	}
+	deployment := agentprotocol.DeploymentCommand{
+		DeploymentID:    "conformance-deployment-" + h.identity.hostID,
+		WorkerID:        "conformance-worker",
+		FencingToken:    1,
+		CutoverSequence: 1,
+		RuntimeTargetID: "conformance-target-" + h.identity.hostID,
+		ContainerName:   h.deploymentContainer,
+	}
+	kind := agentprotocol.AgentCommandKind(h.deploymentCommand)
+	switch kind {
+	case agentprotocol.AgentCommandDeploymentPrepare:
+		deployment.ImageDigest = deploymentImage
+	case agentprotocol.AgentCommandDeploymentStage:
+		deployment.ProjectID = "conformance-project"
+		deployment.ApplicationID = "conformance-application"
+		deployment.EnvironmentID = "conformance-environment"
+		deployment.ImageDigest = deploymentImage
+		deployment.RuntimeSpec = runtimespec.Spec{
+			Resources: runtimespec.Resources{
+				CPUMilli: 100, MemoryBytes: 64 * 1024 * 1024,
+			},
+		}
+	case agentprotocol.AgentCommandDeploymentActivate:
+	default:
+		return agentprotocol.AgentCommand{}, errors.New("deployment conformance kind is invalid")
+	}
+	return agentprotocol.AgentCommand{
+		ID: commandID, Kind: kind, Deadline: h.runtimeDeadline,
+		Deployment: &deployment,
+	}, nil
+}
+
+func (h *conformanceHandler) validConformanceResult(
+	result agentprotocol.AgentCommandResult,
+	expectedRuntimeProbe string,
+) bool {
+	if h.deploymentCommand != "" {
+		return result.Status == agentprotocol.AgentCommandSucceeded &&
+			result.ErrorCode == "" && result.RuntimeProbe == nil
+	}
+	return validConformanceRuntimeProbe(result, expectedRuntimeProbe)
+}
+
+func (h *conformanceHandler) conformanceCommandStatus(expectedRuntimeProbe string) string {
+	if h.deploymentCommand != "" {
+		return "deployment_succeeded"
+	}
+	return conformanceRuntimeProbeStatus(expectedRuntimeProbe)
+}
+
+func conformanceDeploymentCapabilities() []string {
+	return []string{
+		agentprotocol.CapabilityRuntimeProbe,
+		agentprotocol.CapabilityDeploymentPrepare,
+		agentprotocol.CapabilityDeploymentStage,
+		agentprotocol.CapabilityDeploymentActivate,
+		agentprotocol.CapabilityDeploymentCancel,
+	}
+}
+
+func validConformanceDeploymentCommand(value string) bool {
+	switch agentprotocol.AgentCommandKind(value) {
+	case "", agentprotocol.AgentCommandDeploymentPrepare,
+		agentprotocol.AgentCommandDeploymentStage,
+		agentprotocol.AgentCommandDeploymentActivate:
+		return true
+	default:
+		return false
+	}
 }
 
 func validConformanceRuntimeProbe(

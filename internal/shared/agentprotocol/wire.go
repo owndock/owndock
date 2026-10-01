@@ -233,7 +233,6 @@ func newRuntimeSpecDocument(spec runtimespec.Spec) RuntimeSpecDocument {
 
 func (d RuntimeSpecDocument) domain() runtimespec.Spec {
 	spec := runtimespec.Spec{
-		Ports: make([]runtimespec.Port, 0, len(d.Ports)),
 		EnvironmentKeys: append(
 			[]string(nil),
 			d.EnvironmentKeys...,

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
@@ -147,6 +148,43 @@ func TestConformanceRuntimeProbeExpectations(t *testing.T) {
 				t.Fatalf("status = %q", conformanceRuntimeProbeStatus(test.expected))
 			}
 		})
+	}
+}
+
+func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
+	handler := conformanceHandler{
+		identity:               fixtureIdentity{hostID: "host-a"},
+		commandSuffix:          "dual-runtime",
+		runtimeDeadline:        time.Now().Add(time.Minute).UTC(),
+		deploymentContainer:    "owndock-conformance",
+		deploymentCapabilities: true,
+	}
+	for _, kind := range []agentprotocol.AgentCommandKind{
+		agentprotocol.AgentCommandDeploymentPrepare,
+		agentprotocol.AgentCommandDeploymentStage,
+		agentprotocol.AgentCommandDeploymentActivate,
+	} {
+		handler.deploymentCommand = string(kind)
+		command, err := handler.conformanceCommand("ready")
+		if err != nil {
+			t.Fatalf("%s command: %v", kind, err)
+		}
+		if err := command.Validate(); err != nil {
+			t.Fatalf("%s validation: %v", kind, err)
+		}
+		result := agentprotocol.AgentCommandResult{
+			CommandID: command.ID, Status: agentprotocol.AgentCommandSucceeded,
+		}
+		if !handler.validConformanceResult(result, "ready") ||
+			handler.conformanceCommandStatus("ready") != "deployment_succeeded" {
+			t.Fatalf("%s result was not accepted", kind)
+		}
+	}
+	capabilities := conformanceDeploymentCapabilities()
+	if len(capabilities) != 5 ||
+		capabilities[0] != agentprotocol.CapabilityRuntimeProbe ||
+		capabilities[4] != agentprotocol.CapabilityDeploymentCancel {
+		t.Fatalf("deployment capabilities = %v", capabilities)
 	}
 }
 

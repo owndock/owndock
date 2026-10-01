@@ -50,13 +50,15 @@ case "$runtime_mode" in
 		initial_command_suffix=
 		reconnect_command_suffix=
 		outage_command_suffix=
+		deployment_capabilities=false
 		;;
 	1)
 		initial_runtime_probe=ready
 		expected_command_status=runtime_ready
 		initial_command_suffix=initial
-		reconnect_command_suffix=host-b-reconnect
-		outage_command_suffix=host-a-outage
+		reconnect_command_suffix='host-b-reconnect'
+		outage_command_suffix='host-a-outage'
+		deployment_capabilities=true
 		;;
 	*) fail "OWNDOCK_DUAL_AGENT_RUNTIME must be 0 or 1" ;;
 esac
@@ -93,6 +95,38 @@ start_engine() {
 		--publish 127.0.0.1::2375 \
 		'docker:29.6.1-dind@sha256:66d292e5c26bd33a6f6f61cacb880de2186339a524ecba1ce098dbbaceed6515' \
 		dockerd --host=tcp://0.0.0.0:2375 --tls=false --storage-driver=vfs
+}
+
+run_dual_deployment_phase() {
+	deployment_kind=$1
+	deployment_operation=${deployment_kind#deployment.}
+	phase_ready=$workspace/deployment-$deployment_operation-ready
+	phase_result_a=$workspace/deployment-$deployment_operation-result-a
+	phase_result_b=$workspace/deployment-$deployment_operation-result-b
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$phase_result_a" \
+		--result-b "$phase_result_b" --runtime-probe ready \
+		--deployment-capabilities=true --deployment-command "$deployment_kind" \
+		--deployment-container "$deployment_container" --command-suffix dual-runtime \
+		--timeout 2m >"$workspace/deployment-$deployment_operation-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	wait_for_file "$phase_result_a"
+	wait_for_file "$phase_result_b"
+	wait "$server_pid" || fail "dual Agent $deployment_kind phase failed"
+	server_pid=
+	for host in a b; do
+		case "$host" in
+			a) phase_result=$phase_result_a ;;
+			b) phase_result=$phase_result_b ;;
+		esac
+		grep -qx "managed_host_id=conformance-host-$host" "$phase_result" || \
+			fail "deployment $deployment_operation crossed Host $host identity"
+		grep -qx "command_id=conformance-deployment-$deployment_operation-conformance-host-$host-dual-runtime" \
+			"$phase_result" || fail "deployment $deployment_operation reached the wrong Host"
+		grep -qx 'command_status=deployment_succeeded' "$phase_result" || \
+			fail "deployment $deployment_operation did not succeed on Host $host"
+	done
 }
 
 materials_a=$workspace/materials-a
@@ -134,6 +168,7 @@ result_b_one=$workspace/result-b-one
 	--result-a "$result_a_one" --result-b "$result_b_one" \
 	--runtime-probe "$initial_runtime_probe" \
 	--command-suffix "$initial_command_suffix" \
+	--deployment-capabilities="$deployment_capabilities" \
 	>"$workspace/server-one.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_one"
@@ -141,9 +176,11 @@ endpoint=$(tr -d '\r\n' < "$ready_one")
 listen=${endpoint#https://}
 listen=${listen%/api/v1/agent/connect}
 "$tool" config --output "$materials_a" --endpoint "$endpoint" \
-	--host-id conformance-host-a --docker-socket "$docker_socket_a"
+	--host-id conformance-host-a --docker-socket "$docker_socket_a" \
+	--deployment-capabilities="$deployment_capabilities"
 "$tool" config --output "$materials_b" --endpoint "$endpoint" \
-	--host-id conformance-host-b --docker-socket "$docker_socket_b"
+	--host-id conformance-host-b --docker-socket "$docker_socket_b" \
+	--deployment-capabilities="$deployment_capabilities"
 
 "$agent" -conf "$materials_a/agent.yaml" >"$workspace/agent-a.log" 2>&1 &
 agent_a_pid=$!
@@ -173,6 +210,7 @@ result_b_two=$workspace/result-b-two
 	--result-b "$result_b_two" --only-host conformance-host-b \
 	--runtime-probe "$initial_runtime_probe" \
 	--command-suffix "$reconnect_command_suffix" \
+	--deployment-capabilities="$deployment_capabilities" \
     >"$workspace/server-two.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_two"
@@ -199,6 +237,7 @@ result_a_three=$workspace/result-a-three
 	--result-b "$workspace/unused-b-three" --only-host conformance-host-a \
 	--runtime-probe "$third_runtime_probe" \
 	--command-suffix "$outage_command_suffix" \
+	--deployment-capabilities="$deployment_capabilities" \
     >"$workspace/server-three.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_three"
@@ -231,6 +270,7 @@ if [ "$runtime_mode" = 1 ]; then
 		--ready-file "$ready_four" --result-a "$result_a_four" \
 		--result-b "$workspace/unused-b-four" --only-host conformance-host-a \
 		--runtime-probe ready --command-suffix host-a-recovery \
+		--deployment-capabilities=true \
 		>"$workspace/server-four.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$ready_four"
@@ -243,6 +283,21 @@ if [ "$runtime_mode" = 1 ]; then
 		fail "Host A runtime recovery received the wrong command"
 	grep -qx 'command_status=runtime_ready' "$result_a_four" || \
 		fail "Host A runtime did not become ready after Engine restart"
+
+	deployment_container=owndock-dual-agent-runtime
+	run_dual_deployment_phase deployment.prepare
+	run_dual_deployment_phase deployment.stage
+	run_dual_deployment_phase deployment.activate
+	state_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}}' \
+		"$deployment_container")
+	state_b=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}}' \
+		"$deployment_container")
+	[ "$state_a" = 'true conformance-deployment-conformance-host-a' ] || \
+		fail "Host A stable deployment identity is invalid: $state_a"
+	[ "$state_b" = 'true conformance-deployment-conformance-host-b' ] || \
+		fail "Host B stable deployment identity is invalid: $state_b"
 fi
 
 kill -TERM "$agent_a_pid"
@@ -253,7 +308,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, routing, outage and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, outage and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

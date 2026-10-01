@@ -196,6 +196,38 @@ func TestCommandDocumentRoundTripsDeploymentWithoutAliasingSecrets(t *testing.T)
 	}
 }
 
+func TestCommandDocumentRoundTripsStageWithoutPorts(t *testing.T) {
+	command := deploymentCommand(AgentCommandDeploymentStage)
+	command.Deployment.ProjectID = "project-1"
+	command.Deployment.ApplicationID = "application-1"
+	command.Deployment.EnvironmentID = "environment-1"
+	command.Deployment.ImageDigest =
+		"registry.example.com/team/app@sha256:" + strings.Repeat("a", 64)
+	command.Deployment.RuntimeSpec = runtimespec.Spec{
+		Resources: runtimespec.Resources{
+			CPUMilli: 100, MemoryBytes: 64 * 1024 * 1024,
+		},
+	}
+	if err := command.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(NewCommandDocument(command))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded CommandDocument
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip := decoded.Domain()
+	if err := roundTrip.Validate(); err != nil {
+		t.Fatalf("wire round trip rejected a valid portless stage command: %v", err)
+	}
+	if !command.Equivalent(roundTrip) {
+		t.Fatalf("round trip = %+v", roundTrip)
+	}
+}
+
 func TestAgentCommandRejectsUntypedOrUnsafePayload(t *testing.T) {
 	deadline := time.Unix(1000, 0).UTC()
 	tests := []AgentCommand{
