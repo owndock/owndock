@@ -222,7 +222,7 @@ sequenceDiagram
 
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)，产品版本、控制协议和相邻版本升级规则见[Agent 与 Server 版本兼容策略](agent-compatibility.md)。
 
-双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误，以及 Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待的问题。独立执行器门禁继续验证 activate 中断恢复和网络层延迟旧命令；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
+双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。最后以 `SIGKILL` 中断 Agent A，再从原状态目录启动同一真实二进制：A 必须以更高 cutover sequence 完成新部署，并在重启后拒绝延迟的旧 activate；B 的稳定容器身份保持不变。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误，以及 Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待的问题。独立执行器门禁继续验证 activate 中断恢复；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
 
 ```mermaid
 sequenceDiagram
@@ -273,6 +273,13 @@ sequenceDiagram
         B-->>C: Host B manifest and owned container
     end
     Note over C,DB: Each chunk must carry only its Host-specific Deployment label
+    C--xA: SIGKILL Agent A
+    A->>C: restart with existing state directory
+    C->>A: prepare → stage → activate (cutover 2)
+    A->>DA: persist cutover 2 and replace stable container
+    C-->>A: delayed activate (cutover 1)
+    A-->>C: stale_execution
+    Note over DA,DB: A remains cutover 2; B remains cutover 1
 ```
 
 ## 当前不能做什么
@@ -280,7 +287,7 @@ sequenceDiagram
 - 首次私钥生成、enrollment 兑换和配置/身份材料安全落盘已经自动化，但仍需真实发行网络、私有 CA 和进程崩溃点系统验收；
 - 版本化包、systemd 安装和发行签名流水线已经实现；CI 已加入真实 Agent 进程的 mTLS hello/heartbeat/断线重连，以及真实 systemd 的启动、相邻测试版本升级、启动崩溃恢复、状态保留和回滚门禁，但 Linux 首次执行证据、正式相邻 Tag、真实 Agent 命令升级中断和多主机灰度/回滚验收仍未完成；
 - 自动证书轮换已经有代码级竞态和响应丢失恢复测试，但尚未完成真实双主机、跨控制面实例、进程崩溃点和升级/回滚系统验收；
-- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个真实 Agent 进程与两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开、进程不停机恢复、双 Host 两阶段部署和各自 Inventory 快照归属，执行器门禁覆盖切换中断与延迟旧命令；仍需两台客户等价主机上的网络分区、升级回滚、入口流量与控制面多实例验收；
+- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个真实 Agent 进程与两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开、进程不停机恢复、双 Host 两阶段部署、各自 Inventory 快照归属，以及 Agent 异常退出后从原状态恢复水位并拒绝延迟旧命令；仍需两台客户等价主机上的网络分区、升级回滚、入口流量与控制面多实例验收；
 - 容器和主机终端已支持 Agent 模式，但仍需真实远程 Linux、两主机和浏览器故障矩阵验收；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
 - Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标、两个 Runner 竞争，以及双 Agent/双隔离 Engine 的 `prepare → chunk → release` 与资源归属隔离；Project/Host 权限查询 API 已实现，客户等价双主机断线/Event 洪峰系统验收尚未完成。

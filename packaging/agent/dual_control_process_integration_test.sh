@@ -133,6 +133,57 @@ run_dual_deployment_phase() {
 	done
 }
 
+run_host_deployment_phase() {
+	host=$1
+	deployment_kind=$2
+	sequence=$3
+	expected_result=$4
+	command_suffix=$5
+	deployment_operation=${deployment_kind#deployment.}
+	phase_name=$host-$deployment_operation-$sequence-$expected_result
+	phase_ready=$workspace/deployment-$phase_name-ready
+	phase_result=$workspace/deployment-$phase_name-result
+	case "$host" in
+		a) unused_result=$workspace/deployment-$phase_name-unused-b ;;
+		b) unused_result=$workspace/deployment-$phase_name-unused-a ;;
+		*) fail "single-Host deployment phase has an invalid Host" ;;
+	esac
+	if [ "$host" = a ]; then
+		result_a=$phase_result
+		result_b=$unused_result
+		only_host=conformance-host-a
+	else
+		result_a=$unused_result
+		result_b=$phase_result
+		only_host=conformance-host-b
+	fi
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$result_a" --result-b "$result_b" \
+		--only-host "$only_host" --runtime-probe ready \
+		--deployment-capabilities=true --inventory-capabilities=true \
+		--deployment-command "$deployment_kind" --deployment-container "$deployment_container" \
+		--deployment-sequence "$sequence" --deployment-result "$expected_result" \
+		--command-suffix "$command_suffix" --timeout 4m \
+		>"$workspace/deployment-$phase_name-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	wait_for_file "$phase_result" 2100
+	wait "$server_pid" || fail "Host $host Agent $deployment_kind sequence $sequence phase failed"
+	server_pid=
+	[ ! -e "$unused_result" ] || fail "deployment phase $phase_name crossed Host identity"
+	grep -qx "managed_host_id=$only_host" "$phase_result" || \
+		fail "deployment phase $phase_name reached the wrong Host"
+	grep -qx "command_id=conformance-deployment-$deployment_operation-$only_host-$command_suffix" \
+		"$phase_result" || fail "deployment phase $phase_name returned the wrong command"
+	case "$expected_result" in
+		succeeded) expected_status=deployment_succeeded ;;
+		stale_execution) expected_status=deployment_stale_execution ;;
+		*) fail "single-Host deployment phase has an invalid expected result" ;;
+	esac
+	grep -qx "command_status=$expected_status" "$phase_result" || \
+		fail "deployment phase $phase_name returned the wrong status"
+}
+
 run_dual_inventory_phase() {
 	inventory_kind=$1
 	inventory_operation=${inventory_kind#runtime.inventory.}
@@ -353,6 +404,30 @@ if [ "$runtime_mode" = 1 ]; then
 	run_dual_inventory_phase runtime.inventory.prepare
 	run_dual_inventory_phase runtime.inventory.chunk
 	run_dual_inventory_phase runtime.inventory.release
+
+	# An abrupt Agent process loss must not erase its independently persisted
+	# cutover watermark. Host B remains available, while Host A restarts from the
+	# same state directory, activates a newer deployment, and rejects a delayed
+	# sequence-one activate after the restart.
+	kill -KILL "$agent_a_pid" >/dev/null 2>&1 || fail "could not interrupt Host A Agent"
+	wait "$agent_a_pid" >/dev/null 2>&1 || true
+	agent_a_pid=
+	"$agent" -conf "$materials_a/agent.yaml" >>"$workspace/agent-a.log" 2>&1 &
+	agent_a_pid=$!
+	run_host_deployment_phase a deployment.prepare 2 succeeded restart-v2
+	run_host_deployment_phase a deployment.stage 2 succeeded restart-v2
+	run_host_deployment_phase a deployment.activate 2 succeeded restart-v2
+	run_host_deployment_phase a deployment.activate 1 stale_execution delayed-v1
+	state_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
+		"$deployment_container")
+	state_b=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
+		"$deployment_container")
+	[ "$state_a" = 'true conformance-deployment-conformance-host-a-v2 2' ] || \
+		fail "Host A did not preserve its cutover watermark across Agent restart: $state_a"
+	[ "$state_b" = 'true conformance-deployment-conformance-host-b 1' ] || \
+		fail "Host A Agent restart changed Host B deployment: $state_b"
 fi
 
 kill -TERM "$agent_a_pid"
@@ -363,7 +438,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, inventory, outage and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, inventory, outage, restart fencing and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

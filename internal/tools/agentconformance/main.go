@@ -460,8 +460,9 @@ func runDualServer(arguments []string) error {
 	flags := flag.NewFlagSet("serve-dual", flag.ContinueOnError)
 	var listen, materialDirectory, readyFile, resultA, resultB string
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
-	var commandSuffix, deploymentCommand, deploymentContainer, inventoryCommand string
+	var commandSuffix, deploymentCommand, deploymentContainer, deploymentResult, inventoryCommand string
 	var deploymentCapabilities, inventoryCapabilities bool
+	var deploymentSequence uint64
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
 	flags.StringVar(&materialDirectory, "materials", "", "authority material directory")
@@ -477,6 +478,8 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&commandSuffix, "command-suffix", "", "optional unique command ID suffix")
 	flags.StringVar(&deploymentCommand, "deployment-command", "", "optional deployment command kind")
 	flags.StringVar(&deploymentContainer, "deployment-container", "owndock-conformance", "stable deployment container name")
+	flags.StringVar(&deploymentResult, "deployment-result", "succeeded", "expected deployment result: succeeded or stale_execution")
+	flags.Uint64Var(&deploymentSequence, "deployment-sequence", 1, "deployment cutover sequence")
 	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "expect deployment command capabilities")
 	flags.StringVar(&inventoryCommand, "inventory-command", "", "optional runtime inventory command kind")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
@@ -487,6 +490,10 @@ func runDualServer(arguments []string) error {
 		commandSuffix != "" && !validCommandSuffix(commandSuffix) ||
 		!validConformanceDeploymentCommand(deploymentCommand) ||
 		deploymentCommand != "" && !deploymentCapabilities ||
+		deploymentResult != "succeeded" && deploymentResult != "stale_execution" ||
+		deploymentSequence == 0 ||
+		deploymentResult == "stale_execution" &&
+			deploymentCommand != string(agentprotocol.AgentCommandDeploymentActivate) ||
 		!validConformanceInventoryCommand(inventoryCommand) ||
 		inventoryCommand != "" && !inventoryCapabilities ||
 		deploymentCommand != "" && inventoryCommand != "" {
@@ -559,6 +566,8 @@ func runDualServer(arguments []string) error {
 		runtimeDeadline:        runtimeDeadline,
 		deploymentCommand:      deploymentCommand,
 		deploymentContainer:    deploymentContainer,
+		deploymentResult:       deploymentResult,
+		deploymentSequence:     deploymentSequence,
 		deploymentCapabilities: deploymentCapabilities,
 		inventoryCommand:       inventoryCommand,
 		inventoryCapabilities:  inventoryCapabilities,
@@ -600,6 +609,8 @@ type dualConformanceHandler struct {
 	runtimeDeadline        time.Time
 	deploymentCommand      string
 	deploymentContainer    string
+	deploymentResult       string
+	deploymentSequence     uint64
 	deploymentCapabilities bool
 	inventoryCommand       string
 	inventoryCapabilities  bool
@@ -628,6 +639,8 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		runtimeDeadline:        handler.runtimeDeadline,
 		deploymentCommand:      handler.deploymentCommand,
 		deploymentContainer:    handler.deploymentContainer,
+		deploymentResult:       handler.deploymentResult,
+		deploymentSequence:     handler.deploymentSequence,
 		deploymentCapabilities: handler.deploymentCapabilities,
 		inventoryCommand:       handler.inventoryCommand,
 		inventoryCapabilities:  handler.inventoryCapabilities,
@@ -1068,6 +1081,8 @@ type conformanceHandler struct {
 	runtimeDeadline        time.Time
 	deploymentCommand      string
 	deploymentContainer    string
+	deploymentResult       string
+	deploymentSequence     uint64
 	deploymentCapabilities bool
 	inventoryCommand       string
 	inventoryCapabilities  bool
@@ -1328,11 +1343,19 @@ func (h *conformanceHandler) conformanceCommand(
 	if h.commandSuffix != "" {
 		commandID += "-" + h.commandSuffix
 	}
+	deploymentSequence := h.deploymentSequence
+	if deploymentSequence == 0 {
+		deploymentSequence = 1
+	}
+	deploymentID := "conformance-deployment-" + h.identity.hostID
+	if deploymentSequence > 1 {
+		deploymentID += fmt.Sprintf("-v%d", deploymentSequence)
+	}
 	deployment := agentprotocol.DeploymentCommand{
-		DeploymentID:    "conformance-deployment-" + h.identity.hostID,
+		DeploymentID:    deploymentID,
 		WorkerID:        "conformance-worker",
 		FencingToken:    1,
-		CutoverSequence: 1,
+		CutoverSequence: deploymentSequence,
 		RuntimeTargetID: "conformance-target-" + h.identity.hostID,
 		ContainerName:   h.deploymentContainer,
 	}
@@ -1369,6 +1392,10 @@ func (h *conformanceHandler) validConformanceResult(
 			result.ErrorCode == "" && result.RuntimeProbe == nil
 	}
 	if h.deploymentCommand != "" {
+		if h.deploymentResult == "stale_execution" {
+			return result.Status == agentprotocol.AgentCommandFailed &&
+				result.ErrorCode == "stale_execution" && result.RuntimeProbe == nil
+		}
 		return result.Status == agentprotocol.AgentCommandSucceeded &&
 			result.ErrorCode == "" && result.RuntimeProbe == nil
 	}
@@ -1380,6 +1407,9 @@ func (h *conformanceHandler) conformanceCommandStatus(expectedRuntimeProbe strin
 		return "inventory_succeeded"
 	}
 	if h.deploymentCommand != "" {
+		if h.deploymentResult == "stale_execution" {
+			return "deployment_stale_execution"
+		}
 		return "deployment_succeeded"
 	}
 	return conformanceRuntimeProbeStatus(expectedRuntimeProbe)

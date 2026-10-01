@@ -189,6 +189,42 @@ func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
 	}
 }
 
+func TestConformanceDeploymentSequenceAndStaleResultAreCanonical(t *testing.T) {
+	handler := conformanceHandler{
+		identity:               fixtureIdentity{hostID: "host-a"},
+		commandSuffix:          "after-restart",
+		runtimeDeadline:        time.Now().Add(time.Minute).UTC(),
+		deploymentCommand:      string(agentprotocol.AgentCommandDeploymentActivate),
+		deploymentContainer:    "owndock-conformance",
+		deploymentResult:       "stale_execution",
+		deploymentSequence:     2,
+		deploymentCapabilities: true,
+	}
+	command, err := handler.conformanceCommand("ready")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Validate(); err != nil {
+		t.Fatalf("sequence-aware command validation: %v", err)
+	}
+	if command.Deployment.DeploymentID != "conformance-deployment-host-a-v2" ||
+		command.Deployment.CutoverSequence != 2 {
+		t.Fatalf("sequence-aware deployment = %+v", command.Deployment)
+	}
+	result := agentprotocol.AgentCommandResult{
+		CommandID: command.ID,
+		Status:    agentprotocol.AgentCommandFailed,
+		ErrorCode: "stale_execution",
+	}
+	if err := result.Validate(command); err != nil {
+		t.Fatalf("stale result validation: %v", err)
+	}
+	if !handler.validConformanceResult(result, "ready") ||
+		handler.conformanceCommandStatus("ready") != "deployment_stale_execution" {
+		t.Fatal("stale deployment result was not accepted")
+	}
+}
+
 func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 	handler := conformanceHandler{
 		identity:              fixtureIdentity{hostID: "host-a"},
