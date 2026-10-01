@@ -59,7 +59,7 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 
 代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 
-仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy 与三个真实后端，通过实际 Unix admin socket 和 HTTP 流量验证双 Host 隔离、prepare 切流、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。该门禁需要可用的 Linux Docker Host；在非 Linux 开发机上编译通过不等于门禁通过。
+仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy、三个静态后端和两个协议后端，通过实际 Unix admin socket 与流量验证多 Host 隔离、HTTP/1.1、WebSocket、长响应、prepare 切流、旧连接有界保留、新连接进入新后端、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。协议后端是门禁运行时由仓库源码构建的静态 Go 二进制，复制进固定 digest 容器，不引入浮动测试镜像。该门禁需要可用的 Linux Docker Host；在非 Linux 开发机上编译通过不等于门禁通过。
 
 ## 资源边界
 
@@ -127,5 +127,5 @@ sequenceDiagram
 - candidate 不健康、网关拒绝、Agent/网关断线和响应丢失不破坏旧 route；
 - Agent/Gateway 重启能从持久状态与控制面期望配置收敛；
 - 端口冲突、DNS、ACME、证书续期和只读磁盘使用稳定安全错误；
-- HTTP/1.1、HTTP/2、WebSocket、长连接、IPv4/IPv6 和真实回滚停机预算通过客户等价主机验收；
+- HTTP/2、自动 HTTPS、IPv4/IPv6 和真实回滚停机预算通过客户等价主机验收；仓库 Linux 门禁已编码 HTTP/1.1、WebSocket 和长响应切换不断流；
 - 日志、Trace、MongoDB、Agent 状态和测试 artifact 不包含证书、ACME 或应用秘密。

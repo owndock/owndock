@@ -66,6 +66,21 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 		aliases[backend.deploymentID] = alias
 		startIngressBackend(t, ctx, network.Name, alias, backend.body)
 	}
+	protocolBinary := buildIngressProtocolBackend(t)
+	for _, backend := range []struct {
+		deploymentID string
+		body         string
+	}{
+		{deploymentID: "ingress-deployment-protocol-old", body: "protocol-old"},
+		{deploymentID: "ingress-deployment-protocol-new", body: "protocol-new"},
+	} {
+		alias, err := agentprotocol.DeploymentBackendAlias(backend.deploymentID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		aliases[backend.deploymentID] = alias
+		startIngressProtocolBackend(t, ctx, network.Name, alias, backend.body, protocolBinary)
+	}
 
 	socketDirectory, err := os.MkdirTemp("/tmp", "owndock-ingress-")
 	if err != nil {
@@ -104,7 +119,9 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 			"application-a.example.com", aliases["ingress-deployment-a-old"]),
 		ingressIntegrationRoute("route-b", 1, "ingress-deployment-b", 1,
 			"application-b.example.com", aliases["ingress-deployment-b"]),
-	}, "route-a", "route-b")
+		ingressIntegrationProtocolRoute("route-c", 1, "ingress-deployment-protocol-old", 1,
+			"protocol.example.com", aliases["ingress-deployment-protocol-old"]),
+	}, "route-a", "route-b", "route-c")
 	if _, err := executor.Prepare(ctx, first); err != nil {
 		t.Fatalf("prepare initial routes: %v", err)
 	}
@@ -113,28 +130,44 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 	}
 	assertIngressResponse(t, ctx, publicAddress, "application-a.example.com", http.StatusOK, "application-a-old")
 	assertIngressResponse(t, ctx, publicAddress, "application-b.example.com", http.StatusOK, "application-b")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-old")
 	assertIngressResponse(t, ctx, publicAddress, "unknown.example.com", http.StatusNotFound, "")
+	oldWebSocket := openIngressWebSocket(t, ctx, publicAddress, "protocol.example.com")
+	oldStream := openIngressStream(t, ctx, publicAddress, "protocol.example.com", "protocol-old")
 
 	second := ingressIntegrationCommand(t, 2, []agentprotocol.IngressRoute{
 		ingressIntegrationRoute("route-a", 2, "ingress-deployment-a-new", 2,
 			"application-a.example.com", aliases["ingress-deployment-a-new"]),
 		first.Routes[1],
-	}, "route-a")
+		ingressIntegrationProtocolRoute("route-c", 2, "ingress-deployment-protocol-new", 2,
+			"protocol.example.com", aliases["ingress-deployment-protocol-new"]),
+	}, "route-a", "route-c")
 	if _, err := executor.Prepare(ctx, second); err != nil {
 		t.Fatalf("prepare candidate route: %v", err)
 	}
+	cutoverAt := time.Now()
 	assertIngressResponse(t, ctx, publicAddress, "application-a.example.com", http.StatusOK, "application-a-new")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-new")
+	oldWebSocket.exchange(t, "after-prepare", "protocol-old:after-prepare")
+	newWebSocket := openIngressWebSocket(t, ctx, publicAddress, "protocol.example.com")
+	newWebSocket.exchange(t, "new-connection", "protocol-new:new-connection")
+	oldStream.assertSurvivesAfter(t, cutoverAt, "protocol-old")
+	_ = oldWebSocket.connection.Close()
+	_ = newWebSocket.connection.Close()
 	if _, err := executor.Abort(ctx, second); err != nil {
 		t.Fatalf("abort candidate route: %v", err)
 	}
 	assertIngressResponse(t, ctx, publicAddress, "application-a.example.com", http.StatusOK, "application-a-old")
 	assertIngressResponse(t, ctx, publicAddress, "application-b.example.com", http.StatusOK, "application-b")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-old")
 
 	third := ingressIntegrationCommand(t, 3, []agentprotocol.IngressRoute{
 		ingressIntegrationRoute("route-a", 3, "ingress-deployment-a-new", 3,
 			"application-a.example.com", aliases["ingress-deployment-a-new"]),
 		first.Routes[1],
-	}, "route-a")
+		ingressIntegrationProtocolRoute("route-c", 3, "ingress-deployment-protocol-new", 3,
+			"protocol.example.com", aliases["ingress-deployment-protocol-new"]),
+	}, "route-a", "route-c")
 	if _, err := executor.Prepare(ctx, third); err != nil {
 		t.Fatalf("prepare replacement route: %v", err)
 	}
@@ -142,6 +175,7 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 		t.Fatalf("commit replacement route: %v", err)
 	}
 	assertIngressResponse(t, ctx, publicAddress, "application-a.example.com", http.StatusOK, "application-a-new")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-new")
 
 	missingAlias, err := agentprotocol.DeploymentBackendAlias("ingress-deployment-missing")
 	if err != nil {
@@ -151,12 +185,14 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 		ingressIntegrationRoute("route-a", 4, "ingress-deployment-missing", 4,
 			"application-a.example.com", missingAlias),
 		first.Routes[1],
+		third.Routes[2],
 	}, "route-a")
 	if _, err := executor.Prepare(ctx, fourth); !errors.Is(err, ErrIngressBackendUnhealthy) {
 		t.Fatalf("unhealthy replacement error = %v", err)
 	}
 	assertIngressResponse(t, ctx, publicAddress, "application-a.example.com", http.StatusOK, "application-a-new")
 	assertIngressResponse(t, ctx, publicAddress, "application-b.example.com", http.StatusOK, "application-b")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-new")
 
 	stopTimeout := 10 * time.Second
 	if err := caddy.Stop(ctx, &stopTimeout); err != nil {
@@ -168,6 +204,7 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 	waitForUnixSocket(t, ctx, adminSocket)
 	assertIngressResponseEventually(t, ctx, publicAddress, "application-a.example.com", "application-a-new")
 	assertIngressResponse(t, ctx, publicAddress, "application-b.example.com", http.StatusOK, "application-b")
+	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-new")
 	if _, err := executor.Commit(ctx, third); err != nil {
 		t.Fatalf("reconcile resumed committed config: %v", err)
 	}
@@ -326,7 +363,7 @@ func ingressIntegrationHTTPClient(address string) *http.Client {
 			},
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		Timeout:       5 * time.Second,
+		Timeout:       10 * time.Second,
 	}
 }
 
@@ -353,9 +390,10 @@ func assertIngressResponse(
 	if err != nil || len(body) > maximumCaddyResponse {
 		t.Fatalf("read ingress host %s response: %v", hostname, err)
 	}
-	if response.StatusCode != wantStatus || wantBody != "" && strings.TrimSpace(string(body)) != wantBody {
-		t.Fatalf("ingress host %s = status %d body %q, want status %d body %q",
-			hostname, response.StatusCode, body, wantStatus, wantBody)
+	if response.ProtoMajor != 1 || response.StatusCode != wantStatus ||
+		wantBody != "" && strings.TrimSpace(string(body)) != wantBody {
+		t.Fatalf("ingress host %s = protocol %s status %d body %q, want HTTP/1.x status %d body %q",
+			hostname, response.Proto, response.StatusCode, body, wantStatus, wantBody)
 	}
 }
 
