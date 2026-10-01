@@ -33,7 +33,7 @@ CI 仍会独立执行格式、依赖校验、`go vet`、全量单元测试、Mon
 make test-release-candidate
 ```
 
-它在上述基础上组合社区版 Compose 启动/Bootstrap/持久化重启/候选升级/基线回滚/停写备份/空卷恢复、真实本机 Docker、Agent 进程轮换/双 Host 隔离、Terminal 专项竞态，以及共享 MongoDB 上两个真实 Server 进程经反向代理承载两条 WSS/SSH PTY 并共同观察策略撤权的门禁。社区系统门禁在原生 Ubuntu 24.04 amd64/arm64 Runner 上运行；正式 Release 从第二个版本开始还会由 `community-release-compatibility` 使用相邻两版已签名制品重跑同一旅程。它与客户等价环境的人工阻断项见[社区版发布候选门禁](release-readiness.md)。
+它在上述基础上组合社区版 Compose 启动/Bootstrap/持久化重启/候选升级/基线回滚/停写备份/空卷恢复、真实本机 Docker、Agent 进程轮换/双 Host 隔离、Terminal 专项竞态，以及共享 MongoDB 上两个真实 Server 进程经反向代理承载 WSS/SSH PTY、共同观察策略撤权和竞争同一一次性 Ticket 的门禁。社区系统门禁在原生 Ubuntu 24.04 amd64/arm64 Runner 上运行；正式 Release 从第二个版本开始还会由 `community-release-compatibility` 使用相邻两版已签名制品重跑同一旅程。它与客户等价环境的人工阻断项见[社区版发布候选门禁](release-readiness.md)。
 
 ## 私有 Sigstore keyless 门禁
 

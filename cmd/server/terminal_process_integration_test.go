@@ -139,8 +139,8 @@ func TestTwoServerProcessesObserveTerminalPolicyRevocationThroughReverseProxy(t 
 		"managed_host_ids":        []string{host.ID},
 		"idle_timeout":            "5m",
 		"maximum_duration":        "30m",
-		"maximum_per_user":        2,
-		"maximum_per_target":      2,
+		"maximum_per_user":        3,
+		"maximum_per_target":      3,
 		"revocation_grace_period": "0s",
 		"expected_version":        0,
 	}
@@ -184,6 +184,32 @@ func TestTwoServerProcessesObserveTerminalPolicyRevocationThroughReverseProxy(t 
 	if sshFixture.connections.Load() != 2 {
 		t.Fatalf("SSH connection count = %d, want 2", sshFixture.connections.Load())
 	}
+	raceCredential, raceCookie := createTerminalProcessSession(
+		t, client, serverA.baseURL, bearer, host.ID,
+	)
+	raceTerminalProcessTicket(
+		t,
+		ctx,
+		serverA.baseURL,
+		serverB.baseURL,
+		raceCredential.Session.ID,
+		raceCookie,
+	)
+	if sshFixture.connections.Load() != 3 {
+		t.Fatalf(
+			"SSH connection count after ticket race = %d, want 3",
+			sshFixture.connections.Load(),
+		)
+	}
+	assertTerminalProcessSessionState(
+		t,
+		client,
+		serverB.baseURL,
+		bearer,
+		raceCredential.Session.ID,
+		"closed",
+		"user_requested",
+	)
 
 	policy["enabled"] = false
 	policy["expected_version"] = 1
@@ -620,6 +646,125 @@ func dialTerminalProcessWSS(
 	return connection
 }
 
+type terminalProcessTicketRaceResult struct {
+	connection *websocket.Conn
+	ready      bool
+	err        error
+}
+
+func raceTerminalProcessTicket(
+	t *testing.T,
+	ctx context.Context,
+	serverA, serverB, sessionID string,
+	cookie *http.Cookie,
+) {
+	t.Helper()
+	connections := make([]*websocket.Conn, 0, 2)
+	for _, baseURL := range []string{serverA, serverB} {
+		connection, _, err := websocket.Dial(
+			ctx,
+			"ws"+strings.TrimPrefix(baseURL, "http")+
+				"/api/v1/terminal-sessions/"+sessionID+":connect",
+			&websocket.DialOptions{
+				Subprotocols: []string{terminalprotocol.Subprotocol},
+				HTTPHeader: http.Header{
+					"Origin": []string{baseURL},
+					"Cookie": []string{cookie.Name + "=" + cookie.Value},
+				},
+			},
+		)
+		if err != nil {
+			t.Fatalf("dial ticket-race WSS: %v", err)
+		}
+		connections = append(connections, connection)
+	}
+	open, err := terminalprotocol.EncodeControl(
+		terminalprotocol.Control{
+			Version:  terminalprotocol.Version,
+			Type:     terminalprotocol.TypeOpen,
+			Sequence: 1,
+			Columns:  100,
+			Rows:     30,
+		},
+		terminalprotocol.DirectionClientToServer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	results := make(chan terminalProcessTicketRaceResult, len(connections))
+	for _, connection := range connections {
+		go func(connection *websocket.Conn) {
+			<-start
+			if err := connection.Write(ctx, websocket.MessageText, open); err != nil {
+				results <- terminalProcessTicketRaceResult{connection: connection, err: err}
+				return
+			}
+			messageType, payload, err := connection.Read(ctx)
+			if err != nil {
+				results <- terminalProcessTicketRaceResult{connection: connection, err: err}
+				return
+			}
+			ready, decodeErr := terminalprotocol.DecodeControl(
+				payload,
+				terminalprotocol.DirectionServerToClient,
+			)
+			results <- terminalProcessTicketRaceResult{
+				connection: connection,
+				ready: messageType == websocket.MessageText &&
+					decodeErr == nil && ready.Type == terminalprotocol.TypeReady,
+				err: decodeErr,
+			}
+		}(connection)
+	}
+	close(start)
+	var winner *websocket.Conn
+	losers := 0
+	for range connections {
+		result := <-results
+		if result.ready && result.err == nil {
+			if winner != nil {
+				t.Fatal("one-time terminal ticket opened more than one WSS")
+			}
+			winner = result.connection
+			continue
+		}
+		if websocket.CloseStatus(result.err) != websocket.StatusPolicyViolation {
+			t.Fatalf("ticket-race loser error = %v", result.err)
+		}
+		losers++
+		_ = result.connection.CloseNow()
+	}
+	if winner == nil || losers != 1 {
+		t.Fatalf("ticket-race result: winner=%t losers=%d", winner != nil, losers)
+	}
+	defer winner.CloseNow()
+	if err := winner.Write(ctx, websocket.MessageBinary, []byte("ticket-winner")); err != nil {
+		t.Fatal(err)
+	}
+	messageType, payload, err := winner.Read(ctx)
+	if err != nil || messageType != websocket.MessageBinary || string(payload) != "ticket-winner" {
+		t.Fatalf("ticket-race winner echo: type=%v payload=%q error=%v", messageType, payload, err)
+	}
+	closeMessage, err := terminalprotocol.EncodeControl(
+		terminalprotocol.Control{
+			Version:  terminalprotocol.Version,
+			Type:     terminalprotocol.TypeClose,
+			Sequence: 2,
+		},
+		terminalprotocol.DirectionClientToServer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := winner.Write(ctx, websocket.MessageText, closeMessage); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := winner.Read(ctx); websocket.CloseStatus(err) != websocket.StatusNormalClosure {
+		t.Fatalf("ticket-race winner close = %v", err)
+	}
+}
+
 func assertTerminalProcessPermissionRevoked(
 	t *testing.T,
 	ctx context.Context,
@@ -651,6 +796,24 @@ func assertTerminalProcessSessionClosed(
 	headers map[string]string,
 	sessionID string,
 ) {
+	assertTerminalProcessSessionState(
+		t,
+		client,
+		baseURL,
+		headers,
+		sessionID,
+		"closed",
+		"permission_revoked",
+	)
+}
+
+func assertTerminalProcessSessionState(
+	t *testing.T,
+	client *http.Client,
+	baseURL string,
+	headers map[string]string,
+	sessionID, expectedStatus, expectedReason string,
+) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
@@ -668,12 +831,17 @@ func assertTerminalProcessSessionClosed(
 			http.StatusOK,
 			&session,
 		)
-		if session.Status == "closed" && session.CloseReason == "permission_revoked" {
+		if session.Status == expectedStatus && session.CloseReason == expectedReason {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	t.Fatalf("terminal session %s did not reach permission_revoked/closed", sessionID)
+	t.Fatalf(
+		"terminal session %s did not reach %s/%s",
+		sessionID,
+		expectedReason,
+		expectedStatus,
+	)
 }
 
 func terminalProcessJSON(

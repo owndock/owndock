@@ -117,7 +117,7 @@ sequenceDiagram
     Note over W,H: 浏览器不能选择地址、账号、Shell、命令、env 或 sudo
 ```
 
-连接成功不代表权限被永久缓存。WSS 默认每 2 秒从 MongoDB 读取权威会话，并重新解析绑定的登录会话、当前 Project 角色、有效策略和固定目标。管理员终止会话、目标停止或实例身份变化会立即进入关闭流程；登录退出、成员移除、角色降级或策略收紧会先发送稳定错误码 `terminal_permission_revoked`，再遵守复核时读取到的 `revocation_grace_period`。宽限期允许设为 0 到 5 分钟，权限在宽限期内恢复时会取消待关闭计时。复核依赖存储或身份服务发生异常时失败关闭，不继续保留高权限通道。多实例部署不依赖进程内广播，因此最长发现延迟约为一个复核周期。固定 MongoDB Replica Set 已验证两个独立 Repository 并发时策略乐观锁、一次性 Ticket 和目标槽位均只有一个成功者；`make test-terminal-process` 进一步启动两个真实 Server 进程，经一个反向代理分别承载两条 WSS 和固定 Host Key SSH PTY。任一实例提交 Organization 策略禁用后，两边都必须在 8 秒门禁内返回 `terminal_permission_revoked`、关闭连接并保存 `closed`，且终态可由另一实例读取。真实浏览器、客户 TLS 终止/负载均衡器与客户网络仍属于发布前系统验收。
+连接成功不代表权限被永久缓存。WSS 默认每 2 秒从 MongoDB 读取权威会话，并重新解析绑定的登录会话、当前 Project 角色、有效策略和固定目标。管理员终止会话、目标停止或实例身份变化会立即进入关闭流程；登录退出、成员移除、角色降级或策略收紧会先发送稳定错误码 `terminal_permission_revoked`，再遵守复核时读取到的 `revocation_grace_period`。宽限期允许设为 0 到 5 分钟，权限在宽限期内恢复时会取消待关闭计时。复核依赖存储或身份服务发生异常时失败关闭，不继续保留高权限通道。多实例部署不依赖进程内广播，因此最长发现延迟约为一个复核周期。固定 MongoDB Replica Set 已验证两个独立 Repository 并发时策略乐观锁、一次性 Ticket 和目标槽位均只有一个成功者；`make test-terminal-process` 进一步启动两个真实 Server 进程，经一个反向代理分别承载两条 WSS 和固定 Host Key SSH PTY。任一实例提交 Organization 策略禁用后，两边都必须在 8 秒门禁内返回 `terminal_permission_revoked`、关闭连接并保存 `closed`，且终态可由另一实例读取；相同 Ticket 同时提交给两个进程时严格只有一个实例得到 `READY` 并创建 PTY，另一实例以 WebSocket 1008 拒绝。真实浏览器、客户 TLS 终止/负载均衡器与客户网络仍属于发布前系统验收。
 
 ```mermaid
 sequenceDiagram
@@ -146,6 +146,14 @@ sequenceDiagram
     A->>M: persist Session A closed
     C->>M: persist Session B closed
     Note over A,C: 对端 Server 必须可读取另一会话的终态
+    opt 同一 Ticket 跨实例并发
+        B->>A: WSS OPEN(ticket X)
+        B->>C: WSS OPEN(ticket X)
+        A->>M: atomic consume
+        C->>M: atomic consume
+        M-->>A: exactly one succeeds
+        M-->>C: loser rejected
+    end
 ```
 
 ```mermaid

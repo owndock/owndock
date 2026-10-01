@@ -25,7 +25,7 @@ make test-terminal-security
 | 主机 Shell 结束后遗留子进程 | 独立 PTY/进程组，TERM 后关闭控制 PTY，短宽限后 KILL | 本机真实 Shell + 长时子进程回收测试 |
 | 畸形帧、超大输入或消息洪峰耗尽内存 | 严格方向/字段/序号，4 KiB 控制帧、32 KiB 数据帧、200 输入消息/秒和有界队列；只持久化稳定违规码 | 浏览器协议、Agent 协议、超大 payload 不落流和错误字段泄漏测试 |
 | Agent 断线、慢消费者或复用错 Host | 每会话序号与有界队列；WSS 输出写入有截止时间；断线关闭且不恢复旧 PTY；Registry 按固定 Host 路由 | WSS 慢读、阻塞输入、浏览器硬断线、Gateway、Registry 和竞态测试 |
-| 多 Server 同时修改策略或占用会话槽位 | 策略使用版本条件更新；活动用户/目标槽位由 MongoDB partial unique index 仲裁 | 固定 MongoDB Replica Set 上两个独立 Repository 的并发策略更新与槽位竞争均严格一胜一冲突；两个真实 Server 进程经反向代理承载不同 WSS，并共同观察共享策略撤权 |
+| 多 Server 同时修改策略、消费 Ticket 或占用会话槽位 | 策略使用版本条件更新；Ticket 条件更新；活动用户/目标槽位由 MongoDB partial unique index 仲裁 | 固定 MongoDB Replica Set 上两个独立 Repository 的并发策略更新与槽位竞争均严格一胜一冲突；两个真实 Server 进程经反向代理承载不同 WSS、共同观察共享策略撤权，且同一 Ticket 跨进程严格只建立一条 PTY |
 | 终端内容进入日志、Trace、指标或 MongoDB | 普通可观测接口只接收固定 kind/mode/reason；持久化只写会话元数据和安全错误码 | 指标不受信标签归一化与泄漏断言 |
 
 ## 背压与故障如何收敛
