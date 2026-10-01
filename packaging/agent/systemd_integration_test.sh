@@ -15,6 +15,12 @@ fixture=$1
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
 systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running"
 getent group docker >/dev/null 2>&1 || fail "docker group is unavailable"
+[ -x /usr/bin/docker ] || fail "Docker must be installed at /usr/bin/docker"
+docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
+
+ingress_project=owndock-ingress
+port_blocker=owndock-ingress-port-conflict
+fixture_image=nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b
 
 for protected_path in \
     /opt/owndock-agent \
@@ -34,6 +40,14 @@ workspace=$(mktemp -d /tmp/owndock-agent-systemd.XXXXXX)
 cleanup() {
     systemctl disable --now owndock-agent.service >/dev/null 2>&1 || true
     systemctl disable --now owndock-ingress.service >/dev/null 2>&1 || true
+    docker rm -f "$port_blocker" >/dev/null 2>&1 || true
+    if [ -f /etc/owndock/ingress.env ] && \
+       [ -f /opt/owndock-agent/current/owndock-ingress.compose.yaml ]; then
+        docker compose --project-name "$ingress_project" \
+            --env-file /etc/owndock/ingress.env \
+            -f /opt/owndock-agent/current/owndock-ingress.compose.yaml \
+            down --remove-orphans >/dev/null 2>&1 || true
+    fi
     rm -f /etc/systemd/system/owndock-agent.service
     rm -f /etc/systemd/system/owndock-ingress.service
     rm -f /usr/local/sbin/owndock-agentctl
@@ -83,6 +97,20 @@ wait_for_version() {
     fail "service did not report version $expected"
 }
 
+assert_ingress_active() {
+    systemctl is-active --quiet owndock-ingress.service || \
+        fail "managed Ingress service is not active"
+    [ -S /run/owndock-ingress/admin.sock ] || \
+        fail "managed Ingress admin socket is unavailable"
+    [ "$(docker inspect -f '{{.State.Running}}' owndock-ingress 2>/dev/null)" = true ] || \
+        fail "managed Ingress container is not running"
+}
+
+assert_ingress_state() {
+    [ "$(tr -d '\r\n' < /var/lib/owndock-ingress/data/systemd-preserved-state)" = \
+        preserved-ingress-state ] || fail "managed Ingress state changed across release operation"
+}
+
 package_one=$(create_package 1.0.0)
 "$package_one/owndock-agentctl" install
 install -o root -g owndock-agent -m 0640 /dev/null /etc/owndock/agent.yaml
@@ -92,6 +120,25 @@ install -o owndock-agent -g owndock-agent -m 0600 /dev/null \
 "$package_one/owndock-agentctl" install --start
 systemctl is-active --quiet owndock-agent.service || fail "initial service is not active"
 wait_for_version 1.0.0
+[ "$(stat -c %G /opt/owndock-agent/current/owndock-ingress.compose.yaml)" = owndock-agent ] || \
+    fail "Ingress Compose file is not readable by the service group"
+[ "$(stat -c %a /opt/owndock-agent/current/owndock-ingress.compose.yaml)" = 640 ] || \
+    fail "Ingress Compose file mode is not restricted"
+
+docker run --detach --name "$port_blocker" --publish 80:80/tcp "$fixture_image" >/dev/null
+if systemctl start owndock-ingress.service; then
+    fail "managed Ingress unexpectedly started while TCP port 80 was occupied"
+fi
+systemctl is-active --quiet owndock-ingress.service && \
+    fail "managed Ingress remained active after a public port conflict"
+docker rm -f "$port_blocker" >/dev/null
+systemctl reset-failed owndock-ingress.service
+systemctl enable --now owndock-ingress.service
+assert_ingress_active
+printf '%s\n' preserved-ingress-state > /var/lib/owndock-ingress/data/systemd-preserved-state
+chown owndock-ingress:owndock-agent /var/lib/owndock-ingress/data/systemd-preserved-state
+chmod 0600 /var/lib/owndock-ingress/data/systemd-preserved-state
+
 printf '%s\n' preserved-state > /var/lib/owndock-agent/systemd-preserved-state
 printf '%s\n' '{"version":1,"entries":[]}' > \
     /var/lib/owndock-agent/terminal-executions.json
@@ -102,6 +149,9 @@ package_two=$(create_package 1.1.0)
 "$package_two/owndock-agentctl" install
 systemctl is-active --quiet owndock-agent.service || fail "upgraded service is not active"
 wait_for_version 1.1.0
+assert_ingress_active
+assert_ingress_state
+systemctl reset-failed owndock-ingress.service
 
 package_bad=$(create_package 9.9.9)
 if "$package_bad/owndock-agentctl" install; then
@@ -111,15 +161,28 @@ fi
     fail "failed release did not restore the previous current symlink"
 systemctl is-active --quiet owndock-agent.service || fail "previous service was not restored"
 wait_for_version 1.1.0
+assert_ingress_active
+assert_ingress_state
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/systemd-preserved-state)" = preserved-state ] || \
     fail "runtime state changed during upgrade recovery"
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/terminal-executions.json)" = \
     '{"version":1,"entries":[]}' ] || \
     fail "terminal recovery state changed during upgrade recovery"
 
+chown root:root \
+    /opt/owndock-agent/releases/1.0.0/owndock-ingress.compose.yaml \
+    /opt/owndock-agent/releases/1.0.0/owndock-ingress-bootstrap.json
+chmod 0640 \
+    /opt/owndock-agent/releases/1.0.0/owndock-ingress.compose.yaml \
+    /opt/owndock-agent/releases/1.0.0/owndock-ingress-bootstrap.json
+systemctl reset-failed owndock-ingress.service
 /usr/local/sbin/owndock-agentctl rollback --version 1.0.0
 systemctl is-active --quiet owndock-agent.service || fail "rolled back service is not active"
 wait_for_version 1.0.0
+assert_ingress_active
+assert_ingress_state
+[ "$(stat -c %G /opt/owndock-agent/current/owndock-ingress.compose.yaml)" = owndock-agent ] || \
+    fail "rollback did not repair the Ingress service group"
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/systemd-preserved-state)" = preserved-state ] || \
     fail "runtime state changed during rollback"
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/terminal-executions.json)" = \
@@ -132,5 +195,11 @@ wait_for_version 1.0.0
     fail "NoNewPrivileges is not active"
 [ "$(systemctl show owndock-agent.service -p ProtectSystem --value)" = strict ] || \
     fail "ProtectSystem is not strict"
+[ "$(systemctl show owndock-ingress.service -p User --value)" = owndock-ingress ] || \
+    fail "managed Ingress systemd user hardening is missing"
+[ "$(systemctl show owndock-ingress.service -p NoNewPrivileges --value)" = yes ] || \
+    fail "managed Ingress NoNewPrivileges is not active"
+[ "$(systemctl show owndock-ingress.service -p ProtectSystem --value)" = strict ] || \
+    fail "managed Ingress ProtectSystem is not strict"
 
 printf '%s\n' "OwnDock Agent systemd lifecycle integration passed"

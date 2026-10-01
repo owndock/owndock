@@ -220,6 +220,16 @@ verify_installed_release() {
     done
 }
 
+secure_ingress_release() {
+    [ "$INSTALL_ROOT" = / ] || return 0
+    chown root:"$AGENT_GROUP" \
+        "$1/owndock-ingress.compose.yaml" \
+        "$1/owndock-ingress-bootstrap.json"
+    chmod 0640 \
+        "$1/owndock-ingress.compose.yaml" \
+        "$1/owndock-ingress-bootstrap.json"
+}
+
 acquire_lock() {
     install -d -m 0755 "$OPT_DIR"
     if [ "$INSTALL_ROOT" = / ]; then
@@ -357,6 +367,7 @@ install_release() {
         verify_version "$temporary/owndock-agent" "$version"
         mv "$temporary" "$release"
     fi
+    secure_ingress_release "$release"
     previous=$(current_target)
     if [ -e "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ]; then
         fail "existing systemd unit is not an OwnDock-managed symlink"
@@ -401,6 +412,8 @@ install_release() {
             if ! restart_service_stably; then
                 restore_target "$previous"
                 systemctl daemon-reload
+                [ "$was_ingress_active" != true ] || restart_ingress_stably ||
+                    fail "Agent restart failed and the previous Ingress release could not be restored"
                 if [ "$was_active" = true ] && ! restart_service_stably; then
                     fail "Agent restart failed and the previous release could not be restored"
                 fi
@@ -476,6 +489,7 @@ rollback_release() {
     install_directories
     acquire_lock
     verify_installed_release "$version"
+    secure_ingress_release "$RELEASES_DIR/$version"
     previous=$(current_target)
     [ "$previous" != "releases/$version" ] || {
         printf 'OwnDock Agent %s is already current\n' "$version"

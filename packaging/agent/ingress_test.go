@@ -119,6 +119,9 @@ func TestAgentInstallerRestoresIngressSelectionFromValidatedConfig(t *testing.T)
 		"agent_ingress_enabled()", "inspect-config --conf", `'{"managed_ingress":true}'`,
 		`'{"managed_ingress":false}'`, `systemctl enable --now "$INGRESS_SERVICE"`,
 		`systemctl disable --now "$INGRESS_SERVICE"`,
+		`secure_ingress_release()`, `secure_ingress_release "$RELEASES_DIR/$version"`,
+		`chown root:"$AGENT_GROUP"`,
+		`Agent restart failed and the previous Ingress release could not be restored`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Agent installer is missing recovered Ingress behavior %q", required)
