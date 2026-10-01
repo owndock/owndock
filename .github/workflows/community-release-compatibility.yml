@@ -49,9 +49,14 @@ jobs:
           set -euo pipefail
           test "$(uname -s)" = Linux
           test "$(uname -m)" = "${{ matrix.machine }}"
+          test -d /run/systemd/system
           test -s /sys/fs/cgroup/cgroup.controllers
+          test "$(awk -F= '$1 == \"ID\" { gsub(/\"/, \"\", $2); print $2 }' /etc/os-release)" = ubuntu
+          test "$(awk -F= '$1 == \"VERSION_ID\" { gsub(/\"/, \"\", $2); print $2 }' /etc/os-release)" = 24.04
+          test "$(docker info --format '{{.ServerVersion}}')" = 29.6.1
           test "$(docker info --format '{{.OSType}}')" = linux
           test "$(docker info --format '{{.Architecture}}')" = "${{ matrix.machine }}"
+          test "$(docker info --format '{{.CgroupVersion}}')" = 2
           docker info --format \
             'docker={{.ServerVersion}} os={{.OSType}} arch={{.Architecture}} cgroup={{.CgroupVersion}} storage={{.Driver}}'
       - name: Resolve adjacent published releases

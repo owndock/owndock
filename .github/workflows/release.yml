@@ -237,9 +237,14 @@ jobs:
           set -euo pipefail
           test "$(uname -s)" = Linux
           test "$(uname -m)" = "${{ matrix.machine }}"
+          test -d /run/systemd/system
           test -s /sys/fs/cgroup/cgroup.controllers
+          test "$(awk -F= '$1 == \"ID\" { gsub(/\"/, \"\", $2); print $2 }' /etc/os-release)" = ubuntu
+          test "$(awk -F= '$1 == \"VERSION_ID\" { gsub(/\"/, \"\", $2); print $2 }' /etc/os-release)" = 24.04
+          test "$(docker info --format '{{.ServerVersion}}')" = 29.6.1
           test "$(docker info --format '{{.OSType}}')" = linux
           test "$(docker info --format '{{.Architecture}}')" = "${{ matrix.machine }}"
+          test "$(docker info --format '{{.CgroupVersion}}')" = 2
           docker info --format \
             'docker={{.ServerVersion}} os={{.OSType}} arch={{.Architecture}} cgroup={{.CgroupVersion}} storage={{.Driver}}'
       - name: Resolve previous published release
@@ -391,7 +396,7 @@ jobs:
           mkdir -p compatibility-report
           report="compatibility-report/COMMUNITY_COMPATIBILITY_${{ matrix.goarch }}.txt"
           {
-            printf 'schema=owndock-community-compatibility-v1\n'
+            printf 'schema=owndock-community-compatibility-v2\n'
             printf 'result=%s\n' "$(if [[ "${HAS_PREVIOUS}" == true ]]; then printf passed; else printf baseline; fi)"
             printf 'current_tag=%s\n' "${GITHUB_REF_NAME}"
             printf 'current_version=%s\n' "${CURRENT_VERSION}"
@@ -399,7 +404,16 @@ jobs:
             printf 'architecture=%s\n' '${{ matrix.goarch }}'
             printf 'machine=%s\n' "$(uname -m)"
             printf 'kernel=%s\n' "$(uname -r)"
+            printf 'operating_system=ubuntu\n'
+            printf 'operating_system_version=24.04\n'
+            printf 'systemd=true\n'
+            printf 'cgroup_v2=true\n'
             printf 'docker_engine=%s\n' "$(docker info --format '{{.ServerVersion}}')"
+            printf 'docker_api=%s\n' "$(docker version --format '{{.Server.APIVersion}}')"
+            printf 'docker_architecture=%s\n' "$(docker info --format '{{.Architecture}}')"
+            printf 'docker_cgroup=%s\n' "$(docker info --format '{{.CgroupVersion}}')"
+            printf 'docker_storage=%s\n' "$(docker info --format '{{.Driver}}')"
+            printf 'workspace_filesystem=%s\n' "$(findmnt --noheadings --output FSTYPE --target . | xargs)"
             printf 'previous_tag=%s\n' "${PREVIOUS_TAG}"
             printf 'previous_version=%s\n' "${PREVIOUS_VERSION}"
             printf 'previous_image=%s\n' "${PREVIOUS_IMAGE}"

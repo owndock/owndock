@@ -18,6 +18,11 @@ func TestSupportMatrixTracksLockedBaselines(t *testing.T) {
 		t.Fatalf("Agent preflight Docker %s does not match integration image %s",
 			agentpreflight.SupportedDockerVersion, dockerImage)
 	}
+	communityVerifier := readSupportFile(t, filepath.Join(root, "packaging", "release", "verify-community-release"))
+	if !strings.Contains(communityVerifier, `values["docker_engine"] != "`+agentpreflight.SupportedDockerVersion+`"`) ||
+		!strings.Contains(communityVerifier, "owndock-community-compatibility-v2") {
+		t.Fatal("community release verifier does not enforce the Agent host support baseline")
+	}
 
 	for _, baseline := range []struct {
 		name   string

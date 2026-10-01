@@ -95,14 +95,48 @@ END {
 
 for architecture in amd64 arm64; do
     report=$directory/COMMUNITY_COMPATIBILITY_${architecture}.txt
-    grep -qx 'schema=owndock-community-compatibility-v1' "$report" ||
-        fail "$architecture compatibility report schema is invalid"
-    grep -qx "current_version=$version" "$report" ||
-        fail "$architecture compatibility report version is invalid"
-    grep -qx "architecture=$architecture" "$report" ||
-        fail "$architecture compatibility report architecture is invalid"
-    grep -Eq '^result=(baseline|passed)$' "$report" ||
-        fail "$architecture compatibility report result is invalid"
+    awk -F= -v architecture="$architecture" -v version="$version" '
+    BEGIN {
+        split("schema result current_tag current_version current_commit architecture machine kernel operating_system operating_system_version systemd cgroup_v2 docker_engine docker_api docker_architecture docker_cgroup docker_storage workspace_filesystem previous_tag previous_version previous_image current_image", fields, " ")
+        for (i in fields) allowed[fields[i]] = 1
+    }
+    {
+        separator = index($0, "=")
+        key = substr($0, 1, separator - 1)
+        value = substr($0, separator + 1)
+        if (!separator || !(key in allowed) || seen[key]++) exit 1
+        values[key] = value
+    }
+    END {
+        for (key in allowed) if (!seen[key]) exit 1
+        machine = architecture == "amd64" ? "x86_64" : "aarch64"
+        if (values["schema"] != "owndock-community-compatibility-v2" ||
+            values["current_tag"] != "v" version ||
+            values["current_version"] != version ||
+            values["current_commit"] !~ /^[0-9a-f]{40}$/ ||
+            values["architecture"] != architecture || values["machine"] != machine ||
+            values["kernel"] !~ /^[0-9A-Za-z._+-]+$/ ||
+            values["operating_system"] != "ubuntu" ||
+            values["operating_system_version"] != "24.04" ||
+            values["systemd"] != "true" || values["cgroup_v2"] != "true" ||
+            values["docker_engine"] != "29.6.1" ||
+            values["docker_api"] !~ /^[0-9A-Za-z._+-]+$/ ||
+            values["docker_architecture"] != machine ||
+            values["docker_cgroup"] != "2" ||
+            values["docker_storage"] !~ /^[0-9A-Za-z._+-]+$/ ||
+            values["workspace_filesystem"] !~ /^[0-9A-Za-z._+-]+$/ ||
+            values["current_image"] !~ /^ghcr.io\/owndock\/owndock@sha256:[0-9a-f]{64}$/ ||
+            (values["result"] != "baseline" && values["result"] != "passed")) exit 1
+        if (values["result"] == "baseline") {
+            if (values["previous_tag"] != "" || values["previous_version"] != "" ||
+                values["previous_image"] != "") exit 1
+        } else {
+            if (values["previous_version"] !~ /^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$/ ||
+                values["previous_tag"] != "v" values["previous_version"] ||
+                values["previous_image"] !~ /^ghcr.io\/owndock\/owndock@sha256:[0-9a-f]{64}$/) exit 1
+        }
+    }
+    ' "$report" || fail "$architecture compatibility report is invalid"
 done
 
 printf '%s\n' "OwnDock community release v${version} verified"

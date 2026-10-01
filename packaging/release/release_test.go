@@ -184,8 +184,19 @@ func TestCommunityVerifierBindsReportsImagesAndReleaseIdentity(t *testing.T) {
 
 	writeFile(t, filepath.Join(directory, "COMMUNITY_COMPATIBILITY_arm64.txt"),
 		communityReport(version, "amd64"), 0o644)
-	if output, err := run(); err == nil {
+	rewriteChecksumEntry(t, filepath.Join(directory, "COMMUNITY_SHA256SUMS"),
+		"COMMUNITY_COMPATIBILITY_arm64.txt",
+		readFile(t, filepath.Join(directory, "COMMUNITY_COMPATIBILITY_arm64.txt")))
+	if output, err := run(); err == nil || !strings.Contains(string(output), "compatibility report is invalid") {
 		t.Fatalf("tampered compatibility report passed: %s", output)
+	}
+
+	unsafeReport := communityReport(version, "arm64") + "unexpected_field=value\n"
+	writeFile(t, filepath.Join(directory, "COMMUNITY_COMPATIBILITY_arm64.txt"), unsafeReport, 0o644)
+	rewriteChecksumEntry(t, filepath.Join(directory, "COMMUNITY_SHA256SUMS"),
+		"COMMUNITY_COMPATIBILITY_arm64.txt", unsafeReport)
+	if output, err := run(); err == nil || !strings.Contains(string(output), "compatibility report is invalid") {
+		t.Fatalf("compatibility report with an unknown field passed: %s", output)
 	}
 }
 
@@ -205,8 +216,20 @@ func communityImageManifest() string {
 }
 
 func communityReport(version, architecture string) string {
-	return "schema=owndock-community-compatibility-v1\n" +
-		"result=passed\ncurrent_version=" + version + "\narchitecture=" + architecture + "\n"
+	machine := "x86_64"
+	if architecture == "arm64" {
+		machine = "aarch64"
+	}
+	digest := strings.Repeat("a", 64)
+	return "schema=owndock-community-compatibility-v2\n" +
+		"result=passed\ncurrent_tag=v" + version + "\ncurrent_version=" + version +
+		"\ncurrent_commit=" + strings.Repeat("b", 40) + "\narchitecture=" + architecture +
+		"\nmachine=" + machine + "\nkernel=6.8.0-test\noperating_system=ubuntu\n" +
+		"operating_system_version=24.04\nsystemd=true\ncgroup_v2=true\n" +
+		"docker_engine=29.6.1\ndocker_api=1.55\ndocker_architecture=" + machine +
+		"\ndocker_cgroup=2\ndocker_storage=overlay2\nworkspace_filesystem=ext4\n" +
+		"previous_tag=v1.2.2\nprevious_version=1.2.2\nprevious_image=ghcr.io/owndock/owndock@sha256:" + digest +
+		"\ncurrent_image=ghcr.io/owndock/owndock@sha256:" + digest + "\n"
 }
 
 func runVerifier(
@@ -238,6 +261,24 @@ func writeManifest(t *testing.T, path, version string, files map[string]string) 
 		value.WriteString(hex.EncodeToString(digest[:]) + "  " + name + "\n")
 	}
 	writeFile(t, path, value.String(), 0o644)
+}
+
+func rewriteChecksumEntry(t *testing.T, path, name, value string) {
+	t.Helper()
+	digest := sha256.Sum256([]byte(value))
+	replacement := hex.EncodeToString(digest[:]) + "  " + name
+	lines := strings.Split(strings.TrimSuffix(readFile(t, path), "\n"), "\n")
+	found := false
+	for index, line := range lines {
+		if strings.HasSuffix(line, "  "+name) {
+			lines[index] = replacement
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("checksum entry %s is missing", name)
+	}
+	writeFile(t, path, strings.Join(lines, "\n")+"\n", 0o644)
 }
 
 func repositoryRoot(t *testing.T) string {
