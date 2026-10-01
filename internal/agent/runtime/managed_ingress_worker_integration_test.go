@@ -1,9 +1,11 @@
 package agentruntime
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,6 +52,11 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 		managedIngressIntegrationPlan(t, stableName, "worker-deployment-two", 2),
 		managedIngressIntegrationPlan(t, stableName, "worker-deployment-bad", 3),
 	}
+	const applicationSecret = "managed-ingress-application-secret-sentinel"
+	for index := range plans {
+		plans[index].RuntimeSpec.EnvironmentKeys = []string{"APPLICATION_SECRET"}
+		plans[index].Environment = []string{"APPLICATION_SECRET=" + applicationSecret}
+	}
 	// The fixed nginx image listens on 80. A declared port of 81 lets the
 	// candidate become ready while forcing the private ingress probe to fail.
 	plans[2].RuntimeSpec.Ports[0].ContainerPort = 81
@@ -68,7 +75,7 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	adminSocket := filepath.Join(socketDirectory, "admin.sock")
-	_, publicAddress := startIngressCaddy(
+	caddyContainer, publicAddress := startIngressCaddy(
 		t, ctx, agentprotocol.ManagedIngressNetwork, socketDirectory, adminSocket,
 	)
 	waitForUnixSocket(t, ctx, adminSocket)
@@ -80,7 +87,8 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 		t.Fatal(err)
 	}
 	caddy.probeClient = ingressIntegrationHTTPClient(publicAddress)
-	ingressStore, err := NewFileIngressFenceStore(restrictedTempDirectory(t), 8)
+	ingressStateDirectory := restrictedTempDirectory(t)
+	ingressStore, err := NewFileIngressFenceStore(ingressStateDirectory, 8)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +210,22 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 	}
 	if fence.calls != 3 {
 		t.Fatalf("activation and rollback fence calls = %d, want 3", fence.calls)
+	}
+	assertManagedIngressSecretAbsent(
+		t, applicationSecret, stateDirectory, ingressStateDirectory, socketDirectory,
+	)
+	logs, err := caddyContainer.Logs(ctx)
+	if err != nil {
+		t.Fatalf("read managed Ingress Gateway logs: %v", err)
+	}
+	logValue, readErr := io.ReadAll(io.LimitReader(logs, 4*1024*1024+1))
+	closeErr := logs.Close()
+	if readErr != nil || closeErr != nil || len(logValue) > 4*1024*1024 {
+		t.Fatalf("read bounded managed Ingress Gateway logs: read=%v close=%v bytes=%d",
+			readErr, closeErr, len(logValue))
+	}
+	if bytes.Contains(logValue, []byte(applicationSecret)) {
+		t.Fatal("application secret leaked into managed Ingress Gateway logs")
 	}
 }
 
@@ -491,6 +515,38 @@ func assertManagedIngressRuntimeOwner(
 	if err != nil || !ownsExecution(inspection, identity) ||
 		inspection.Container.State == nil || !inspection.Container.State.Running {
 		t.Fatalf("managed ingress runtime %s = %+v, error = %v", stableName, inspection.Container, err)
+	}
+}
+
+func assertManagedIngressSecretAbsent(
+	t *testing.T,
+	secret string,
+	directories ...string,
+) {
+	t.Helper()
+	for _, directory := range directories {
+		err := filepath.Walk(directory, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+			if info.Size() > 8*1024*1024 {
+				return fmt.Errorf("managed Ingress secret-scan file is too large: %s", path)
+			}
+			value, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			if bytes.Contains(value, []byte(secret)) {
+				return fmt.Errorf("application secret leaked into %s", path)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

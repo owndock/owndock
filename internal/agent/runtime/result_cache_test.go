@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
 func TestFileResultCachePersistsSafeResultAcrossRestart(t *testing.T) {
@@ -121,6 +122,30 @@ func TestFileResultCachePersistsOnlyDeploymentFingerprint(t *testing.T) {
 	if err := cache.Store(command, result); err != nil {
 		t.Fatal(err)
 	}
+	stageDeployment := *command.Deployment
+	stageDeployment.ProjectID = "project-1"
+	stageDeployment.ApplicationID = "application-1"
+	stageDeployment.EnvironmentID = "environment-1"
+	stageDeployment.RegistryAuthorization = nil
+	stageDeployment.RuntimeSpec = runtimespec.Spec{
+		EnvironmentKeys: []string{"APPLICATION_SECRET"},
+		Resources: runtimespec.Resources{
+			CPUMilli: 500, MemoryBytes: 256 * 1024 * 1024,
+		},
+	}
+	stageDeployment.Environment = []string{
+		"APPLICATION_SECRET=top-secret-application-environment",
+	}
+	stage := agentprotocol.AgentCommand{
+		ID: "command-stage", Kind: agentprotocol.AgentCommandDeploymentStage,
+		Deadline: command.Deadline, Deployment: &stageDeployment,
+	}
+	stageResult := agentprotocol.AgentCommandResult{
+		CommandID: stage.ID, Status: agentprotocol.AgentCommandSucceeded,
+	}
+	if err := cache.Store(stage, stageResult); err != nil {
+		t.Fatal(err)
+	}
 	value, err := os.ReadFile(
 		filepath.Join(directory, "command-results.json"),
 	)
@@ -129,6 +154,7 @@ func TestFileResultCachePersistsOnlyDeploymentFingerprint(t *testing.T) {
 	}
 	for _, forbidden := range []string{
 		"top-secret-registry-authorization",
+		"top-secret-application-environment",
 		"registry.example.com",
 		"deployment-1",
 		"target-1",
@@ -149,6 +175,10 @@ func TestFileResultCachePersistsOnlyDeploymentFingerprint(t *testing.T) {
 			exists,
 			err,
 		)
+	}
+	cached, exists, err = reopened.Lookup(stage)
+	if err != nil || !exists || !cached.Equivalent(stageResult) {
+		t.Fatalf("cached stage = %+v, exists = %v, error = %v", cached, exists, err)
 	}
 }
 
