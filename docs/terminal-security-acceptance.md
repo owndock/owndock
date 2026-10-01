@@ -73,7 +73,7 @@ Server `/metrics` 暴露以下低基数指标：
 
 以下项目仍阻断 Terminal 的生产就绪声明：
 
-- 仓内 WSS 已覆盖慢输出消费者、阻塞终端输入和浏览器硬断线；双真实 Agent/双隔离 Engine 进一步覆盖 Host A canonical 容器固定 Shell 打开、目标容器退出、本地 Docker 通道中断与恢复、同名不同 ID 容器替换、终端活动期间 Agent `SIGKILL`/重启及遗留 Shell 回收、Host B 不受影响和环境秘密日志扫描；仍需两台客户等价 Agent 主机上的生产网络分区、进程重启和跨主机背压故障注入；
+- 仓内 WSS 已覆盖慢输出消费者、阻塞终端输入和浏览器硬断线；双真实 Agent/双隔离 Engine 进一步覆盖 Host A canonical 容器固定 Shell 打开、目标容器退出、本地 Docker 通道中断与恢复、同名不同 ID 容器替换、终端活动期间 Agent `SIGKILL`/重启及遗留 Shell 回收、16 MiB 输出遇到不消费控制端时的有界回收、Host B 不受影响和环境秘密日志扫描；仍需两台客户等价 Agent 主机上的生产网络分区、进程重启和跨主机背压故障注入；
 - 真实浏览器的 Cookie、反向代理、关闭码、后台标签页、网络切换和 CSP 矩阵；
 - 多 Server 的策略更新、Ticket 消费和槽位竞争已在固定 MongoDB Replica Set 验证；两个真实 Server 进程现已通过同一反向代理分别承载 WSS/SSH PTY，并在一次共享策略禁用后独立返回撤权通知、关闭、持久化，终态可跨实例读取。仍需真实浏览器、客户 TLS 终止/负载均衡器，以及登录撤销和角色变化的客户等价最大延迟验收；
 - 主机 PTY/direct SSH 已具备固定身份、最小环境、PTY 进程组回收、公钥认证和 SHA-256 Host Key 固定的本地/协议测试；仍需真实远程 Linux/SSH 的进程树、断网、服务重启、Host Key 轮换和秘密哨兵系统门禁；

@@ -392,8 +392,23 @@ start_host_a_terminal_container() {
 		>/dev/null
 }
 
+wait_for_terminal_records_empty() {
+	attempt=0
+	while [ "$attempt" -lt 100 ]; do
+		if grep -qx '{"version":1,"entries":\[\]}' \
+			"$materials_a/state/terminal-executions.json"; then
+			return
+		fi
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
+	fail "Host A terminal recovery records did not become empty"
+}
+
 run_host_container_terminal_fault_phase() {
 	fault=$1
+	terminal_output_backpressure=false
+	[ "$fault" = output-backpressure ] && terminal_output_backpressure=true
 	phase_ready=$workspace/container-terminal-$fault-ready
 	phase_result=$workspace/container-terminal-$fault-result-a
 	unused_result=$workspace/container-terminal-$fault-unused-b
@@ -404,13 +419,23 @@ run_host_container_terminal_fault_phase() {
 		--inventory-capabilities=true --terminal-capabilities=true \
 		--terminal-container "$terminal_container" \
 		--terminal-deployment-id "$terminal_deployment_id" \
-		--terminal-cutover-sequence 1 --timeout 20s \
+		--terminal-cutover-sequence 1 \
+		--terminal-output-backpressure="$terminal_output_backpressure" \
+		--timeout 20s \
 		>"$workspace/container-terminal-$fault-server.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$phase_ready"
-	sleep 10
-	terminal_processes=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
-		top "$terminal_container" -eo pid,args)
+	attempt=0
+	terminal_processes=
+	while [ "$attempt" -lt 100 ]; do
+		terminal_processes=$(docker exec "$engine_a_id" \
+			docker --host tcp://127.0.0.1:2375 top "$terminal_container" -eo pid,args)
+		case "$terminal_processes" in
+			*'/bin/sh'*) break ;;
+		esac
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
 	case "$terminal_processes" in
 		*'/bin/sh'*) ;;
 		*)
@@ -447,6 +472,23 @@ run_host_container_terminal_fault_phase() {
 				fail "could not interrupt Host A Agent during its terminal session"
 			wait "$agent_a_pid" >/dev/null 2>&1 || true
 			agent_a_pid=
+			;;
+		output-backpressure)
+			attempt=0
+			while [ "$attempt" -lt 100 ]; do
+				terminal_processes=$(docker exec "$engine_a_id" \
+					docker --host tcp://127.0.0.1:2375 top \
+					"$terminal_container" -eo pid,args)
+				case "$terminal_processes" in
+					*'/bin/sh'*) ;;
+					*) break ;;
+				esac
+				attempt=$((attempt + 1))
+				sleep 0.1
+			done
+			case "$terminal_processes" in
+				*'/bin/sh'*) fail "Host A terminal output backpressure left its shell running" ;;
+			esac
 			;;
 		*) fail "container terminal fault is invalid" ;;
 	esac
@@ -821,10 +863,11 @@ if [ "$runtime_mode" = 1 ]; then
 	case "$terminal_processes" in
 		*'/bin/sh'*) fail "Host A Agent restart left its terminal shell running" ;;
 	esac
-	grep -qx '{"version":1,"entries":\[\]}' \
-		"$materials_a/state/terminal-executions.json" || \
-		fail "Host A Agent restart did not clear terminal recovery records"
+	wait_for_terminal_records_empty
 	run_host_a_probe_after_terminal agent-restart
+	run_host_container_terminal_fault_phase output-backpressure
+	wait_for_terminal_records_empty
+	run_host_a_probe_after_terminal output-backpressure
 	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
 		"$deployment_container")
@@ -846,7 +889,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement/Agent-restart recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement/Agent-restart/backpressure recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

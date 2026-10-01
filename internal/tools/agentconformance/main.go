@@ -495,6 +495,7 @@ func runDualServer(arguments []string) error {
 	var inventoryEventIDA, inventoryEventIDB, inventoryResult string
 	var inventoryEventSinceA, inventoryEventSinceB string
 	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated, terminalCapabilities bool
+	var terminalBackpressure bool
 	var deploymentSequence uint64
 	var terminalCutoverSequence uint64
 	var timeout time.Duration
@@ -527,6 +528,7 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&terminalContainer, "terminal-container", "", "optional canonical container terminal target")
 	flags.StringVar(&terminalDeploymentID, "terminal-deployment-id", "", "container terminal deployment ID")
 	flags.Uint64Var(&terminalCutoverSequence, "terminal-cutover-sequence", 0, "container terminal cutover sequence")
+	flags.BoolVar(&terminalBackpressure, "terminal-output-backpressure", false, "stop consuming flooding terminal output")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
 		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
@@ -554,7 +556,8 @@ func runDualServer(arguments []string) error {
 		terminalContainer != "" && (!terminalCapabilities || onlyHost == "" ||
 			deploymentCommand != "" || inventoryCommand != "" ||
 			terminalDeploymentID == "" || terminalCutoverSequence == 0) ||
-		terminalContainer == "" && (terminalDeploymentID != "" || terminalCutoverSequence != 0) {
+		terminalContainer == "" && (terminalDeploymentID != "" || terminalCutoverSequence != 0 ||
+			terminalBackpressure) {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	eventSinceA, eventSinceB, err := parseInventoryEventCursors(
@@ -639,6 +642,7 @@ func runDualServer(arguments []string) error {
 		terminalContainer:        terminalContainer,
 		terminalDeploymentID:     terminalDeploymentID,
 		terminalCutoverSequence:  terminalCutoverSequence,
+		terminalBackpressure:     terminalBackpressure,
 		inventoryCommand:         inventoryCommand,
 		inventoryCapabilities:    inventoryCapabilities,
 		inventoryResult:          inventoryResult,
@@ -696,6 +700,7 @@ type dualConformanceHandler struct {
 	terminalContainer        string
 	terminalDeploymentID     string
 	terminalCutoverSequence  uint64
+	terminalBackpressure     bool
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -734,6 +739,7 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		terminalContainer:        handler.terminalContainer,
 		terminalDeploymentID:     handler.terminalDeploymentID,
 		terminalCutoverSequence:  handler.terminalCutoverSequence,
+		terminalBackpressure:     handler.terminalBackpressure,
 		inventoryCommand:         handler.inventoryCommand,
 		inventoryCapabilities:    handler.inventoryCapabilities,
 		inventoryResult:          handler.inventoryResult,
@@ -1185,6 +1191,7 @@ type conformanceHandler struct {
 	terminalContainer        string
 	terminalDeploymentID     string
 	terminalCutoverSequence  uint64
+	terminalBackpressure     bool
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -1433,11 +1440,17 @@ func (h *conformanceHandler) handleContainerTerminal(
 	}); err != nil {
 		return err
 	}
+	terminalInput := []byte("printf 'owndock-terminal-container-open\\n'\\n")
+	if h.terminalBackpressure {
+		terminalInput = []byte(
+			"sleep 2; dd if=/dev/zero bs=32768 count=512 2>/dev/null\\n",
+		)
+	}
 	for _, outbound := range []agentprotocol.TerminalFrame{
 		{
 			SessionID: sessionID, Sequence: 2,
 			Type: agentprotocol.TerminalFrameStdin,
-			Data: []byte("printf 'owndock-terminal-container-open\\n'\\n"),
+			Data: terminalInput,
 		},
 		{
 			SessionID: sessionID, Sequence: 3,
