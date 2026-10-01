@@ -39,12 +39,14 @@ type CutoverStore interface {
 		deploymentID string,
 		sequence uint64,
 	) (released bool, err error)
+	Cancel(containerName string, deploymentID string, sequence uint64) error
 	ProtectsRemoval(containerName string, deploymentID string, sequence uint64) error
 }
 
 type cutoverWatermark struct {
 	deploymentID string
 	sequence     uint64
+	canceled     bool
 }
 
 // FileCutoverStore is independent from the command result cache: result
@@ -107,7 +109,7 @@ func (s *FileCutoverStore) Observe(
 			return true, nil
 		}
 		if sequence == current.sequence {
-			return false, nil
+			return current.canceled, nil
 		}
 	} else if len(s.entries) >= s.maximum {
 		return false, ErrCutoverStoreFull
@@ -125,6 +127,49 @@ func (s *FileCutoverStore) Observe(
 		return false, err
 	}
 	return false, nil
+}
+
+// Cancel durably tombstones an execution before runtime cleanup. Commands for
+// the canceled Deployment/sequence then remain stale even if they arrive with
+// a fresh command ID after the cleanup response was lost.
+func (s *FileCutoverStore) Cancel(
+	containerName string,
+	deploymentID string,
+	sequence uint64,
+) error {
+	if !validCutoverEntry(containerName, deploymentID, sequence) {
+		return ErrInvalidCutoverStore
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.entries[containerName]
+	if exists && (sequence < current.sequence ||
+		(sequence == current.sequence && current.deploymentID != deploymentID)) {
+		// An older cancel remains authorized to clean only containers carrying
+		// its exact execution labels. The newer watermark already makes every
+		// delayed mutating command stale and must not be replaced.
+		return nil
+	}
+	if exists && sequence == current.sequence && current.canceled {
+		return nil
+	}
+	if !exists && len(s.entries) >= s.maximum {
+		return ErrCutoverStoreFull
+	}
+	s.entries[containerName] = cutoverWatermark{
+		deploymentID: deploymentID,
+		sequence:     sequence,
+		canceled:     true,
+	}
+	if err := s.persistLocked(); err != nil {
+		if exists {
+			s.entries[containerName] = current
+		} else {
+			delete(s.entries, containerName)
+		}
+		return err
+	}
+	return nil
 }
 
 // Release removes only the exact current slot watermark. A missing entry is an
@@ -206,6 +251,7 @@ func (s *FileCutoverStore) load() error {
 		s.entries[entry.ContainerName] = cutoverWatermark{
 			deploymentID: entry.DeploymentID,
 			sequence:     entry.Sequence,
+			canceled:     entry.Canceled,
 		}
 	}
 	return nil
@@ -229,6 +275,7 @@ func (s *FileCutoverStore) persistLocked() error {
 				ContainerName: name,
 				DeploymentID:  entry.deploymentID,
 				Sequence:      entry.sequence,
+				Canceled:      entry.canceled,
 			},
 		)
 	}
@@ -266,4 +313,5 @@ type cutoverStoreEntryDocument struct {
 	ContainerName string `json:"container_name"`
 	DeploymentID  string `json:"deployment_id"`
 	Sequence      uint64 `json:"sequence"`
+	Canceled      bool   `json:"canceled,omitempty"`
 }

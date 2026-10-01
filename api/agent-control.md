@@ -1,6 +1,6 @@
 # Agent Control Protocol v1
 
-> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory/Ingress command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、部署与 Ingress 持久 fence、固定 Caddy JSON/Unix Socket Gateway adapter、受限容器终端和固定身份主机 PTY 也已实现。Ingress capability 默认关闭，安装包可显式启用固定 digest Gateway；Server Deployment 编排和真实主机验收尚未完成。首次 enrollment 已支持本地生成密钥、严格 HTTPS/证书身份校验、完全相同请求的短时响应恢复和原子落盘；Agent 证书也支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。版本化安装包、Sigstore keyless 发布签名/离线验签、systemd unit、原子升级和本机回滚已经具备；首个受保护正式 Tag、跨控制面实例断流与多主机故障系统验收仍未完成。
+> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory/Ingress command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、部署与 Ingress 持久 fence、固定 Caddy JSON/Unix Socket Gateway adapter、受限容器终端和固定身份主机 PTY 也已实现。Ingress capability 默认关闭，安装包可显式启用固定 digest Gateway；Server Deployment Worker 已接入持久 cutover transaction、`committing` 接管、Route observation 原子提交、30 秒 drain 与精确 retire。真实主机流量和自动 HTTPS 验收尚未完成。首次 enrollment 已支持本地生成密钥、严格 HTTPS/证书身份校验、完全相同请求的短时响应恢复和原子落盘；Agent 证书也支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。版本化安装包、Sigstore keyless 发布签名/离线验签、systemd unit、原子升级和本机回滚已经具备；首个受保护正式 Tag、跨控制面实例断流与多主机故障系统验收仍未完成。
 
 Agent 控制协议运行在独立的 mTLS 监听端口，不与浏览器 Bearer API 共用认证边界。Agent 主动发起：
 
@@ -262,7 +262,7 @@ Route 从 committed 完整配置中移除时转为持久 tombstone，高水位�
 }
 ```
 
-稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_backend_unhealthy`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关/应用错误不进入 wire 或持久结果。当前三阶段 capability、持久事务、固定 Gateway adapter 与显式本机 wiring 已实现，但默认配置不会宣告该能力；Server Deployment 状态编排和真实流量验收完成前不能据此报告公网入口 ready。
+稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_backend_unhealthy`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关/应用错误不进入 wire 或持久结果。三阶段 capability、Agent 持久事务、固定 Gateway adapter、显式本机 wiring，以及 Server 持久 cutover/Route observation/Deployment `committing` 编排已实现，但默认配置不会宣告该能力；真实流量验收完成前不能据此报告生产入口就绪。
 
 ## 终端会话复用
 
@@ -428,11 +428,11 @@ Agent 部署不能简单地把现有 Server 直连 Docker 操作整体搬到远�
 - `deployment.stage`：使用受约束的 Runtime Spec 和 Environment 创建候选容器并等待健康；managed ingress 时只允许加入固定 `owndock-ingress` 网络，network alias 由 Deployment ID 单向派生；
 - `deployment.activate`：Server 重新通过 lease fence 后下发，幂等切换最终名称但保留旧 backend；
 - `deployment.retire`：仅在 route 提交和有界 drain 之后删除精确 previous backend；无 managed route 的路径会紧接 activate 执行它；
-- `deployment.cancel`：只清理由同一 Deployment ID、fencing token 和 cutover sequence 拥有的候选、回退或稳定容器。
+- `deployment.cancel`：先持久化当前 Deployment/sequence 的取消墓碑，再只清理由同一 Deployment ID、fencing token 和 cutover sequence 拥有的候选或稳定容器；若 activate 已保留旧 backend，则恢复旧 backend 的稳定名称。较旧 cancel 不替换较新水位，只能清理自己的精确身份。
 - `deployment.runtime.remove`：产品资源进入 `retiring` 且在途命令排空后，只按稳定容器名、Deployment ID 和 cutover sequence 删除精确受管运行资源；持久水位必须足以拒绝所有延迟旧命令；
 - `deployment.cutover.release`：产品资源已进入不可恢复终态后，精确释放一个槽位水位；只携带 Deployment ID、cutover sequence、Runtime Target ID 和稳定容器名，不携带 Worker、凭据、运行规格或任意 Docker 参数。
 
-`prepare/stage/activate/retire/cancel` 都固定 Deployment、Worker、generation、cutover sequence、Runtime Target 和稳定容器名，不能携带 Docker endpoint 或 Shell。`stage` 的 Environment 必须与 Release Runtime Spec 声明的键完全一致；除 `stage` 外的生命周期命令禁止携带 managed-ingress 标记、Registry、Environment 或镜像字段。Agent 会把 cutover sequence 写入候选和稳定容器标签，并在独立的本机文件中保存每个稳定容器槽位的最高 sequence 与 Deployment ID。该水位不随结果缓存淘汰；因此即使 Agent 重启或稳定容器被删除，延迟到达的旧命令仍返回 `stale_execution`。较旧 `cancel` 仍可按完整执行身份清理自己的候选，不会删除新 Deployment；`retire` 必须先确认稳定名称仍由同一执行持有。水位文件损坏、写入失败或达到配置上限时失败关闭。
+`prepare/stage/activate/retire/cancel` 都固定 Deployment、Worker、generation、cutover sequence、Runtime Target 和稳定容器名，不能携带 Docker endpoint 或 Shell。`stage` 的 Environment 必须与 Release Runtime Spec 声明的键完全一致；除 `stage` 外的生命周期命令禁止携带 managed-ingress 标记、Registry、Environment 或镜像字段。Agent 会把 cutover sequence 写入候选和稳定容器标签，并在独立的本机文件中保存每个稳定容器槽位的最高 sequence、Deployment ID 与取消墓碑。该水位不随结果缓存淘汰；因此即使 Agent 重启或稳定容器被删除，延迟到达的旧命令仍返回 `stale_execution`，同一已取消 Deployment 的新 command ID 也不能重新创建候选。较旧 `cancel` 仍可按完整执行身份清理自己的候选，不会删除新 Deployment；`retire` 必须先确认稳定名称仍由同一执行持有。水位文件损坏、写入失败或达到配置上限时失败关闭。
 
 水位不能用 TTL 或“满了就删最旧记录”回收，因为旧命令可能在网络恢复后才到达。Runtime Target `DELETE` 先原子写入 `retiring`，因此新 Deployment 失去 ready 门禁；非终态 Deployment 被置为 `canceling`，API 返回 `202`，由 Worker 使用只允许 ready/retiring 的清理解析器排空。重试删除时，Server 先用 `deployment.runtime.remove` 删除每个槽位最新成功 Deployment 的稳定容器；如果后续失败 Deployment 已推进水位，较新水位仍可保护较旧稳定容器。随后 Server 按 sequence 从高到低尝试 `deployment.cutover.release`，Agent 只在精确匹配当前水位时原子删除；不匹配返回 `cutover_conflict` 并保留记录，不存在则按已释放幂等成功。两步命令的安全结果都会持久化，响应丢失可重试。真实双主机、网络分区和网络层延迟命令的系统验收仍未完成，因此当前不能据此宣称 Agent 模式生产就绪。
 
@@ -482,7 +482,8 @@ sequenceDiagram
     else fence stale
         G->>R: deployment.cancel(owned execution only)
         R-->>A: typed command
-        A->>D: remove owned candidate
+        A->>A: persist cancellation tombstone
+        A->>D: remove owned candidate/current;<br/>restore previous when activation completed
         G-->>W: stale execution
     end
 ```

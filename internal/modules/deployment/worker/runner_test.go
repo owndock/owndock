@@ -45,6 +45,12 @@ type retryCommitExecutor struct {
 	commitCalls int
 }
 
+type retryDeployExecutor struct{ NoopExecutor }
+
+func (retryDeployExecutor) Deploy(context.Context, biz.Deployment) error {
+	return biz.ErrExecutionRetryable
+}
+
 func (*retryCommitExecutor) Prepare(context.Context, biz.Deployment) error { return nil }
 func (*retryCommitExecutor) Deploy(context.Context, biz.Deployment) error  { return nil }
 func (e *retryCommitExecutor) Commit(context.Context, biz.Deployment) error {
@@ -115,6 +121,22 @@ func TestRunOnceKeepsAmbiguousCommitClaimable(t *testing.T) {
 	items, _ = repository.List(t.Context(), "", "", "")
 	if len(items) != 1 || items[0].Status != biz.StatusSucceeded || executor.commitCalls != 2 {
 		t.Fatalf("deployment after replay = %+v, commit calls = %d", items, executor.commitCalls)
+	}
+}
+
+func TestRunOnceKeepsAmbiguousDeployClaimable(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	item, _ := biz.New("app-1", "env-1", "main@abc", "dep-1", time.Unix(0, 0))
+	if _, err := repository.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	err := newTestRunner(t, repository, retryDeployExecutor{}, time.Unix(10, 0)).RunOnce(t.Context())
+	if !errors.Is(err, biz.ErrExecutionRetryable) {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	items, _ := repository.List(t.Context(), "", "", "")
+	if len(items) != 1 || items[0].Status != biz.StatusDeploying || items[0].Terminal() {
+		t.Fatalf("deployment after ambiguous deploy = %+v", items)
 	}
 }
 
@@ -216,6 +238,32 @@ func TestRunOnceAuditsEveryWorkerStatusTransition(t *testing.T) {
 			event.ProjectID != "project" || event.ActorID != "system:worker-1" {
 			t.Errorf("audit event %d = %+v", index, event)
 		}
+	}
+}
+
+func TestRunOnceCommitsControlPlaneInsideStatusTransaction(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	item, _ := biz.New("app", "env", "", "deployment", time.Unix(0, 0))
+	item.OrganizationID, item.ProjectID = "organization", "project"
+	if _, err := repository.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	runner := newTestRunner(t, repository, NoopExecutor{}, time.Unix(10, 0))
+	audits := &workerAuditProbe{}
+	runner.WithAudit(transaction.Passthrough{}, audits, func() (string, error) { return "audit", nil })
+	commitCalls := 0
+	runner.WithControlPlaneCommitter(func(_ context.Context, deployment biz.Deployment) error {
+		commitCalls++
+		if deployment.Status != biz.StatusCommitting {
+			t.Fatalf("control-plane deployment status = %s", deployment.Status)
+		}
+		return nil
+	})
+	if err := runner.RunOnce(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if commitCalls != 1 {
+		t.Fatalf("control-plane commit calls = %d", commitCalls)
 	}
 }
 

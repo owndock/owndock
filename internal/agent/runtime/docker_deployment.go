@@ -90,7 +90,19 @@ func (e *DockerExecutor) executeDeployment(
 	command agentprotocol.AgentCommand,
 ) (agentprotocol.AgentCommandResult, error) {
 	stale := false
-	if command.Kind != agentprotocol.AgentCommandDeploymentCancel {
+	if command.Kind == agentprotocol.AgentCommandDeploymentCancel {
+		if err := e.cutovers.Cancel(
+			command.Deployment.ContainerName,
+			command.Deployment.DeploymentID,
+			command.Deployment.CutoverSequence,
+		); err != nil {
+			code := "runtime_configuration"
+			if errors.Is(err, ErrCutoverConflict) {
+				code = "stale_execution"
+			}
+			return deploymentResult(command.ID, code), nil
+		}
+	} else {
 		var watermarkError error
 		stale, watermarkError = e.cutovers.Observe(
 			command.Deployment.ContainerName,
@@ -381,28 +393,73 @@ func cancelDeployment(
 	engine dockerDeploymentEngine,
 	deployment agentprotocol.DeploymentCommand,
 ) error {
-	for _, name := range []string{
-		candidateContainerName(deployment),
-		previousContainerName(deployment),
-		deployment.ContainerName,
-	} {
-		current, err := inspectContainer(ctx, engine, name)
-		if cerrdefs.IsNotFound(err) {
-			continue
+	candidate, candidateErr := inspectContainer(ctx, engine, candidateContainerName(deployment))
+	if candidateErr == nil && ownsExecution(candidate, deployment) {
+		if err := removeOwnedContainerStrict(ctx, candidate, deployment, engine); err != nil {
+			return err
 		}
-		if err != nil {
-			return deploymentError("runtime_error", err)
+	} else if candidateErr != nil && !cerrdefs.IsNotFound(candidateErr) {
+		return deploymentError("runtime_error", candidateErr)
+	}
+
+	current, currentErr := inspectContainer(ctx, engine, deployment.ContainerName)
+	if currentErr != nil && !cerrdefs.IsNotFound(currentErr) {
+		return deploymentError("runtime_error", currentErr)
+	}
+	currentMissing := cerrdefs.IsNotFound(currentErr)
+	previousName := previousContainerName(deployment)
+	previous, previousErr := inspectContainer(ctx, engine, previousName)
+	if previousErr != nil && !cerrdefs.IsNotFound(previousErr) {
+		return deploymentError("runtime_error", previousErr)
+	}
+
+	currentOwned := currentErr == nil && ownsExecution(current, deployment)
+	previousOwned := previousErr == nil && ownsExecution(previous, deployment)
+	previousRestorable := previousErr == nil && managedContainer(previous) &&
+		!previousOwned && cutoverSequence(previous) < deployment.CutoverSequence
+
+	if currentOwned {
+		if previousErr == nil && !previousOwned && !previousRestorable {
+			return deploymentError("runtime_conflict", nil)
 		}
-		if !ownsExecution(current, deployment) {
-			continue
+		if err := removeOwnedContainerStrict(ctx, current, deployment, engine); err != nil {
+			return err
 		}
-		if _, err := engine.ContainerRemove(
+		currentMissing = true
+	}
+	if currentMissing && previousRestorable {
+		if _, err := engine.ContainerRename(
 			ctx,
-			current.Container.ID,
-			mobyclient.ContainerRemoveOptions{Force: true},
-		); err != nil && !cerrdefs.IsNotFound(err) {
+			previous.Container.ID,
+			mobyclient.ContainerRenameOptions{NewName: deployment.ContainerName},
+		); err != nil {
 			return deploymentError("runtime_error", err)
 		}
+		return nil
+	}
+	if previousOwned {
+		if err := removeOwnedContainerStrict(ctx, previous, deployment, engine); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeOwnedContainerStrict(
+	ctx context.Context,
+	current mobyclient.ContainerInspectResult,
+	deployment agentprotocol.DeploymentCommand,
+	engine dockerDeploymentEngine,
+) error {
+	if !ownsExecution(current, deployment) {
+		return deploymentError("runtime_conflict", nil)
+	}
+	if _, err := engine.ContainerRemove(
+		ctx,
+		current.Container.ID,
+		mobyclient.ContainerRemoveOptions{Force: true},
+	); err != nil && !cerrdefs.IsNotFound(err) {
+		return deploymentError("runtime_error", err)
 	}
 	return nil
 }

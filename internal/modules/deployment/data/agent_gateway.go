@@ -76,10 +76,6 @@ func (g *AgentDockerGateway) Deploy(
 	if err := g.Stage(ctx, plan, biz.RuntimeCredential{}); err != nil {
 		return err
 	}
-	if err := g.validateFence(ctx, plan); err != nil {
-		g.cancelStagedCandidate(plan)
-		return staleExecutionError()
-	}
 	if err := g.Activate(ctx, plan); err != nil {
 		return err
 	}
@@ -115,16 +111,71 @@ func (g *AgentDockerGateway) Activate(
 	ctx context.Context,
 	plan biz.ExecutionPlan,
 ) error {
-	activation, err := agentDeploymentIdentity(plan)
+	return g.ActivatePrepared(ctx, plan, plan)
+}
+
+// ActivatePrepared authorizes the operation with the current Worker lease,
+// then dispatches the original durable execution identity. This lets a new
+// Worker safely resume a cutover without creating a second candidate slot.
+func (g *AgentDockerGateway) ActivatePrepared(
+	ctx context.Context,
+	authorization biz.ExecutionPlan,
+	execution biz.ExecutionPlan,
+) error {
+	if !samePreparedExecution(authorization, execution) {
+		return executionError(biz.FailureConfiguration, biz.ErrCutoverConflict)
+	}
+	if err := g.validateFence(ctx, authorization); err != nil {
+		g.cancelStagedCandidate(execution)
+		return staleExecutionError()
+	}
+	activation, err := agentDeploymentIdentity(execution)
 	if err != nil {
 		return err
 	}
 	return g.dispatch(
 		ctx,
-		plan.TargetConnection.ManagedHostID,
+		execution.TargetConnection.ManagedHostID,
 		agentprotocol.AgentCommandDeploymentActivate,
 		activation,
 	)
+}
+
+// CancelPrepared uses the current lease only for authorization and removes
+// the exact candidate allocated by the durable cutover transaction.
+func (g *AgentDockerGateway) CancelPrepared(
+	ctx context.Context,
+	authorization biz.ExecutionPlan,
+	execution biz.ExecutionPlan,
+) error {
+	if !samePreparedExecution(authorization, execution) {
+		return executionError(biz.FailureConfiguration, biz.ErrCutoverConflict)
+	}
+	if err := g.validateFence(ctx, authorization); err != nil {
+		return staleExecutionError()
+	}
+	deployment, err := agentDeploymentIdentity(execution)
+	if err != nil {
+		return err
+	}
+	return g.dispatch(
+		ctx,
+		execution.TargetConnection.ManagedHostID,
+		agentprotocol.AgentCommandDeploymentCancel,
+		deployment,
+	)
+}
+
+func samePreparedExecution(left, right biz.ExecutionPlan) bool {
+	return left.DeploymentID == right.DeploymentID &&
+		left.CutoverSequence == right.CutoverSequence &&
+		left.ProjectID == right.ProjectID &&
+		left.ApplicationID == right.ApplicationID &&
+		left.EnvironmentID == right.EnvironmentID &&
+		left.RuntimeTargetID == right.RuntimeTargetID &&
+		left.ContainerName == right.ContainerName &&
+		left.TargetConnection.Mode == right.TargetConnection.Mode &&
+		left.TargetConnection.ManagedHostID == right.TargetConnection.ManagedHostID
 }
 
 func (g *AgentDockerGateway) Retire(

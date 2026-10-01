@@ -20,7 +20,7 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 
 当前代码已经实现外部 OCI 镜像的 digest-bound Artifact 登记、Registry manifest 完整性探测、Evidence Job 与审计原子提交，以及 Artifact → Release → Deployment 主链；同时已实现 Source Repository/Repository Credential 的安全登记、受限连接探测、平台签名 Webhook 入队、精确 Git checkout、rootless BuildKit 构建、认证 Registry push、OwnDock Build Artifact 和幂等 Release 交接、development 显式自动部署，以及有界脱敏 Build 日志。完整故障与攻击系统验收前仍属于 pre-release。
 
-应用可访问性由独立的 `ApplicationRoute` 产品边界承担，而不是从容器名称或 `ExposedPorts` 推断。目标形态提供推荐的 Agent managed HTTP/HTTPS ingress 和显式 external 模式；前者负责 hostname、证书状态、路由切换与回滚，后者只证明容器交付。Route desired-state API、MongoDB 持久化，以及默认关闭的 Agent 完整配置协议、持久 Host/Route fence、固定 Caddy Gateway adapter/安装包已经实现；Server Deployment 流量编排与真实主机验收尚未实现。当前版本不能把 `pending` Route 或容器成功宣称为用户流量已自动低停机切换，详见 [Application ingress](application-ingress.md)。
+应用可访问性由独立的 `ApplicationRoute` 产品边界承担，而不是从容器名称或 `ExposedPorts` 推断。目标形态提供推荐的 Agent managed HTTP/HTTPS ingress 和显式 external 模式；前者负责 hostname、证书状态、路由切换与回滚，后者只证明容器交付。Route desired-state API、MongoDB 持久化、Agent 三阶段完整配置与 fence、固定 Caddy Gateway，以及 Server 的持久 cutover/Route observation/Deployment `committing`/drain/retire 编排已经实现。真实主机、自动 HTTPS 和客户流量验收尚未完成；`pending` Route 或单纯容器成功仍不能宣称用户流量已自动低停机切换，详见 [Application ingress](application-ingress.md)。
 
 产品首版同时支持 `zh-CN` 与 `en-US`。API 保持英文机器字段和稳定 error/status/action code，后端按请求语言生成安全错误文案；控制台、未来的客户 CLI、官网和客户文档在展示层本地化，详细边界见[多语言与本地化](localization.md)。
 

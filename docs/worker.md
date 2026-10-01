@@ -10,7 +10,7 @@ queued → preparing → deploying → committing → succeeded
 
 Deployment Worker 不执行源码构建。Git-to-Deploy 由隔离 Build Worker/BuildKit 构建并推送 digest 镜像，再通过 Artifact 创建不可变 Release 后进入本 Worker。构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段交付运行资源，`committing` 是可重新领取的提交/收尾阶段；普通 Runtime 部署在该阶段无额外外部动作，managed ingress 将在这里重放精确 Gateway commit、排空和旧 backend 回收。
 
-当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。Agent Gateway 对 Worker 保持相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机；内部把 Deploy 拆为候选 stage、Server Mongo fence 验证和 activate。Agent Control Server 启用时，Agent prober 与 Gateway 配套注册；未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
+当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。普通 Agent Deploy 内部拆为 candidate stage、Server Mongo fence、activate 和 retire；存在匹配 `ApplicationRoute` 时，managed ingress coordinator 会改用持久事务 begin → stage → ingress prepare/private probe → activate → Mongo control-plane commit → ingress commit → drain → retire。Gateway Router 会完整透传这组分阶段能力。Agent Control Server 启用时，Agent prober、Deployment Gateway 和 Route Gateway 配套注册；未注册的模式或能力会稳定失败，不会自动改用另一条连接路径。
 
 direct 模式的连接失败按以下边界收敛：
 
@@ -36,9 +36,9 @@ Worker 不再使用“全量 List 后 Update”的领取方式。Repository 的 
 
 Worker 通过 `biz.Executor` 接口调用准备、部署、提交和取消清理。prepare/deploy 的确定性失败只持久化稳定的 `failure_category`，不保存 Docker 原始错误、Endpoint 或秘密内容；commit 的不确定响应不会把已经发生的外部提交改写成失败，而是保留 `committing` 等待同一幂等操作被租约接管重放。`preparing`、`deploying`、`committing`、`succeeded`、`failed` 和 `canceled` 均形成以 `system:{worker_id}` 为 Actor 的审计事件。
 
-Docker 稳定容器名由 Project、Application、Environment 和 Runtime Target 的组合哈希生成；这四个字段共同表示一个“部署槽位”。MongoDB 在创建 Deployment 时为同一槽位原子分配递增的 `cutover_sequence`，它表示不同 Deployment 的先后顺序。候选名和回退名仍包含 Deployment 身份与 lease generation，既保证同一次执行幂等，也避免不同 Deployment 的 generation 都从 1 开始时发生临时名称冲突。容器同时保存 Deployment ID、generation 和 cutover sequence：generation 判断同一 Deployment 的 Worker 尝试是否过期，cutover sequence 判断跨 Deployment 的延迟命令是否已经落后。取消旧操作时会校验完整执行身份，避免删除已由其他执行替换的容器。
+Docker 稳定容器名由 Project、Application、Environment 和 Runtime Target 的组合哈希生成；这四个字段共同表示一个“部署槽位”。MongoDB 在创建 Deployment 时为同一槽位原子分配递增的 `cutover_sequence`，它表示不同 Deployment 的先后顺序。候选名和回退名仍包含 Deployment 身份与 lease generation，既保证同一次执行幂等，也避免不同 Deployment 的 generation 都从 1 开始时发生临时名称冲突。容器同时保存 Deployment ID、generation 和 cutover sequence：generation 判断同一 Deployment 的 Worker 尝试是否过期，cutover sequence 判断跨 Deployment 的延迟命令是否已经落后。取消当前执行前，Agent 先为该 Deployment/sequence 原子写入持久墓碑，使之后到达的 stage/activate 即使使用新 command ID 也只能得到 `stale_execution`；如果 activate 已完成，则删除当前容器并把保留的旧 backend 恢复到稳定名称。较旧 Deployment 的 cancel 仍只清理自己的精确容器，不覆盖更高水位。
 
-租约接管意味着 Prepare/Deploy 可能在进程失联后重试，因此 Executor 以 Deployment ID、lease generation 和 cutover sequence 作为执行身份。generation 只在重新领取同一 Deployment 时递增，心跳只更新 expiry/version；cutover sequence 在创建 Deployment 时分配，重试同一记录不会改变。Runner 在步骤执行期间按租约时长的三分之一发送心跳；Docker 候选容器带两类 fence 标签，并在破坏性切换前通过 Repository 再次确认 owner、generation、状态、expiry，以及该 Deployment 的 cutover sequence 仍是槽位当前值。创建更新的 Deployment 后，旧 Deployment 即使租约仍有效也不能开始切换；已经到达运行目标的旧命令还会再次通过容器标签比较被拒绝。
+租约接管意味着 Prepare/Deploy 可能在进程失联后重试，因此普通执行以 Deployment ID、lease generation 和 cutover sequence 作为执行身份。managed ingress 在 `begin` 时额外持久化首次执行身份：接管 Worker 的新 generation 只用于 Server 授权，stage/activate/cancel/retire 始终重放首次身份，避免生成第二组 candidate/previous 名称或遗留旧 backend。generation 只在重新领取同一 Deployment 时递增，心跳只更新 expiry/version；cutover sequence 在创建 Deployment 时分配，重试同一记录不会改变。Runner 在步骤执行期间按租约时长的三分之一发送心跳；Docker 候选容器带两类 fence 标签，并在破坏性切换前通过 Repository 再次确认 owner、generation、状态、expiry，以及该 Deployment 的 cutover sequence 仍是槽位当前值。创建更新的 Deployment 后，旧 Deployment 即使租约仍有效也不能开始切换；已经到达运行目标的旧命令还会再次通过容器标签或持久取消墓碑被拒绝。
 
 Worker 通过 `internal/platform/lifecycle.Server` 加入 Kratos App，启动、停止和 MongoDB 清理顺序受统一生命周期管理。启用方式：
 

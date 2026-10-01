@@ -327,7 +327,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	verifyVulnerabilityObservationIntegration(t, ctx, client.Database())
 	verifyVulnerabilityWaiverIntegration(t, ctx, client.Database())
 	verifyDeploymentPolicyIntegration(t, ctx, client.Database())
-	verifyApplicationRouteIntegration(t, ctx, client.Database())
+	verifyApplicationRouteIntegration(t, ctx, client)
 	verifyExternalArtifactPersistenceIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryViewsIntegration(t, ctx, client.Database())
@@ -2271,6 +2271,23 @@ func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *
 			t.Errorf("application route index %q is missing: %#v", name, names)
 		}
 	}
+	hostCursor, err := database.Collection("application_route_host_configs").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hostCursor.Close(ctx)
+	documents = nil
+	if err := hostCursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names = map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	if !names["uniq_application_route_pending_deployment"] {
+		t.Errorf("application route host pending index is missing: %#v", names)
+	}
 }
 
 func assertArtifactIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
@@ -2863,8 +2880,9 @@ func verifyDeploymentPolicyIntegration(t *testing.T, ctx context.Context,
 	}
 }
 
-func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client *Client) {
 	t.Helper()
+	database := client.Database()
 	repository := applicationroutedata.NewMongoRepository(database)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	newRoute := func(id, hostname string) applicationroutebiz.ApplicationRoute {
@@ -2907,6 +2925,54 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, databa
 	}
 	if _, err := repository.Save(ctx, route, 1); !errors.Is(err, applicationroutebiz.ErrRouteConflict) {
 		t.Fatalf("stale Save() error = %v", err)
+	}
+	cutoverRoute := newRoute("route-integration-cutover", "cutover.integration.example.com")
+	if _, err := repository.Create(ctx, cutoverRoute); err != nil {
+		t.Fatal(err)
+	}
+	cutoverStore, err := applicationroutedata.NewMongoCutoverStore(database, client,
+		func() time.Time { return now.Add(2 * time.Second) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := applicationroutebiz.CutoverRequest{OrganizationID: cutoverRoute.OrganizationID,
+		ProjectID: cutoverRoute.ProjectID, ApplicationID: cutoverRoute.ApplicationID,
+		EnvironmentID: cutoverRoute.EnvironmentID, RuntimeTargetID: cutoverRoute.RuntimeTargetID,
+		ManagedHostID: "route-integration-host", DeploymentID: "route-integration-deployment",
+		WorkerID: "route-integration-worker", ContainerName: "route-integration-container",
+		FencingToken: 2, CutoverSequence: 3, Ports: map[string]uint16{"http": 8080}}
+	required, err := cutoverStore.Required(ctx, request)
+	if err != nil || !required {
+		t.Fatalf("cutover Required() = %t, %v", required, err)
+	}
+	cutover, err := cutoverStore.Begin(ctx, request)
+	if err != nil || cutover.Desired.HostRevision != 1 || len(cutover.Desired.ProbeRouteIDs) != 3 {
+		t.Fatalf("cutover Begin() = %+v, %v", cutover, err)
+	}
+	observation := applicationroutebiz.GatewayObservation{HostRevision: 1,
+		ConfigDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
+	if err := cutoverStore.Prepared(ctx, cutover, observation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.WithinTransaction(ctx, func(tx context.Context) error {
+		return cutoverStore.MarkControlPlaneCommitted(tx, request)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stored, exists, err := cutoverStore.Get(ctx, request.DeploymentID)
+	if err != nil || !exists || !stored.ControlPlaneCommitted {
+		t.Fatalf("cutover Get() = %+v, %t, %v", stored, exists, err)
+	}
+	if err := cutoverStore.Complete(ctx, stored, observation); err != nil {
+		t.Fatal(err)
+	}
+	if err := cutoverStore.Finish(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	readyRoute, err := repository.Get(ctx, cutoverRoute.OrganizationID, cutoverRoute.ProjectID, cutoverRoute.ID)
+	if err != nil || readyRoute.Status != applicationroutebiz.StatusReady || readyRoute.Observation == nil ||
+		readyRoute.Observation.DeploymentID != request.DeploymentID {
+		t.Fatalf("ready cutover route = %+v, %v", readyRoute, err)
 	}
 }
 

@@ -51,24 +51,47 @@ func (d *agentCommandDispatcherStub) Dispatch(
 }
 
 type agentFenceStub struct {
-	err    error
-	calls  int
-	onCall func()
+	err        error
+	calls      int
+	lastWorker string
+	lastToken  uint64
+	onCall     func()
 }
 
 func (f *agentFenceStub) ValidateFence(
-	context.Context,
-	string,
-	string,
-	string,
-	uint64,
-	time.Time,
+	_ context.Context,
+	_ string,
+	_ string,
+	workerID string,
+	token uint64,
+	_ time.Time,
 ) error {
 	f.calls++
+	f.lastWorker, f.lastToken = workerID, token
 	if f.onCall != nil {
 		f.onCall()
 	}
 	return f.err
+}
+
+func TestAgentDockerGatewayAuthorizesCurrentLeaseAndActivatesOriginalIdentity(t *testing.T) {
+	dispatcher := &agentCommandDispatcherStub{}
+	fence := &agentFenceStub{}
+	gateway := newAgentGateway(t, dispatcher, fence)
+	authorization := testAgentExecutionPlan(t)
+	authorization.WorkerID = "worker-2"
+	authorization.FencingToken = 9
+	execution := testAgentExecutionPlan(t)
+	if err := gateway.ActivatePrepared(t.Context(), authorization, execution); err != nil {
+		t.Fatal(err)
+	}
+	if fence.lastWorker != "worker-2" || fence.lastToken != 9 ||
+		len(dispatcher.commands) != 1 || dispatcher.commands[0].Deployment == nil ||
+		dispatcher.commands[0].Deployment.WorkerID != "worker-1" ||
+		dispatcher.commands[0].Deployment.FencingToken != 2 {
+		t.Fatalf("fence = %s/%d, commands = %+v",
+			fence.lastWorker, fence.lastToken, dispatcher.commands)
+	}
 }
 
 func TestAgentDockerGatewayBuildsNarrowPrepareCommand(t *testing.T) {

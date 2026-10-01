@@ -329,7 +329,7 @@ sequenceDiagram
 
 ## 已实现基础：Agent mTLS 控制连接与在线状态
 
-Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前双端已经实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流、有上限的抖动退避和优雅停止；Server 端提供 `runtime.probe`、`deployment.prepare/stage/activate/retire/cancel`、Runtime Inventory command/result、默认关闭的 `ingress.prepare/commit/abort`，以及 `terminal.container`/`terminal.host` 会话复用。Agent 侧本机 Docker executor、deadline、并发去重、跨重启安全结果缓存、Ingress committed/pending Host/Route fence、固定 Caddy JSON/Unix Socket adapter、Host/SNI 私有探测、受限容器终端和固定身份主机 PTY 也已实现。Agent Control Server 启用时，Agent probe、Deployment Gateway 与两类 Terminal Gateway 在 composition root 配套注册；Ingress 本机 wiring 由显式 Agent 配置启用，Server Deployment Worker 尚未调度它。
+Agent 使用 enrollment 获得的证书主动连接独立 TLS 1.3 端口。TLS 层先验证 Agent CA，应用层再把 SPIFFE URI、证书序列号和指纹与 MongoDB 固定身份匹配。当前双端已经实现 hello、`v1` 版本协商、frame 上限、单调序号、心跳、在线状态、重连 fence、单实例禁用断流、有上限的抖动退避和优雅停止；Server 端提供 `runtime.probe`、`deployment.prepare/stage/activate/retire/cancel`、Runtime Inventory command/result、默认关闭的 `ingress.prepare/commit/abort`，以及 `terminal.container`/`terminal.host` 会话复用。Agent 侧本机 Docker executor、deadline、并发去重、跨重启安全结果缓存、Ingress committed/pending Host/Route fence、固定 Caddy JSON/Unix Socket adapter、Host/SNI 私有探测、受限容器终端和固定身份主机 PTY也已实现。Agent Control Server 启用时，Agent probe、Deployment/Route Gateway 与两类 Terminal Gateway 在 composition root 配套注册；匹配 Route 的 Deployment Worker 会执行持久三阶段切流，Ingress 本机 wiring 仍由显式 Agent 配置启用。
 
 ```mermaid
 sequenceDiagram
@@ -544,7 +544,7 @@ sequenceDiagram
 
 下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换、Agent 两阶段部署/取消，以及 mTLS Docker API 在切换窗口第二次重命名被拒绝或已生效但响应丢失时恢复旧稳定容器、清理候选并重试成功；单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令。物理远程 Engine、实际入口流量、双主机断线/过期 fence 与网络层延迟系统测试仍未完成，因此仍不是生产闭环。
 
-当前 Release 端口只作为容器内部 `ExposedPorts` 声明，现有 Deployment Worker 不绑定宿主端口，也不管理客户反向代理路由。容器稳定名称切换不能推导为真实用户入口已切流。目标边界已经固定为 Agent managed HTTP/HTTPS 与显式 external 双模式；`ApplicationRoute` desired-state API/MongoDB、`ingress.prepare/commit/abort` 类型化完整配置、持久 committed/pending Host/Route fence，以及独立无 Docker Socket 的固定 Caddy Gateway/Unix Socket 完整配置 adapter 与 Host/SNI 私有探测已实现。Agent stage 已能把候选接入固定 network 和派生 alias，activate/retire 也已拆开，但 Server 尚未把 Deployment、Route 事务、Gateway 三阶段和有界 drain 编排为完整切流。Route 的 `pending` 状态不能作为真实流量门禁，详见 [Application ingress](application-ingress.md)。
+Release 端口仍只表示容器内部端口，不绑定每应用宿主端口。目标边界固定为 Agent managed HTTP/HTTPS 与显式 external 双模式；`ApplicationRoute` desired-state API/MongoDB、`ingress.prepare/commit/abort`、Agent committed/pending fence、固定 Caddy Gateway，以及 Server Host cutover transaction、Deployment `committing`/Route observation 原子提交、30 秒 drain 和精确 retire 已接通。Route 的 `pending` 状态仍不能作为流量门禁；代码闭环也不替代真实 Linux、80/443、自动 HTTPS、长连接和故障注入验收，详见 [Application ingress](application-ingress.md)。
 
 ```mermaid
 sequenceDiagram

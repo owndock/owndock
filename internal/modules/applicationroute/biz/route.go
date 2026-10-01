@@ -234,7 +234,7 @@ func validTransition(current, next Status) bool {
 	case StatusProvisioning:
 		return next == StatusDegraded || next == StatusRetiring
 	case StatusReady:
-		return next == StatusPending || next == StatusDegraded || next == StatusRetiring
+		return next == StatusPending || next == StatusProvisioning || next == StatusDegraded || next == StatusRetiring
 	case StatusDegraded:
 		return next == StatusPending || next == StatusProvisioning || next == StatusRetiring
 	case StatusRetiring:
@@ -360,7 +360,8 @@ func (u *UseCase) Update(ctx context.Context, principal security.Principal, proj
 	if err != nil {
 		return ApplicationRoute{}, err
 	}
-	if current.Version != expectedVersion || current.Status == StatusRetiring || current.Status == StatusRetired {
+	if current.Version != expectedVersion || current.Status == StatusProvisioning ||
+		current.Status == StatusRetiring || current.Status == StatusRetired {
 		return ApplicationRoute{}, ErrRouteConflict
 	}
 	if strings.TrimSpace(input.ApplicationID) != current.ApplicationID || strings.TrimSpace(input.EnvironmentID) != current.EnvironmentID || strings.TrimSpace(input.RuntimeTargetID) != current.RuntimeTargetID {

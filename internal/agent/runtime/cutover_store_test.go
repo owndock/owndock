@@ -49,6 +49,33 @@ func TestFileCutoverStorePersistsAndRejectsOlderDeployment(t *testing.T) {
 	}
 }
 
+func TestFileCutoverStorePersistsCancellationTombstone(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	store, err := NewFileCutoverStore(directory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Observe("owndock-slot", "deployment-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Cancel("owndock-slot", "deployment-1", 1); err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := store.Observe("owndock-slot", "deployment-1", 1); err != nil || !stale {
+		t.Fatalf("canceled deployment = %t, %v", stale, err)
+	}
+	reloaded, err := NewFileCutoverStore(directory, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stale, err := reloaded.Observe("owndock-slot", "deployment-1", 1); err != nil || !stale {
+		t.Fatalf("reloaded canceled deployment = %t, %v", stale, err)
+	}
+	if stale, err := reloaded.Observe("owndock-slot", "deployment-2", 2); err != nil || stale {
+		t.Fatalf("newer deployment = %t, %v", stale, err)
+	}
+}
+
 func TestFileCutoverStoreFailsClosedAtCapacity(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "state")
 	store, err := NewFileCutoverStore(directory, 1)

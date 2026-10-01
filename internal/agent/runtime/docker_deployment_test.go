@@ -551,6 +551,12 @@ func TestAgentDockerDeploymentRejectsOlderCommandAfterRestartWithoutStableContai
 	); !cerrdefs.IsNotFound(err) {
 		t.Fatalf("older candidate was not cleaned after restart: %v", err)
 	}
+	older.ID = "stage-older-after-cancel"
+	result, err = restartedExecutor.Execute(t.Context(), older)
+	if err != nil || result.Status != agentprotocol.AgentCommandFailed ||
+		result.ErrorCode != "stale_execution" {
+		t.Fatalf("older stage after cancel = %+v, error = %v", result, err)
+	}
 }
 
 func TestAgentDockerDeploymentRejectsUnsafeCutoverAndStaleFence(
@@ -661,6 +667,52 @@ func TestAgentDockerDeploymentCleansUnhealthyCandidateAndSafeCancel(
 	}
 	if _, exists := engine.containers["newer-deployment"]; !exists {
 		t.Fatal("cancel removed a different deployment")
+	}
+}
+
+func TestAgentDockerDeploymentCancelRestoresPreviousAndTombstonesExecution(t *testing.T) {
+	executor, engine := newDeploymentExecutor(t)
+	cancel := deploymentCommand(
+		"cancel-activated",
+		agentprotocol.AgentCommandDeploymentCancel,
+	)
+	deployment := *cancel.Deployment
+	addManagedContainer(
+		engine,
+		deployment.ContainerName,
+		"current-container",
+		deployment.DeploymentID,
+		deployment.FencingToken,
+		deployment.CutoverSequence,
+		true,
+	)
+	addManagedContainer(
+		engine,
+		previousContainerName(deployment),
+		"previous-container",
+		"previous-deployment",
+		1,
+		deployment.CutoverSequence-1,
+		true,
+	)
+	result, err := executor.Execute(t.Context(), cancel)
+	if err != nil || result.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("cancel result = %+v, error = %v", result, err)
+	}
+	restored, err := engine.ContainerInspect(
+		t.Context(), deployment.ContainerName, mobyclient.ContainerInspectOptions{},
+	)
+	if err != nil || restored.Container.ID != "previous-container" {
+		t.Fatalf("restored = %+v, error = %v", restored.Container, err)
+	}
+	delayed := deploymentCommand(
+		"delayed-stage-after-cancel",
+		agentprotocol.AgentCommandDeploymentStage,
+	)
+	result, err = executor.Execute(t.Context(), delayed)
+	if err != nil || result.Status != agentprotocol.AgentCommandFailed ||
+		result.ErrorCode != "stale_execution" {
+		t.Fatalf("delayed stage = %+v, error = %v", result, err)
 	}
 }
 

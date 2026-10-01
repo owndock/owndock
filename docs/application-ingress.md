@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent 已具备类型化 `ingress.prepare/commit/abort` 协议、Server adapter、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter、Host/SNI 私有探测和显式运行配置；Agent 包也携带固定 digest 的 Gateway 安装材料。真实 Linux Gateway 门禁和 Server Deployment 状态编排尚未完成，因此当前版本仍只交付容器，也不应宣称自动低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新先进入 `pending`，不直接代表公网入口已配置。Server Deployment Worker 已接入持久 Host cutover transaction：匹配 Route 时先固定 Host revision 与原始运行身份，再执行 stage、route prepare/私有探测、activate、Deployment `committing` + Route observation 原子事务、route commit、固定 30 秒 drain 和 retire；不确定响应保留可领取状态，后继 Worker 用新租约授权、按原始运行身份精确重放。取消按“恢复旧 Gateway 配置 → 在 Agent 持久化墓碑并清理原执行/恢复旧 backend → 清除 Server transaction”的顺序可重放，避免回滚窗口出现流量黑洞。Agent 具备类型化 `ingress.prepare/commit/abort`、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和 Host/SNI 私有探测。真实 Linux Gateway、自动 HTTPS 和客户流量门禁仍未完成，因此不能据此宣称生产级低停机流量切换。
 
 ## 目标模式
 
@@ -72,11 +72,13 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 ```mermaid
 sequenceDiagram
     participant W as Deployment Worker
+    participant M as MongoDB
     participant A as OwnDock Agent
     participant D as Docker Engine
     participant G as Ingress Gateway
 
-    W->>A: stage candidate with immutable network alias
+    W->>M: begin durable Host transaction<br/>freeze revision + original execution identity
+    W->>A: stage candidate with frozen identity + immutable network alias
     A->>D: start and wait for health
     A-->>W: candidate healthy
     W->>W: revalidate lease, route revision and cutover fence
@@ -87,10 +89,20 @@ sequenceDiagram
         A-->>W: safe route failure
     else prepared
         A-->>W: prepared revision + digest
-        W->>W: commit Deployment + Route observation transaction
+        W->>M: validate current Worker lease
+        W->>A: authorize with current lease;<br/>activate frozen identity and preserve previous
+        W->>M: transaction: Deployment → committing<br/>Route observation → ready + audit
         W->>A: ingress.commit(exact transaction)
         A-->>W: committed revision + digest
-        W->>A: drain then retire old backend
+        W->>W: bounded 30s drain
+        W->>A: retire exact previous backend
+        W->>M: Deployment → succeeded + audit
+    end
+    opt Worker is replaced or user cancels before committing
+        W->>A: ingress.abort restores committed Gateway config
+        W->>A: tombstone and cancel frozen identity
+        A->>D: remove candidate/current; restore previous if activated
+        W->>M: clear pending Host transaction
     end
 ```
 
@@ -104,7 +116,7 @@ sequenceDiagram
 
 ## 验收门槛
 
-已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非开发环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像。
+已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非开发环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，Server Host revision/pending transaction/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像。
 
 以下仍是执行面与联合验收门槛：
 

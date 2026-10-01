@@ -147,6 +147,22 @@ func TestUseCaseUpdateKeepsBindingsImmutable(t *testing.T) {
 	}
 }
 
+func TestUseCaseUpdateRejectsControllerOwnedProvisioningRoute(t *testing.T) {
+	repository := &fakeRepository{}
+	item, _ := NewApplicationRoute(validInput())
+	item, _ = item.Transition(StatusProvisioning, "controller", fixedTime.Add(time.Minute))
+	repository.item = item
+	useCase, _ := NewUseCase(repository,
+		&fakeReferences{result: References{EnvironmentStage: "development", AgentTarget: true}},
+		func() (string, error) { return "id", nil }, func() time.Time { return fixedTime.Add(time.Hour) })
+	input := validInput()
+	input.Hostname = "new.example.com"
+	if _, err := useCase.Update(context.Background(), principal(security.RoleMaintainer),
+		"project-1", "route-1", item.Version, input, ""); !errors.Is(err, ErrRouteConflict) {
+		t.Fatalf("provisioning update error = %v", err)
+	}
+}
+
 func validInput() Input {
 	return Input{ID: "route-1", OrganizationID: "organization-1", ProjectID: "project-1",
 		ApplicationID: "application-1", EnvironmentID: "environment-1", RuntimeTargetID: "target-1",

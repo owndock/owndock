@@ -110,6 +110,11 @@ func createBaselineProductIndexes(ctx context.Context, database *mongo.Database)
 			{Keys: bson.D{{Key: "organization_id", Value: 1}, {Key: "project_id", Value: 1}, {Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}, Options: options.Index().SetName("idx_application_route_project_created")},
 			{Keys: bson.D{{Key: "runtime_target_id", Value: 1}, {Key: "status", Value: 1}, {Key: "updated_at", Value: 1}}, Options: options.Index().SetName("idx_application_route_target_status")},
 		},
+		"application_route_host_configs": {
+			{Keys: bson.D{{Key: "pending.request.deployment_id", Value: 1}},
+				Options: options.Index().SetName("uniq_application_route_pending_deployment").SetUnique(true).
+					SetPartialFilterExpression(bson.D{{Key: "pending.request.deployment_id", Value: bson.D{{Key: "$type", Value: "string"}}}})},
+		},
 		"deployments": {
 			uniqueIndex("uniq_deployment_idempotency", bson.D{{Key: "project_id", Value: 1}, {Key: "idempotency_key", Value: 1}}),
 			{Keys: bson.D{{Key: "status", Value: 1}, {Key: "created_at", Value: 1}}, Options: options.Index().SetName("idx_deployment_claim")},

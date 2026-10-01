@@ -29,15 +29,16 @@ var (
 // step. Executor operations must be idempotent for a deployment ID because an
 // expired lease can be reclaimed after an interrupted process.
 type Runner struct {
-	repo          biz.Repository
-	executor      biz.Executor
-	workerID      string
-	leaseDuration time.Duration
-	now           func() time.Time
-	transaction   transaction.Manager
-	audit         sharedaudit.Recorder
-	newID         biz.IDGenerator
-	tracer        trace.Tracer
+	repo               biz.Repository
+	executor           biz.Executor
+	workerID           string
+	leaseDuration      time.Duration
+	now                func() time.Time
+	transaction        transaction.Manager
+	audit              sharedaudit.Recorder
+	newID              biz.IDGenerator
+	tracer             trace.Tracer
+	commitControlPlane func(context.Context, biz.Deployment) error
 }
 
 func NewRunner(
@@ -84,6 +85,13 @@ func (r *Runner) WithAudit(
 
 func (r *Runner) WithObservability(tracer trace.Tracer) *Runner {
 	r.tracer = tracer
+	return r
+}
+
+func (r *Runner) WithControlPlaneCommitter(
+	commit func(context.Context, biz.Deployment) error,
+) *Runner {
+	r.commitControlPlane = commit
 	return r
 }
 
@@ -138,6 +146,9 @@ func (r *Runner) RunOnce(ctx context.Context) (runErr error) {
 		item, err = r.runStep(ctx, item, r.executor.Deploy)
 		if err != nil {
 			if errors.Is(err, ErrLeaseRenewal) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			if errors.Is(err, biz.ErrExecutionRetryable) {
 				return err
 			}
 			return r.fail(ctx, item, "deploy", err)
@@ -260,6 +271,9 @@ func (r *Runner) saveState(
 		}
 	}
 	if auditDependencies == 0 {
+		if action == biz.AuditActionCommitting && r.commitControlPlane != nil {
+			return biz.Deployment{}, ErrIncompleteAudit
+		}
 		return r.repo.SaveClaimed(ctx, item, expectedVersion, r.workerID, now)
 	}
 	if auditDependencies != 3 {
@@ -277,6 +291,11 @@ func (r *Runner) saveState(
 		)
 		if saveErr != nil {
 			return saveErr
+		}
+		if action == biz.AuditActionCommitting && r.commitControlPlane != nil {
+			if commitErr := r.commitControlPlane(transactionContext, saved); commitErr != nil {
+				return commitErr
+			}
 		}
 		return r.audit.Record(transactionContext, sharedaudit.Event{
 			ID: auditID, OrganizationID: item.OrganizationID, ProjectID: item.ProjectID,

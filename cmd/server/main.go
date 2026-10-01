@@ -752,6 +752,32 @@ func run() error {
 			}
 			executor.WithRegistryCredentials(secretResolver).
 				WithConfiguration(secretResolver)
+			managedIngressEnabled := false
+			if agentCommandDispatcher != nil {
+				routeGateway, gatewayErr := applicationroutedata.NewAgentGateway(
+					agentCommandDispatcher, id.New, time.Now, operationTimeout,
+				)
+				if gatewayErr != nil {
+					return fmt.Errorf("create Agent application route gateway: %w", gatewayErr)
+				}
+				cutoverStore, storeErr := applicationroutedata.NewMongoCutoverStore(
+					mongoClient.Database(), mongoClient, time.Now,
+				)
+				if storeErr != nil {
+					return fmt.Errorf("create application route cutover store: %w", storeErr)
+				}
+				cutoverStore.WithAudit(auditStore, id.New)
+				cutover, cutoverErr := applicationroutebiz.NewCutoverCoordinator(
+					cutoverStore, routeGateway,
+				)
+				if cutoverErr != nil {
+					return fmt.Errorf("create application route cutover coordinator: %w", cutoverErr)
+				}
+				if _, configureErr := executor.WithManagedIngress(cutover, 30*time.Second); configureErr != nil {
+					return fmt.Errorf("configure managed application ingress: %w", configureErr)
+				}
+				managedIngressEnabled = true
+			}
 			retirement, retirementErr := deploymentbiz.NewRuntimeTargetRetirement(
 				deploymentStore, secretResolver, runtimeGateway,
 				mongoClient, auditStore, id.New, time.Now,
@@ -823,6 +849,9 @@ func run() error {
 				return fmt.Errorf("create deployment runner: %w", err)
 			}
 			runner.WithAudit(mongoClient, auditStore, id.New)
+			if managedIngressEnabled {
+				runner.WithControlPlaneCommitter(executor.MarkControlPlaneCommitted)
+			}
 			runner.WithObservability(tracing.Tracer(serviceName + ".deployment_worker"))
 			loop, err := deploymentworker.NewLoop(
 				runner, pollInterval, operationTimeout,

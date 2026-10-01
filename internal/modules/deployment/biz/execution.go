@@ -9,7 +9,10 @@ import (
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
-var ErrCutoverConflict = errors.New("runtime cutover watermark conflicts with lifecycle operation")
+var (
+	ErrCutoverConflict    = errors.New("runtime cutover watermark conflicts with lifecycle operation")
+	ErrExecutionRetryable = errors.New("deployment execution outcome is ambiguous and must be retried")
+)
 
 type FailureCategory string
 
@@ -145,6 +148,8 @@ type RuntimeGateway interface {
 type ManagedIngressRuntimeGateway interface {
 	Stage(context.Context, ExecutionPlan, RuntimeCredential) error
 	Activate(context.Context, ExecutionPlan) error
+	ActivatePrepared(context.Context, ExecutionPlan, ExecutionPlan) error
+	CancelPrepared(context.Context, ExecutionPlan, ExecutionPlan) error
 	Retire(context.Context, ExecutionPlan) error
 }
 

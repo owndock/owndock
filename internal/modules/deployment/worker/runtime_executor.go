@@ -4,14 +4,19 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"time"
 
+	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
+	"github.com/owndock/owndock/internal/shared/runtimeaccess"
 )
 
 var (
 	ErrMissingExecutionResolver  = errors.New("deployment execution resolver is required")
 	ErrMissingCredentialResolver = errors.New("runtime credential resolver is required")
 	ErrMissingRuntimeGateway     = errors.New("runtime gateway is required")
+	ErrInvalidIngressDrain       = errors.New("managed ingress drain must be between zero and sixty seconds")
+	ErrManagedIngressUnavailable = errors.New("managed ingress runtime gateway is unavailable")
 )
 
 // RuntimeExecutor resolves immutable deployment references immediately before
@@ -23,6 +28,19 @@ type RuntimeExecutor struct {
 	registries    biz.RegistryCredentialResolver
 	configuration biz.ConfigurationResolver
 	gateway       biz.RuntimeGateway
+	ingress       *applicationroutebiz.CutoverCoordinator
+	ingressDrain  time.Duration
+}
+
+func (e *RuntimeExecutor) WithManagedIngress(
+	coordinator *applicationroutebiz.CutoverCoordinator,
+	drain time.Duration,
+) (*RuntimeExecutor, error) {
+	if coordinator == nil || drain < 0 || drain > 60*time.Second {
+		return nil, ErrInvalidIngressDrain
+	}
+	e.ingress, e.ingressDrain = coordinator, drain
+	return e, nil
 }
 
 func (e *RuntimeExecutor) WithConfiguration(
@@ -63,19 +81,195 @@ func (e *RuntimeExecutor) Prepare(ctx context.Context, deployment biz.Deployment
 }
 
 func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment) error {
-	return e.execute(ctx, deployment, e.gateway.Deploy)
+	return e.execute(ctx, deployment, func(
+		ctx context.Context,
+		plan biz.ExecutionPlan,
+		credential biz.RuntimeCredential,
+	) error {
+		if e.ingress == nil || plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
+			return e.gateway.Deploy(ctx, plan, credential)
+		}
+		request, err := managedIngressCutoverRequest(deployment, plan)
+		if err != nil {
+			return err
+		}
+		required, err := e.ingress.Required(ctx, request)
+		if err != nil {
+			return err
+		}
+		if !required {
+			return e.gateway.Deploy(ctx, plan, credential)
+		}
+		managed, ok := e.gateway.(biz.ManagedIngressRuntimeGateway)
+		if !ok {
+			return ErrManagedIngressUnavailable
+		}
+		original, err := e.ingress.Begin(ctx, request)
+		if err != nil {
+			return err
+		}
+		executionPlan := plan
+		executionPlan.WorkerID = original.WorkerID
+		executionPlan.FencingToken = original.FencingToken
+		executionPlan.ManagedIngress = true
+		if err := managed.Stage(ctx, executionPlan, credential); err != nil {
+			if biz.CategorizeExecutionError(err, biz.FailureUnknown) == biz.FailureTargetUnreachable {
+				return errors.Join(biz.ErrExecutionRetryable, err)
+			}
+			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
+		}
+		if err := e.ingress.Prepare(ctx, deployment.ID); err != nil {
+			if errors.Is(err, applicationroutebiz.ErrCutoverAmbiguous) {
+				return errors.Join(biz.ErrExecutionRetryable, err)
+			}
+			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
+		}
+		if err := managed.ActivatePrepared(ctx, plan, executionPlan); err != nil {
+			if biz.CategorizeExecutionError(err, biz.FailureUnknown) == biz.FailureTargetUnreachable {
+				return errors.Join(biz.ErrExecutionRetryable, err)
+			}
+			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
+		}
+		return nil
+	})
 }
 
-// Commit is a distinct recoverable worker phase. Runtime-only deployments do
-// not have post-deploy work; managed ingress attaches its coordinator here.
-func (e *RuntimeExecutor) Commit(context.Context, biz.Deployment) error { return nil }
+func (e *RuntimeExecutor) abortManagedCutover(
+	ctx context.Context,
+	deploymentID string,
+	managed biz.ManagedIngressRuntimeGateway,
+	authorization biz.ExecutionPlan,
+	execution biz.ExecutionPlan,
+	cause error,
+) error {
+	if err := e.ingress.Restore(ctx, deploymentID); err != nil {
+		return errors.Join(biz.ErrExecutionRetryable, cause, err)
+	}
+	if err := managed.CancelPrepared(ctx, authorization, execution); err != nil {
+		return errors.Join(biz.ErrExecutionRetryable, cause, err)
+	}
+	if err := e.ingress.FinalizeAbort(ctx, deploymentID); err != nil {
+		return errors.Join(biz.ErrExecutionRetryable, cause, err)
+	}
+	return cause
+}
+
+// MarkControlPlaneCommitted is called inside the same transaction that moves
+// the Deployment to committing. The route store makes it a no-op when this
+// Deployment has no managed ingress transaction.
+func (e *RuntimeExecutor) MarkControlPlaneCommitted(ctx context.Context, deployment biz.Deployment) error {
+	if e.ingress == nil {
+		return nil
+	}
+	plan, err := e.executions.ResolveExecution(ctx, deployment)
+	if err != nil {
+		return err
+	}
+	request, err := managedIngressCutoverRequest(deployment, plan)
+	if err != nil {
+		return err
+	}
+	return e.ingress.MarkControlPlaneCommitted(ctx, request)
+}
+
+func (e *RuntimeExecutor) Commit(ctx context.Context, deployment biz.Deployment) error {
+	if e.ingress == nil {
+		return nil
+	}
+	request, exists, err := e.ingress.Commit(ctx, deployment.ID)
+	if err != nil || !exists {
+		return err
+	}
+	if e.ingressDrain > 0 {
+		timer := time.NewTimer(e.ingressDrain)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+	plan, err := e.executions.ResolveExecution(ctx, deployment)
+	if err != nil {
+		return err
+	}
+	plan.WorkerID, plan.FencingToken = request.WorkerID, request.FencingToken
+	plan.ManagedIngress = true
+	managed, ok := e.gateway.(biz.ManagedIngressRuntimeGateway)
+	if !ok {
+		return ErrManagedIngressUnavailable
+	}
+	if err := managed.Retire(ctx, plan); err != nil {
+		return err
+	}
+	return e.ingress.Finish(ctx, deployment.ID)
+}
+
+func managedIngressCutoverRequest(
+	deployment biz.Deployment,
+	plan biz.ExecutionPlan,
+) (applicationroutebiz.CutoverRequest, error) {
+	ports := make(map[string]uint16, len(plan.RuntimeSpec.Ports))
+	for _, port := range plan.RuntimeSpec.Ports {
+		if port.Protocol != "" && port.Protocol != "tcp" {
+			continue
+		}
+		ports[port.Name] = port.ContainerPort
+	}
+	request := applicationroutebiz.CutoverRequest{
+		OrganizationID: deployment.OrganizationID, ProjectID: plan.ProjectID,
+		ApplicationID: plan.ApplicationID, EnvironmentID: plan.EnvironmentID,
+		RuntimeTargetID: plan.RuntimeTargetID,
+		ManagedHostID:   plan.TargetConnection.ManagedHostID,
+		DeploymentID:    plan.DeploymentID, WorkerID: plan.WorkerID,
+		ContainerName: plan.ContainerName, FencingToken: plan.FencingToken,
+		CutoverSequence: plan.CutoverSequence, Ports: ports,
+	}
+	if err := request.Validate(); err != nil {
+		return applicationroutebiz.CutoverRequest{}, err
+	}
+	return request, nil
+}
 
 func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment) error {
 	resolver := e.executions.ResolveExecution
 	if cancellationResolver, ok := e.executions.(biz.CancellationExecutionResolver); ok {
 		resolver = cancellationResolver.ResolveCancellation
 	}
-	return e.executeWithResolver(ctx, deployment, resolver, e.gateway.Cancel)
+	return e.executeWithResolver(ctx, deployment, resolver, func(
+		ctx context.Context,
+		plan biz.ExecutionPlan,
+		credential biz.RuntimeCredential,
+	) error {
+		if e.ingress == nil || plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
+			return e.gateway.Cancel(ctx, plan, credential)
+		}
+		original, exists, err := e.ingress.Pending(ctx, deployment.ID)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			return e.gateway.Cancel(ctx, plan, credential)
+		}
+		managed, ok := e.gateway.(biz.ManagedIngressRuntimeGateway)
+		if !ok {
+			return ErrManagedIngressUnavailable
+		}
+		executionPlan := plan
+		executionPlan.WorkerID = original.WorkerID
+		executionPlan.FencingToken = original.FencingToken
+		executionPlan.ManagedIngress = true
+		if err := e.ingress.Restore(ctx, deployment.ID); err != nil {
+			return errors.Join(biz.ErrExecutionRetryable, err)
+		}
+		if err := managed.CancelPrepared(ctx, plan, executionPlan); err != nil {
+			return errors.Join(biz.ErrExecutionRetryable, err)
+		}
+		if err := e.ingress.FinalizeAbort(ctx, deployment.ID); err != nil {
+			return errors.Join(biz.ErrExecutionRetryable, err)
+		}
+		return nil
+	})
 }
 
 func (e *RuntimeExecutor) execute(
@@ -142,6 +336,9 @@ func (e *RuntimeExecutor) executeWithResolver(
 		}
 	}
 	if err := run(ctx, plan, credential); err != nil {
+		if errors.Is(err, biz.ErrExecutionRetryable) {
+			return err
+		}
 		var executionError *biz.ExecutionError
 		if errors.As(err, &executionError) {
 			return executionError

@@ -64,6 +64,64 @@ func (r *RuntimeGatewayRouter) Cancel(
 	return gateway.Cancel(ctx, plan, credential)
 }
 
+func (r *RuntimeGatewayRouter) Stage(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	credential biz.RuntimeCredential,
+) error {
+	gateway, err := r.managedGateway(plan)
+	if err != nil {
+		return err
+	}
+	return gateway.Stage(ctx, plan, credential)
+}
+
+func (r *RuntimeGatewayRouter) Activate(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
+	gateway, err := r.managedGateway(plan)
+	if err != nil {
+		return err
+	}
+	return gateway.Activate(ctx, plan)
+}
+
+func (r *RuntimeGatewayRouter) ActivatePrepared(
+	ctx context.Context,
+	authorization biz.ExecutionPlan,
+	execution biz.ExecutionPlan,
+) error {
+	gateway, err := r.managedGateway(authorization)
+	if err != nil {
+		return err
+	}
+	return gateway.ActivatePrepared(ctx, authorization, execution)
+}
+
+func (r *RuntimeGatewayRouter) CancelPrepared(
+	ctx context.Context,
+	authorization biz.ExecutionPlan,
+	execution biz.ExecutionPlan,
+) error {
+	gateway, err := r.managedGateway(authorization)
+	if err != nil {
+		return err
+	}
+	return gateway.CancelPrepared(ctx, authorization, execution)
+}
+
+func (r *RuntimeGatewayRouter) Retire(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
+	gateway, err := r.managedGateway(plan)
+	if err != nil {
+		return err
+	}
+	return gateway.Retire(ctx, plan)
+}
+
 func (r *RuntimeGatewayRouter) RemoveRuntime(
 	ctx context.Context,
 	plan biz.ExecutionPlan,
@@ -104,6 +162,23 @@ func (r *RuntimeGatewayRouter) lifecycleGateway(
 	return lifecycle, nil
 }
 
+func (r *RuntimeGatewayRouter) managedGateway(
+	plan biz.ExecutionPlan,
+) (biz.ManagedIngressRuntimeGateway, error) {
+	gateway, err := r.gateway(plan)
+	if err != nil {
+		return nil, err
+	}
+	managed, ok := gateway.(biz.ManagedIngressRuntimeGateway)
+	if !ok {
+		return nil, &biz.ExecutionError{
+			Category: biz.FailureUnsupportedTarget,
+			Cause:    ErrRuntimeModeUnavailable,
+		}
+	}
+	return managed, nil
+}
+
 func (r *RuntimeGatewayRouter) gateway(
 	plan biz.ExecutionPlan,
 ) (biz.RuntimeGateway, error) {
@@ -122,3 +197,5 @@ func (r *RuntimeGatewayRouter) gateway(
 	}
 	return gateway, nil
 }
+
+var _ biz.ManagedIngressRuntimeGateway = (*RuntimeGatewayRouter)(nil)
