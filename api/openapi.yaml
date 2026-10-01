@@ -7184,7 +7184,7 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, preparing, deploying, canceling, succeeded, failed, canceled]
+          enum: [queued, preparing, deploying, committing, canceling, succeeded, failed, canceled]
         failure_category:
           type: string
           description: Safe failure category present only when status is failed.

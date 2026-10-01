@@ -5,10 +5,10 @@
 Deployment API 创建身份与目标不可变、执行状态可演进的交付记录，初始状态为 `queued`。Worker 负责消费队列并推进状态：
 
 ```text
-queued → preparing → deploying → succeeded
+queued → preparing → deploying → committing → succeeded
 ```
 
-Deployment Worker 不执行源码构建。Git-to-Deploy 由隔离 Build Worker/BuildKit 构建并推送 digest 镜像，再通过 Artifact 创建不可变 Release 后进入本 Worker。构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段创建或替换目标容器。
+Deployment Worker 不执行源码构建。Git-to-Deploy 由隔离 Build Worker/BuildKit 构建并推送 digest 镜像，再通过 Artifact 创建不可变 Release 后进入本 Worker。构建缓存和不可信 Dockerfile 不进入本进程或生产 Runtime Target。创建 Deployment 前，API 要求 Runtime Target 已成功探测并处于 `ready`。`preparing` 阶段再次解析不可变 Release 和 Runtime Target，构造不含秘密正文的 Runtime Connection；Executor 按连接模式解析所需凭据，Gateway Router 选择已注册的运行时适配器，然后检查 digest 镜像：本地存在时直接复用内容寻址镜像，不存在时携带 Registry 凭据拉取。`deploying` 阶段交付运行资源，`committing` 是可重新领取的提交/收尾阶段；普通 Runtime 部署在该阶段无额外外部动作，managed ingress 将在这里重放精确 Gateway commit、排空和旧 backend 回收。
 
 当前实现 `direct` 和 `agent` 两种 Docker Gateway。direct 模式由 Server 使用目标的 mTLS 配置连接 Docker Engine；agent 模式通过已认证的 Host 出站控制流下发严格命令。Agent Gateway 对 Worker 保持相同的 Prepare、Deploy、Cancel 契约，不改变 Deployment 状态机；内部把 Deploy 拆为候选 stage、Server Mongo fence 验证和 activate。Agent Control Server 启用时，Agent prober 与 Gateway 配套注册；未注册的模式会得到稳定的 `unsupported_target` 失败类别，不会自动改用另一条连接路径。
 
@@ -32,9 +32,9 @@ sequenceDiagram
 
 仓内集成门禁把该 mTLS 边界置于 Worker 与真实 Docker API 之间：受信客户端成功，其他 CA 签发的客户端被拒绝，监听连接被主动丢弃时归类为 `target_unreachable`，恢复后使用新连接再次 Prepare 成功。它验证真实客户端栈与故障收敛，但不替代两台物理主机上的证书轮换和长链路网络测试。
 
-Worker 不再使用“全量 List 后 Update”的领取方式。Repository 的 `ClaimNext` 原子领取 `queued` 任务，或接管租约已过期的 `preparing/deploying` 任务，同时写入 worker ID、租约截止时间和递增版本。Runner 再通过带期望版本的事务更新进入 `preparing`，确保状态审计与状态写入一起提交。后续 `SaveClaimed` 同时校验 owner、租约和期望版本，阻止旧 Worker 覆盖新状态。
+Worker 不再使用“全量 List 后 Update”的领取方式。Repository 的 `ClaimNext` 原子领取 `queued` 任务，或接管租约已过期的 `preparing/deploying/committing` 任务，同时写入 worker ID、租约截止时间和递增版本。Runner 再通过带期望版本的事务更新进入 `preparing`，确保状态审计与状态写入一起提交。后续 `SaveClaimed` 同时校验 owner、租约和期望版本，阻止旧 Worker 覆盖新状态。
 
-Worker 通过 `biz.Executor` 接口调用准备、部署和取消清理。失败时只持久化稳定的 `failure_category`，不保存 Docker 原始错误、Endpoint 或秘密内容。`preparing`、`deploying`、`succeeded`、`failed` 和 `canceled` 均形成以 `system:{worker_id}` 为 Actor 的审计事件。
+Worker 通过 `biz.Executor` 接口调用准备、部署、提交和取消清理。prepare/deploy 的确定性失败只持久化稳定的 `failure_category`，不保存 Docker 原始错误、Endpoint 或秘密内容；commit 的不确定响应不会把已经发生的外部提交改写成失败，而是保留 `committing` 等待同一幂等操作被租约接管重放。`preparing`、`deploying`、`committing`、`succeeded`、`failed` 和 `canceled` 均形成以 `system:{worker_id}` 为 Actor 的审计事件。
 
 Docker 稳定容器名由 Project、Application、Environment 和 Runtime Target 的组合哈希生成；这四个字段共同表示一个“部署槽位”。MongoDB 在创建 Deployment 时为同一槽位原子分配递增的 `cutover_sequence`，它表示不同 Deployment 的先后顺序。候选名和回退名仍包含 Deployment 身份与 lease generation，既保证同一次执行幂等，也避免不同 Deployment 的 generation 都从 1 开始时发生临时名称冲突。容器同时保存 Deployment ID、generation 和 cutover sequence：generation 判断同一 Deployment 的 Worker 尝试是否过期，cutover sequence 判断跨 Deployment 的延迟命令是否已经落后。取消旧操作时会校验完整执行身份，避免删除已由其他执行替换的容器。
 

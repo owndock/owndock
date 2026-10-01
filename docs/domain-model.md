@@ -55,7 +55,7 @@ Agent Enrollment、Agent Identity、Server 端 mTLS/版本/心跳在线基础、
 
 ## 已实现的状态规则
 
-正式 Deployment 固定 Organization、Project、Release、Application、Environment、Runtime Target 和幂等键引用；重试和回滚创建带来源关系的新操作，不修改原记录。重试仅允许来源状态为 `failed`；回滚来源必须已进入终态，目标 Release 必须不同于来源 Release，并且曾在同一 Application、Environment 和 Runtime Target 成功部署。状态允许 `queued`、`preparing`、`deploying`、`canceling`，并最终进入 `succeeded`、`failed` 或 `canceled`。失败记录只公开稳定类别，不持久化底层连接或凭据错误。
+正式 Deployment 固定 Organization、Project、Release、Application、Environment、Runtime Target 和幂等键引用；重试和回滚创建带来源关系的新操作，不修改原记录。重试仅允许来源状态为 `failed`；回滚来源必须已进入终态，目标 Release 必须不同于来源 Release，并且曾在同一 Application、Environment 和 Runtime Target 成功部署。状态允许 `queued`、`preparing`、`deploying`、`committing`、`canceling`，并最终进入 `succeeded`、`failed` 或 `canceled`。`committing` 可在租约失效后重新领取，用于重放已经可能发生的幂等外部提交；失败记录只公开稳定类别，不持久化底层连接或凭据错误。
 
 状态转换必须由领域方法执行，transport 层不得直接修改状态字段。异步 Worker 通过领域 Gateway 调用 Docker，不把 Docker 原始状态或错误直接暴露为 API 模型。
 

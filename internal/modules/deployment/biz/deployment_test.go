@@ -12,7 +12,7 @@ func TestDeploymentLifecycle(t *testing.T) {
 	if err != nil || d.Status != StatusQueued {
 		t.Fatalf("deployment = %+v, err = %v", d, err)
 	}
-	for _, next := range []Status{StatusPreparing, StatusDeploying, StatusSucceeded} {
+	for _, next := range []Status{StatusPreparing, StatusDeploying, StatusCommitting, StatusSucceeded} {
 		if err := d.Transition(next, time.Unix(1, 0)); err != nil {
 			t.Fatalf("transition to %s: %v", next, err)
 		}
@@ -49,7 +49,10 @@ func TestTerminalDeploymentCannotBeCanceled(t *testing.T) {
 	if err := d.Transition(StatusDeploying, time.Unix(2, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Transition(StatusSucceeded, time.Unix(3, 0)); err != nil {
+	if err := d.Transition(StatusCommitting, time.Unix(3, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusSucceeded, time.Unix(4, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Cancel(time.Unix(4, 0)); err != ErrInvalidTransition {
@@ -106,6 +109,9 @@ func TestDeploymentRollbackTargetsNewRelease(t *testing.T) {
 	if err := d.Transition(StatusDeploying, time.Unix(1, 0)); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.Transition(StatusCommitting, time.Unix(1, 0)); err != nil {
+		t.Fatal(err)
+	}
 	if err := d.Transition(StatusSucceeded, time.Unix(1, 0)); err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +143,10 @@ func TestDeploymentDerivedOperationsRequireValidSourceState(t *testing.T) {
 	if err := d.Transition(StatusDeploying, time.Unix(3, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.Transition(StatusSucceeded, time.Unix(4, 0)); err != nil {
+	if err := d.Transition(StatusCommitting, time.Unix(4, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Transition(StatusSucceeded, time.Unix(5, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Rollback("rollback", "rel", "rollback-key", time.Unix(5, 0)); err != ErrRollbackSameRelease {

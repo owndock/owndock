@@ -612,7 +612,8 @@ stateDiagram-v2
     [*] --> queued
     queued --> preparing: worker claim
     preparing --> deploying: prepare ready
-    deploying --> succeeded: executor success
+    deploying --> committing: runtime delivery ready
+    committing --> succeeded: idempotent commit complete
     preparing --> failed: non-retryable error
     deploying --> failed: non-retryable error
     queued --> canceling: cancel request

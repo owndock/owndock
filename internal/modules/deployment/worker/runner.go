@@ -142,6 +142,19 @@ func (r *Runner) RunOnce(ctx context.Context) (runErr error) {
 			}
 			return r.fail(ctx, item, "deploy", err)
 		}
+		item, err = r.advance(ctx, item, biz.StatusCommitting)
+		if err != nil {
+			return err
+		}
+	}
+	if item.Status == biz.StatusCommitting {
+		item, err = r.runStep(ctx, item, r.executor.Commit)
+		if err != nil {
+			// Commit may follow a durable control-plane cutover. Keep the
+			// deployment claimable so another worker can replay the exact
+			// idempotent commit instead of converting ambiguity into failure.
+			return err
+		}
 		if _, err := r.advance(ctx, item, biz.StatusSucceeded); err != nil {
 			return err
 		}
@@ -280,6 +293,8 @@ func auditAction(status biz.Status) string {
 		return biz.AuditActionPreparing
 	case biz.StatusDeploying:
 		return biz.AuditActionDeploying
+	case biz.StatusCommitting:
+		return biz.AuditActionCommitting
 	case biz.StatusSucceeded:
 		return biz.AuditActionSucceeded
 	case biz.StatusCanceled:

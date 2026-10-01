@@ -159,7 +159,8 @@ func (r *MemoryRepository) ClaimNext(ctx context.Context, claim biz.Claim) (biz.
 	for i := range r.items {
 		item := r.items[i]
 		if item.Status != biz.StatusQueued && item.Status != biz.StatusPreparing &&
-			item.Status != biz.StatusDeploying && item.Status != biz.StatusCanceling {
+			item.Status != biz.StatusDeploying && item.Status != biz.StatusCommitting &&
+			item.Status != biz.StatusCanceling {
 			continue
 		}
 		if err := item.Acquire(claim); err != nil {

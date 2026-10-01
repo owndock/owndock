@@ -247,7 +247,10 @@ func TestHasSucceededUsesCompleteDeploymentScope(t *testing.T) {
 	if err := item.Transition(biz.StatusDeploying, time.Unix(3, 0)); err != nil {
 		t.Fatal(err)
 	}
-	if err := item.Transition(biz.StatusSucceeded, time.Unix(4, 0)); err != nil {
+	if err := item.Transition(biz.StatusCommitting, time.Unix(4, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if err := item.Transition(biz.StatusSucceeded, time.Unix(5, 0)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repo.Create(t.Context(), item); err != nil {

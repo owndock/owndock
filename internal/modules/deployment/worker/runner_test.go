@@ -24,6 +24,7 @@ func (failingExecutor) Prepare(context.Context, biz.Deployment) error {
 	return errBuildFailed
 }
 func (failingExecutor) Deploy(context.Context, biz.Deployment) error { return nil }
+func (failingExecutor) Commit(context.Context, biz.Deployment) error { return nil }
 func (failingExecutor) Cancel(context.Context, biz.Deployment) error { return nil }
 
 type slowBuildExecutor struct{ duration time.Duration }
@@ -37,7 +38,23 @@ func (e slowBuildExecutor) Prepare(ctx context.Context, _ biz.Deployment) error 
 	}
 }
 func (slowBuildExecutor) Deploy(context.Context, biz.Deployment) error { return nil }
+func (slowBuildExecutor) Commit(context.Context, biz.Deployment) error { return nil }
 func (slowBuildExecutor) Cancel(context.Context, biz.Deployment) error { return nil }
+
+type retryCommitExecutor struct {
+	commitCalls int
+}
+
+func (*retryCommitExecutor) Prepare(context.Context, biz.Deployment) error { return nil }
+func (*retryCommitExecutor) Deploy(context.Context, biz.Deployment) error  { return nil }
+func (e *retryCommitExecutor) Commit(context.Context, biz.Deployment) error {
+	e.commitCalls++
+	if e.commitCalls == 1 {
+		return errors.New("ambiguous commit response")
+	}
+	return nil
+}
+func (*retryCommitExecutor) Cancel(context.Context, biz.Deployment) error { return nil }
 
 func newTestRunner(t *testing.T, repo biz.Repository, executor biz.Executor, now time.Time) *Runner {
 	t.Helper()
@@ -64,8 +81,40 @@ func TestRunOnceCompletesQueuedDeployment(t *testing.T) {
 	if err != nil || len(items) != 1 || items[0].Status != biz.StatusSucceeded {
 		t.Fatalf("items = %+v, err = %v", items, err)
 	}
-	if items[0].Lease.Owner != "" || items[0].Version != 7 {
+	if items[0].Lease.Owner != "" || items[0].Version != 9 {
 		t.Fatalf("completed deployment metadata = %+v", items[0])
+	}
+}
+
+func TestRunOnceKeepsAmbiguousCommitClaimable(t *testing.T) {
+	repository := data.NewMemoryRepository()
+	item, err := biz.New("app-1", "env-1", "main@abc", "dep-1", time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Create(t.Context(), item); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Unix(10, 0)
+	executor := &retryCommitExecutor{}
+	runner, err := NewRunner(repository, executor, "worker-1", time.Minute, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.RunOnce(t.Context()); err == nil {
+		t.Fatal("first commit unexpectedly succeeded")
+	}
+	items, _ := repository.List(t.Context(), "", "", "")
+	if len(items) != 1 || items[0].Status != biz.StatusCommitting || items[0].Terminal() {
+		t.Fatalf("deployment after ambiguous commit = %+v", items)
+	}
+	now = now.Add(2 * time.Minute)
+	if err := runner.RunOnce(t.Context()); err != nil {
+		t.Fatalf("replayed commit error = %v", err)
+	}
+	items, _ = repository.List(t.Context(), "", "", "")
+	if len(items) != 1 || items[0].Status != biz.StatusSucceeded || executor.commitCalls != 2 {
+		t.Fatalf("deployment after replay = %+v, commit calls = %d", items, executor.commitCalls)
 	}
 }
 
@@ -152,12 +201,13 @@ func TestRunOnceAuditsEveryWorkerStatusTransition(t *testing.T) {
 	if err := runner.RunOnce(t.Context()); err != nil {
 		t.Fatal(err)
 	}
-	if len(audits.events) != 3 {
+	if len(audits.events) != 4 {
 		t.Fatalf("audit events = %+v", audits.events)
 	}
 	want := []string{
 		biz.AuditActionPreparing,
 		biz.AuditActionDeploying,
+		biz.AuditActionCommitting,
 		biz.AuditActionSucceeded,
 	}
 	for index := range want {

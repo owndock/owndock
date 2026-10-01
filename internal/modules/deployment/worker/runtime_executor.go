@@ -66,6 +66,10 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 	return e.execute(ctx, deployment, e.gateway.Deploy)
 }
 
+// Commit is a distinct recoverable worker phase. Runtime-only deployments do
+// not have post-deploy work; managed ingress attaches its coordinator here.
+func (e *RuntimeExecutor) Commit(context.Context, biz.Deployment) error { return nil }
+
 func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment) error {
 	resolver := e.executions.ResolveExecution
 	if cancellationResolver, ok := e.executions.(biz.CancellationExecutionResolver); ok {

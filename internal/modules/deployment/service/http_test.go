@@ -258,7 +258,10 @@ func TestFormalRetryAndRollbackCreateLinkedOperations(t *testing.T) {
 	if err := previous.Transition(biz.StatusDeploying, now.Add(-58*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := previous.Transition(biz.StatusSucceeded, now.Add(-57*time.Minute)); err != nil {
+	if err := previous.Transition(biz.StatusCommitting, now.Add(-57*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := previous.Transition(biz.StatusSucceeded, now.Add(-56*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := repository.Create(t.Context(), previous); err != nil {

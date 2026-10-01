@@ -7,7 +7,8 @@ func TestDeploymentAuditActionsAreStable(t *testing.T) {
 		"create": AuditActionCreate, "automatic": AuditActionAutomatic, "cancel": AuditActionCancel,
 		"retry": AuditActionRetry, "rollback": AuditActionRollback,
 		"preparing": AuditActionPreparing, "deploying": AuditActionDeploying,
-		"succeeded": AuditActionSucceeded, "failed": AuditActionFailed,
+		"committing": AuditActionCommitting,
+		"succeeded":  AuditActionSucceeded, "failed": AuditActionFailed,
 		"canceled": AuditActionCanceled,
 	} {
 		if value == "" || value[:11] != "deployment." {

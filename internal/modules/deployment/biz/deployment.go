@@ -44,13 +44,14 @@ type Operation string
 type TriggerSource string
 
 const (
-	StatusQueued    Status = "queued"
-	StatusPreparing Status = "preparing"
-	StatusDeploying Status = "deploying"
-	StatusSucceeded Status = "succeeded"
-	StatusFailed    Status = "failed"
-	StatusCanceling Status = "canceling"
-	StatusCanceled  Status = "canceled"
+	StatusQueued     Status = "queued"
+	StatusPreparing  Status = "preparing"
+	StatusDeploying  Status = "deploying"
+	StatusCommitting Status = "committing"
+	StatusSucceeded  Status = "succeeded"
+	StatusFailed     Status = "failed"
+	StatusCanceling  Status = "canceling"
+	StatusCanceled   Status = "canceled"
 
 	OperationDeploy   Operation = "deploy"
 	OperationRetry    Operation = "retry"
@@ -224,7 +225,8 @@ func New(applicationID, environmentID, revision, id string, now time.Time) (Depl
 func (d *Deployment) Transition(next Status, now time.Time) error {
 	valid := (d.Status == StatusQueued && (next == StatusPreparing || next == StatusCanceling)) ||
 		(d.Status == StatusPreparing && (next == StatusDeploying || next == StatusFailed || next == StatusCanceling)) ||
-		(d.Status == StatusDeploying && (next == StatusSucceeded || next == StatusFailed || next == StatusCanceling)) ||
+		(d.Status == StatusDeploying && (next == StatusCommitting || next == StatusFailed || next == StatusCanceling)) ||
+		(d.Status == StatusCommitting && next == StatusSucceeded) ||
 		(d.Status == StatusCanceling && next == StatusCanceled)
 	if !valid {
 		return ErrInvalidTransition
@@ -308,7 +310,7 @@ func (d *Deployment) Acquire(claim Claim) error {
 			return ErrNotClaimable
 		}
 		d.UpdatedAt = claim.Now.UTC()
-	case StatusPreparing, StatusDeploying:
+	case StatusPreparing, StatusDeploying, StatusCommitting:
 		if d.Lease.Active(claim.Now) {
 			return ErrNotClaimable
 		}

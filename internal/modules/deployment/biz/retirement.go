@@ -146,7 +146,10 @@ func (r *RuntimeTargetRetirement) RetireScope(
 			continue
 		}
 		pending = true
-		if item.Status == StatusCanceling {
+		// A committing deployment may already have a durable route/control-
+		// plane cutover. Let its idempotent commit finish before lifecycle
+		// cleanup instead of turning an ambiguous commit into cancellation.
+		if item.Status == StatusCanceling || item.Status == StatusCommitting {
 			continue
 		}
 		expectedVersion := item.Version

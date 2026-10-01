@@ -292,7 +292,7 @@ func (r *MongoRepository) ClaimNext(ctx context.Context, claim biz.Claim) (biz.D
 	if err != mongo.ErrNoDocuments {
 		return biz.Deployment{}, false, err
 	}
-	result = r.deployments.FindOneAndUpdate(ctx, append(base, bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: []string{string(biz.StatusPreparing), string(biz.StatusDeploying)}}}}), claimUpdate, options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After))
+	result = r.deployments.FindOneAndUpdate(ctx, append(base, bson.E{Key: "status", Value: bson.D{{Key: "$in", Value: []string{string(biz.StatusPreparing), string(biz.StatusDeploying), string(biz.StatusCommitting)}}}}), claimUpdate, options.FindOneAndUpdate().SetSort(bson.D{{Key: "created_at", Value: 1}}).SetReturnDocument(options.After))
 	if err := result.Decode(&doc); err == mongo.ErrNoDocuments {
 		result = r.deployments.FindOneAndUpdate(
 			ctx,
@@ -378,7 +378,7 @@ func (r *MongoRepository) ValidateFence(
 		{Key: "lease.generation", Value: generation},
 		{Key: "lease.expires_at", Value: bson.D{{Key: "$gt", Value: now.UTC()}}},
 		{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
-			string(biz.StatusPreparing), string(biz.StatusDeploying), string(biz.StatusCanceling),
+			string(biz.StatusPreparing), string(biz.StatusDeploying), string(biz.StatusCommitting), string(biz.StatusCanceling),
 		}}}},
 	}, options.FindOne().SetProjection(bson.D{
 		{Key: "project_id", Value: 1},

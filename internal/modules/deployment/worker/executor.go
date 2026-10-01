@@ -12,4 +12,5 @@ type NoopExecutor struct{}
 
 func (NoopExecutor) Prepare(context.Context, biz.Deployment) error { return nil }
 func (NoopExecutor) Deploy(context.Context, biz.Deployment) error  { return nil }
+func (NoopExecutor) Commit(context.Context, biz.Deployment) error  { return nil }
 func (NoopExecutor) Cancel(context.Context, biz.Deployment) error  { return nil }

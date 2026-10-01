@@ -160,5 +160,6 @@ type RuntimeLifecycleGateway interface {
 type Executor interface {
 	Prepare(context.Context, Deployment) error
 	Deploy(context.Context, Deployment) error
+	Commit(context.Context, Deployment) error
 	Cancel(context.Context, Deployment) error
 }

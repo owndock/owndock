@@ -1063,10 +1063,17 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("save deploying: %v", err)
 	}
-	if err := claimed.Transition(deploymentbiz.StatusSucceeded, claimNow.Add(3*time.Second)); err != nil {
+	if err := claimed.Transition(deploymentbiz.StatusCommitting, claimNow.Add(3*time.Second)); err != nil {
+		t.Fatalf("transition committing: %v", err)
+	}
+	claimed, err = deploymentStore.SaveClaimed(ctx, claimed, claimed.Version, "integration-worker", claimNow.Add(3*time.Second))
+	if err != nil {
+		t.Fatalf("save committing: %v", err)
+	}
+	if err := claimed.Transition(deploymentbiz.StatusSucceeded, claimNow.Add(4*time.Second)); err != nil {
 		t.Fatalf("transition succeeded: %v", err)
 	}
-	completed, err := deploymentStore.SaveClaimed(ctx, claimed, claimed.Version, "integration-worker", claimNow.Add(3*time.Second))
+	completed, err := deploymentStore.SaveClaimed(ctx, claimed, claimed.Version, "integration-worker", claimNow.Add(4*time.Second))
 	if err != nil || completed.Status != deploymentbiz.StatusSucceeded {
 		t.Fatalf("save terminal deployment = %+v, err = %v", completed, err)
 	}
