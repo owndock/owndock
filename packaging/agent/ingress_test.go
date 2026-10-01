@@ -122,6 +122,7 @@ func TestAgentInstallerRestoresIngressSelectionFromValidatedConfig(t *testing.T)
 		`secure_ingress_release()`, `secure_ingress_release "$RELEASES_DIR/$version"`,
 		`chown root:"$AGENT_GROUP"`,
 		`Agent restart failed and the previous Ingress release could not be restored`,
+		`verify TCP ports 80 and 443 are free`,
 	} {
 		if !strings.Contains(script, required) {
 			t.Fatalf("Agent installer is missing recovered Ingress behavior %q", required)

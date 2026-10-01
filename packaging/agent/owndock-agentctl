@@ -457,7 +457,7 @@ enroll_agent() {
         [ -x /usr/bin/docker ] || fail "Docker must be installed at /usr/bin/docker for managed ingress"
         docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required for managed ingress"
         if ! systemctl enable --now "$INGRESS_SERVICE"; then
-            fail "Agent enrollment completed but the managed Ingress Gateway failed to start"
+            fail "Agent enrollment completed but the managed Ingress Gateway failed to start; verify TCP ports 80 and 443 are free and inspect systemctl status owndock-ingress.service"
         fi
     elif ingress_service_active || systemctl is-enabled --quiet "$INGRESS_SERVICE"; then
         if ! systemctl disable --now "$INGRESS_SERVICE"; then

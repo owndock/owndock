@@ -125,14 +125,17 @@ wait_for_version 1.0.0
 [ "$(stat -c %a /opt/owndock-agent/current/owndock-ingress.compose.yaml)" = 640 ] || \
     fail "Ingress Compose file mode is not restricted"
 
-docker run --detach --name "$port_blocker" --publish 80:80/tcp "$fixture_image" >/dev/null
-if systemctl start owndock-ingress.service; then
-    fail "managed Ingress unexpectedly started while TCP port 80 was occupied"
-fi
-systemctl is-active --quiet owndock-ingress.service && \
-    fail "managed Ingress remained active after a public port conflict"
-docker rm -f "$port_blocker" >/dev/null
-systemctl reset-failed owndock-ingress.service
+for public_port in 80 443; do
+    docker run --detach --name "$port_blocker" \
+        --publish "$public_port:80/tcp" "$fixture_image" >/dev/null
+    if systemctl start owndock-ingress.service; then
+        fail "managed Ingress unexpectedly started while TCP port $public_port was occupied"
+    fi
+    systemctl is-active --quiet owndock-ingress.service && \
+        fail "managed Ingress remained active after the TCP port $public_port conflict"
+    docker rm -f "$port_blocker" >/dev/null
+    systemctl reset-failed owndock-ingress.service
+done
 systemctl enable --now owndock-ingress.service
 assert_ingress_active
 printf '%s\n' preserved-ingress-state > /var/lib/owndock-ingress/data/systemd-preserved-state
