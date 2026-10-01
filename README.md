@@ -11,7 +11,7 @@ OwnDock 是面向缺少专职平台团队的中小型公司的自托管应用交
 ## 当前基线
 
 - Go module：`github.com/owndock/owndock`
-- Go：1.26.5（`.go-version`、`go.mod`、CI 和构建镜像保持一致）
+- Go：1.26.6（`.go-version`、`go.mod`、CI 和构建镜像保持一致）
 - Kratos：v2.9.2
 - 依赖组装：composition root 手工组装，不使用 Google Wire
 - 进程：控制面 `owndock`；主机侧 `owndock-agent`；隔离源码执行进程 `owndock-build-worker`；隔离镜像证据进程 `owndock-evidence-worker`；外部调度的一次性 `owndock-vulnerability-db-updater`

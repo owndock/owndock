@@ -49,7 +49,7 @@ workspace=$(mktemp -d /tmp/owndock-agent-systemd.XXXXXX)
 cleanup() {
     systemctl disable --now owndock-agent.service >/dev/null 2>&1 || true
     systemctl disable --now owndock-ingress.service >/dev/null 2>&1 || true
-    docker rm -f "$port_blocker" >/dev/null 2>&1 || true
+    docker rm -f -v "$port_blocker" >/dev/null 2>&1 || true
     if [ -f /etc/owndock/ingress.env ] && \
        [ -f /opt/owndock-agent/current/owndock-ingress.compose.yaml ]; then
         docker compose --project-name "$ingress_project" \
@@ -142,7 +142,7 @@ for public_port in 80 443; do
     fi
     systemctl is-active --quiet owndock-ingress.service && \
         fail "managed Ingress remained active after the TCP port $public_port conflict"
-    docker rm -f "$port_blocker" >/dev/null
+    docker rm -f -v "$port_blocker" >/dev/null
     systemctl reset-failed owndock-ingress.service
 done
 systemctl enable --now owndock-ingress.service

@@ -27,7 +27,7 @@ func TestDeploymentAdmissionFailsClosedWithRealRegistry(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", containerName).Run()
+		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", "--volumes", containerName).Run()
 	})
 	port := strings.TrimSpace(runDockerCommand(t, ctx, "port", containerName, "5000/tcp"))
 	base := "http://" + port

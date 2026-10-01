@@ -109,12 +109,12 @@ func TestBuildKitRootlessMTLSRegistryIntegration(t *testing.T) {
 		"--env", "REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd",
 		"--volume", materials.directory+":/certs:ro", "--volume", authDirectory+":/auth:ro",
 		pinnedRegistryIntegrationImage)
-	t.Cleanup(func() { _ = dockerCommand("rm", "--force", registryName) })
+	t.Cleanup(func() { _ = dockerCommand("rm", "--force", "--volumes", registryName) })
 	runDocker(t, "run", "--detach", "--name", targetName, "--network", uplinkName,
 		"--network-alias", "allowed-egress", "--network-alias", "denied-egress",
 		pinnedBusyBoxIntegrationImage, "sh", "-c",
 		"mkdir -p /www && printf 'approved dependency\\n' > /www/dependency && exec httpd -f -p 8080 -h /www")
-	t.Cleanup(func() { _ = dockerCommand("rm", "--force", targetName) })
+	t.Cleanup(func() { _ = dockerCommand("rm", "--force", "--volumes", targetName) })
 	egressBinary, egressConfig := buildEgressGatewayFixture(t, root)
 	runDocker(t, "run", "--detach", "--name", egressName, "--network", networkName,
 		"--network-alias", "build-egress-gateway", "--read-only", "--cap-drop", "ALL",
@@ -122,7 +122,7 @@ func TestBuildKitRootlessMTLSRegistryIntegration(t *testing.T) {
 		"--volume", egressBinary+":/usr/local/bin/owndock-egress-gateway:ro",
 		"--volume", egressConfig+":/etc/owndock/config.yaml:ro", pinnedBusyBoxIntegrationImage,
 		"/usr/local/bin/owndock-egress-gateway", "-scope", "build", "-conf", "/etc/owndock/config.yaml")
-	t.Cleanup(func() { _ = dockerCommand("rm", "--force", egressName) })
+	t.Cleanup(func() { _ = dockerCommand("rm", "--force", "--volumes", egressName) })
 	runDocker(t, "network", "connect", uplinkName, egressName)
 	waitForBuildEgressGateway(t, egressName)
 	egressProxyURL := "http://" + dockerNetworkAddress(t, egressName, networkName) + ":3128"
@@ -138,11 +138,11 @@ func TestBuildKitRootlessMTLSRegistryIntegration(t *testing.T) {
 		"--volume", materials.directory+":/certs:ro", "--volume", buildKitConfig+":/etc/buildkit/buildkitd.toml:ro",
 		PinnedBuildKitImage, "--config=/etc/buildkit/buildkitd.toml", "--addr=tcp://0.0.0.0:1234",
 		"--tlscacert=/certs/ca.pem", "--tlscert=/certs/buildkit-cert.pem", "--tlskey=/certs/buildkit-key.pem")
-	t.Cleanup(func() { _ = dockerCommand("rm", "--force", buildKitName) })
+	t.Cleanup(func() { _ = dockerCommand("rm", "--force", "--volumes", buildKitName) })
 	runDocker(t, "run", "--detach", "--name", relayName, "--network", uplinkName,
 		"--publish", "127.0.0.1::1234", "--publish", "127.0.0.1::5000", pinnedBusyBoxIntegrationImage,
 		"sh", "-c", "nc -lk -p 1234 -e nc buildkit 1234 & exec nc -lk -p 5000 -e nc registry 5000")
-	t.Cleanup(func() { _ = dockerCommand("rm", "--force", relayName) })
+	t.Cleanup(func() { _ = dockerCommand("rm", "--force", "--volumes", relayName) })
 	runDocker(t, "network", "connect", networkName, relayName)
 	buildKitPort := dockerPort(t, relayName, "1234/tcp")
 	registryPort := dockerPort(t, relayName, "5000/tcp")

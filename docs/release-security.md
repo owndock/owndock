@@ -107,7 +107,7 @@ Sigstore root 会轮换。组织需要定期在联网可信机器通过 TUF 更�
 3. 对发布 Tag 配置创建、更新和删除保护；
 4. 保持 Actions 默认 Token 最小权限，不添加发布私钥 Secret。
 
-工作流依赖均固定：Go `1.26.5`、Cosign `v3.0.6`、Cosign Installer 的不可变 commit SHA。正式版本从已经通过主分支门禁的 commit 创建签名 annotated Tag：
+工作流依赖均固定：Go `1.26.6`、Cosign `v3.0.6`、Cosign Installer 的不可变 commit SHA。正式版本从已经通过主分支门禁的 commit 创建签名 annotated Tag：
 
 ```bash
 git tag -s v0.1.0 -m "OwnDock v0.1.0"

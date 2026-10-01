@@ -36,7 +36,7 @@ Agent 安装包提供 `owndock-agentctl preflight`，生产安装和 enrollment 
 
 | 组件 | 精确基线 | 仓库来源 |
 | --- | --- | --- |
-| Go | 1.26.5 | `go.mod` 与所有构建/发布工作流 |
+| Go | 1.26.6 | `go.mod` 与所有构建/发布工作流 |
 | Kratos | 2.9.2 | `go.mod` |
 | MongoDB | `mongo:8.3.7-noble@sha256:8444a416f2fc991f15064df9f6ea31ee02877607a70fd352ea998e6dbb5714b3` | 社区 Compose、MongoDB 集成门禁 |
 | MongoDB Go Driver | 2.8.0 | `go.mod` |

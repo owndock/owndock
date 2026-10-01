@@ -31,7 +31,7 @@ cleanup() {
 	done
 	for engine in "$engine_a_id" "$engine_b_id"; do
 		if [ -n "$engine" ]; then
-			docker rm -f "$engine" >/dev/null 2>&1 || true
+			docker rm -f -v "$engine" >/dev/null 2>&1 || true
 		fi
 	done
     if [ "${OWNDOCK_KEEP_DUAL_AGENT_FIXTURE:-0}" = 1 ]; then

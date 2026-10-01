@@ -79,7 +79,7 @@ func TestOCIReferrerClientWithRealRegistry(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", name).Run()
+		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", "--volumes", name).Run()
 	})
 	port := strings.TrimSpace(runDockerCommand(t, ctx, "port", name, "5000/tcp"))
 	base := "http://" + port
@@ -222,7 +222,7 @@ func TestCosignSignatureVerificationWithRealRegistry(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", name).Run()
+		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", "--volumes", name).Run()
 	})
 	port := strings.TrimSpace(runDockerCommand(t, ctx, "port", name, "5000/tcp"))
 	base := "http://" + port
@@ -824,7 +824,7 @@ func readVaultTransitPublicKey(t *testing.T, ctx context.Context, client *http.C
 func removeDockerContainer(name string) {
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", name).Run()
+	_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", "--volumes", name).Run()
 }
 
 func extractCosignExecutable(t *testing.T, ctx context.Context) string {
@@ -834,7 +834,7 @@ func extractCosignExecutable(t *testing.T, ctx context.Context) string {
 	}
 	name := fmt.Sprintf("owndock-cosign-extract-%d", time.Now().UnixNano())
 	runDockerCommand(t, ctx, "create", "--name", name, "--entrypoint", "/ko-app/cosign", pinnedCosignImage, "version")
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "--force", name).Run() })
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "--force", "--volumes", name).Run() })
 	path := filepath.Join(t.TempDir(), "cosign")
 	runDockerCommand(t, ctx, "cp", name+":/ko-app/cosign", path)
 	if err := os.Chmod(path, 0o700); err != nil {
@@ -851,7 +851,7 @@ func extractTrivyExecutable(t *testing.T, ctx context.Context) string {
 	name := fmt.Sprintf("owndock-trivy-extract-%d", time.Now().UnixNano())
 	runDockerCommand(t, ctx, "create", "--name", name, "--entrypoint", "/usr/local/bin/trivy",
 		pinnedTrivyImage, "version")
-	t.Cleanup(func() { _ = exec.Command("docker", "rm", "--force", name).Run() })
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "--force", "--volumes", name).Run() })
 	path := filepath.Join(t.TempDir(), "trivy")
 	runDockerCommand(t, ctx, "cp", name+":/usr/local/bin/trivy", path)
 	if err := os.Chmod(path, 0o700); err != nil {
@@ -988,7 +988,7 @@ func TestAuthenticatedSBOMPipelineWithRealRegistry(t *testing.T) {
 	t.Cleanup(func() {
 		cleanupContext, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
-		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", name).Run()
+		_ = exec.CommandContext(cleanupContext, "docker", "rm", "--force", "--volumes", name).Run()
 	})
 	port := strings.TrimSpace(runDockerCommand(t, ctx, "port", name, "5000/tcp"))
 	base := "http://" + port
