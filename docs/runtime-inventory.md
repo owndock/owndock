@@ -20,6 +20,7 @@ Docker Runtime Inventory 是 OwnDock 对纳管 Docker Engine 当前资源的安�
 - 单进程并发上限与多 Server 下同一 Runtime Target 不并发采集；
 - inventory command 对断线、尚未连接和 Registry 背压做有界短重试；
 - 真实 HTTP Agent 流覆盖同进程重连续拉，以及快照丢失后放弃旧 observation、重新完整采集；
+- 两个真实 Agent 进程分别连接两个固定 digest 的隔离 Docker Engine，在各自完成同名容器部署后执行 `prepare → chunk → release`，验证 manifest 有界、资源分块和 Host 专属 Deployment Label 不串线；
 - 只允许 Project、Application、Deployment 三个结构化归属候选 Label；
 - Network 的 IPv4/IPv6、Attachable、Ingress 与 IPAM 安全摘要；
 - Volume 的创建时间以及“引用状态是否可知”，不把未知误写成未使用；
@@ -53,7 +54,7 @@ Docker Runtime Inventory 是 OwnDock 对纳管 Docker Engine 当前资源的安�
 
 尚未形成系统验收证据：
 
-- 两台独立 Agent 主机断线、真实 MongoDB Primary 切换、客户等价资源峰值和 Web E2E；仓库内的 10,000 资源分块、1,202 条 current 分页、4,096 Event 洪峰及恶意字段秘密哨兵门禁已经通过。
+- 两台客户等价 Linux Agent 主机断线、持续 Event 网络故障、真实 MongoDB Primary 切换、客户等价资源峰值和 Web E2E；仓库内的双 Agent/双隔离 Engine 快照归属、10,000 资源分块、1,202 条 current 分页、4,096 Event 洪峰及恶意字段秘密哨兵门禁已经通过。
 
 因此当前代码已具备受权限保护的资源浏览 API；周期采集仍默认关闭，系统级容量、安全与故障验收完成前仍按 pre-release 能力管理。
 
@@ -90,6 +91,34 @@ direct 模式在每次操作开始时才把 `secret://alias` 解析成 `OWNDOCK_
 默认配置是 2 个全量采集并发任务、每 5 分钟成功同步一次、失败 30 秒后重试，单次操作最多 1 分钟，租约 2 分钟。Event 使用独立的 4 个并发任务，每次最多等待 Docker 2 秒，成功后最早 1 秒再次轮询；这样短时订阅不会占用全量采集的 Worker。`max_chunk_bytes` 同时兼容 direct 和 Agent，因此当前配置上限为 48 KiB。未部署 Agent Server 时，Agent 类型目标会安全失败并进入重试，不会退回 direct 连接。两组 Worker 分别以 `runtime_inventory` 和 `runtime_inventory_events` 暴露固定低基数轮询指标；领取目标后创建独立操作 Span，详见 [Worker 可观测性与告警](worker-observability.md)。
 
 Agent 不主动把整机快照推到 Server，也不把大结果写入命令缓存。Server 先要求 Agent prepare，得到资源数、分块数和 10 分钟相对保留时间，再逐块 pull；每块成功落库后才请求下一块。Agent 与 Server 的通用 completed-result cache 都跳过三类 inventory 命令。单条命令在 `command_timeout` 内对断线、未连接和背压做短间隔重试：进程内重连会用相同 Target/observation/index 继续拉取；Agent 重启后新 Executor 没有内存快照，会返回 `inventory_snapshot_missing`，当前 observation 失败关闭，下一次任务使用新 ID 重新完整采集。MongoDB 中未完成批次两小时后回收。
+
+仓内真实双 Agent 门禁在同一个控制入口并行验证两条快照链路。每个 Agent 只能使用自己的 Unix Socket，Server 对返回 chunk 中的稳定容器名和 Deployment Label 做 Host 专属断言；即使两个 Engine 内容器同名，Host A 的结果也不能携带 Host B 的归属。该门禁还验证 Docker 历史 Event 返回 EOF 后快照读取立即完成，不依赖消息通道被关闭：
+
+```mermaid
+sequenceDiagram
+    participant S as Control Fixture
+    participant A as Agent A
+    participant EA as Engine A
+    participant B as Agent B
+    participant EB as Engine B
+
+    par Host A observation
+        S->>A: inventory.prepare(observation A)
+        A->>EA: List + finite Event window
+        A-->>S: manifest A
+        S->>A: inventory.chunk(0)
+        A-->>S: resources + deployment Host A
+        S->>A: inventory.release
+    and Host B observation
+        S->>B: inventory.prepare(observation B)
+        B->>EB: List + finite Event window
+        B-->>S: manifest B
+        S->>B: inventory.chunk(0)
+        B-->>S: resources + deployment Host B
+        S->>B: inventory.release
+    end
+    Note over S,EB: 同名容器允许存在，跨 Host Deployment Label 必须失败
+```
 
 共享 transport 还限制一次快照最多 100,000 个资源、10,000 个 chunk 和 64 MiB 编码资源数据；Agent 为目标客户主机采用更严格的单份 32 MiB 内存上限。任一上限失败都不会切换当前视图。
 

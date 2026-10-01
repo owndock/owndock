@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复，以及双 Host 两阶段同名容器部署不串线，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -122,7 +122,7 @@ runtime:
 - 新 CSR、私钥和 rotation ID 会先保存到 bundle 旁的 `0600` pending 文件。请求成功但响应丢失或 Agent 重启时会复用同一请求；新证书安装成功后才删除 pending 文件。Server 最多允许旧证书继续建立普通连接 10 分钟，并在新证书首次完成 hello 后立即撤销旧证书的过渡资格。超过 10 分钟后，仍有效的旧证书只能凭原 rotation ID/CSR hash 取回已保存响应，不能建立控制流或发起新轮换。
 - 外部进程门禁会让第一次轮换响应在 Server 收到请求后丢失，停止并重启真实 Agent，再验证完全相同的 rotation ID/CSR、原子替换后的新证书以及后续 hello 的新证书序列号。启动恢复发生在控制流启动之前，因此轮换完成时会立即清理空闲 TLS 连接，避免后续 hello 复用仍携带旧证书的轮换连接；已有控制流场景仍会取消当前流，并在结束后再次清理连接。
 - 双 Agent 外部进程门禁为两个不同 Managed Host 使用同一控制面 CA 和同一个 HTTPS 入口，同时保留独立证书、配置和状态目录。两个 Agent 先分别完成 hello；随后共享控制面只保留 Host B 的会话，验证 Host A 的会话可以独立收敛并进入有界重试，而 Host B 正常重连；最后 Host A 再通过同一入口恢复。每次 hello 都校验固定 SPIFFE URI 和 `managed_host_id`，用于发现跨 Host 身份、连接或会话状态串线。
-- 双 Engine 门禁使用固定 `docker:29.6.1-dind` OCI digest 启动两个独立 Docker 守护进程，并通过两个本地 Unix Socket 代理分别交给 Agent executor。两个 Engine 使用相同稳定容器名仍各自完成部署且不串 Host；停止 Host A 时 A 返回不可达而 Host B 保持 ready，A 重启后恢复。门禁还在 A 已 stage、尚未 activate 时停止 Engine，要求失败安全归类；恢复后重跑完整步骤完成更高 cutover sequence，并拒绝随后到达的旧 activate，Host B 全程保持原部署。
+- 双 Engine 门禁使用固定 `docker:29.6.1-dind` OCI digest 启动两个独立 Docker 守护进程，并通过两个本地 Unix Socket 代理分别交给 Agent executor。两个 Engine 使用相同稳定容器名仍各自完成部署且不串 Host；停止 Host A 时 A 返回不可达而 Host B 保持 ready，A 重启后恢复。部署完成后两个真实 Agent 各自执行 Inventory `prepare → chunk → release`，manifest 必须有界，chunk 必须包含本 Host 的稳定容器和对应 Deployment Label，不能读取另一 Host 的归属。门禁还在 A 已 stage、尚未 activate 时停止 Engine，要求失败安全归类；恢复后重跑完整步骤完成更高 cutover sequence，并拒绝随后到达的旧 activate，Host B 全程保持原部署。
 
 运行：
 
@@ -222,7 +222,7 @@ sequenceDiagram
 
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)，产品版本、控制协议和相邻版本升级规则见[Agent 与 Server 版本兼容策略](agent-compatibility.md)。
 
-双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；这也补出了并修复了无端口 Runtime Spec 在 canonical wire 往返后被误判非法的问题。独立执行器门禁继续验证 activate 中断恢复和网络层延迟旧命令；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
+双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误，以及 Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待的问题。独立执行器门禁继续验证 activate 中断恢复和网络层延迟旧命令；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
 
 ```mermaid
 sequenceDiagram
@@ -263,6 +263,16 @@ sequenceDiagram
         DB-->>B: running / deployment Host B
     end
     Note over DA,DB: Same stable name; isolated Deployment identities
+    par Inventory Host A
+        C->>A: prepare → chunk(0) → release
+        A->>DA: List resources + bounded Event window
+        A-->>C: Host A manifest and owned container
+    and Inventory Host B
+        C->>B: prepare → chunk(0) → release
+        B->>DB: List resources + bounded Event window
+        B-->>C: Host B manifest and owned container
+    end
+    Note over C,DB: Each chunk must carry only its Host-specific Deployment label
 ```
 
 ## 当前不能做什么
@@ -270,10 +280,10 @@ sequenceDiagram
 - 首次私钥生成、enrollment 兑换和配置/身份材料安全落盘已经自动化，但仍需真实发行网络、私有 CA 和进程崩溃点系统验收；
 - 版本化包、systemd 安装和发行签名流水线已经实现；CI 已加入真实 Agent 进程的 mTLS hello/heartbeat/断线重连，以及真实 systemd 的启动、相邻测试版本升级、启动崩溃恢复、状态保留和回滚门禁，但 Linux 首次执行证据、正式相邻 Tag、真实 Agent 命令升级中断和多主机灰度/回滚验收仍未完成；
 - 自动证书轮换已经有代码级竞态和响应丢失恢复测试，但尚未完成真实双主机、跨控制面实例、进程崩溃点和升级/回滚系统验收；
-- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个真实 Agent 进程与两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开、进程不停机恢复和双 Host 两阶段部署，执行器门禁覆盖切换中断与延迟旧命令；仍需两台客户等价主机上的网络分区、升级回滚、入口流量与控制面多实例验收；
+- Runtime Target、Application 和 Environment 的持久退役编排已经落地；两个真实 Agent 进程与两个隔离 Docker Engine 已覆盖双目标不串线、单 Engine 断开、进程不停机恢复、双 Host 两阶段部署和各自 Inventory 快照归属，执行器门禁覆盖切换中断与延迟旧命令；仍需两台客户等价主机上的网络分区、升级回滚、入口流量与控制面多实例验收；
 - 容器和主机终端已支持 Agent 模式，但仍需真实远程 Linux、两主机和浏览器故障矩阵验收；
 - 不能依靠当前进程内连接 Registry 实现多 Server 实例的跨实例命令路由。
-- Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标和两个 Runner 竞争；Project/Host 权限查询 API 已实现，真实双主机断线/洪峰系统验收尚未完成。
+- Runtime Inventory 协议、执行器和默认关闭的 Mongo 租约全量/Event 任务已存在，并已覆盖重连续拉、重启等价快照丢失、真实队列背压、snapshot window、有界持续 Event、Docker 时间游标、两个 Runner 竞争，以及双 Agent/双隔离 Engine 的 `prepare → chunk → release` 与资源归属隔离；Project/Host 权限查询 API 已实现，客户等价双主机断线/Event 洪峰系统验收尚未完成。
 
 Agent Control Server 启用时，Server 会同时注册 Agent probe 和部署路径；Host 在线且本机 Docker probe 成功后，Agent Runtime Target 可以进入 `ready`。多主机系统验收完成前，文档和 UI 仍需明确标注当前支持范围。
 

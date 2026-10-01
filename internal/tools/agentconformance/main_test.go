@@ -11,6 +11,7 @@ import (
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeinventory"
 )
 
 func TestMaterialsAndConfigCreateStrictRunnableInputs(t *testing.T) {
@@ -180,11 +181,67 @@ func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
 			t.Fatalf("%s result was not accepted", kind)
 		}
 	}
-	capabilities := conformanceDeploymentCapabilities()
+	capabilities := conformanceCapabilities(true, false)
 	if len(capabilities) != 5 ||
 		capabilities[0] != agentprotocol.CapabilityRuntimeProbe ||
 		capabilities[4] != agentprotocol.CapabilityDeploymentCancel {
 		t.Fatalf("deployment capabilities = %v", capabilities)
+	}
+}
+
+func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
+	handler := conformanceHandler{
+		identity:              fixtureIdentity{hostID: "host-a"},
+		commandSuffix:         "dual-runtime",
+		runtimeDeadline:       time.Now().Add(time.Minute).UTC(),
+		deploymentContainer:   "owndock-conformance",
+		inventoryCapabilities: true,
+	}
+	for _, kind := range []agentprotocol.AgentCommandKind{
+		agentprotocol.AgentCommandInventoryPrepare,
+		agentprotocol.AgentCommandInventoryChunk,
+		agentprotocol.AgentCommandInventoryRelease,
+	} {
+		handler.inventoryCommand = string(kind)
+		command, err := handler.conformanceCommand("ready")
+		if err != nil {
+			t.Fatalf("%s command: %v", kind, err)
+		}
+		if err := command.Validate(); err != nil {
+			t.Fatalf("%s validation: %v", kind, err)
+		}
+		if command.Inventory.RuntimeTargetID != "conformance-target-host-a" ||
+			command.Inventory.ObservationID != "conformance-observation-host-a" {
+			t.Fatalf("%s inventory identity = %+v", kind, command.Inventory)
+		}
+	}
+	capabilities := conformanceCapabilities(true, true)
+	if len(capabilities) != 9 ||
+		capabilities[5] != agentprotocol.CapabilityInventoryPrepare ||
+		capabilities[8] != agentprotocol.CapabilityInventoryEvents {
+		t.Fatalf("combined capabilities = %v", capabilities)
+	}
+
+	handler.inventoryCommand = string(agentprotocol.AgentCommandInventoryChunk)
+	result := agentprotocol.AgentCommandResult{
+		Inventory: &agentprotocol.RuntimeInventoryResult{
+			Chunk: &runtimeinventory.Chunk{Resources: []runtimeinventory.Resource{{
+				Kind: runtimeinventory.KindContainer,
+				Name: "owndock-conformance",
+				Labels: map[string]string{
+					"net.owndock.deployment_id": "conformance-deployment-host-a",
+				},
+			}}},
+		},
+	}
+	details, err := handler.conformanceInventoryDetails(result)
+	if err != nil || details != "inventory_resources=1\ninventory_deployment_id=conformance-deployment-host-a\n" {
+		t.Fatalf("inventory details = %q, %v", details, err)
+	}
+	result.Inventory.Chunk.Resources[0].Labels["net.owndock.deployment_id"] =
+		"conformance-deployment-host-b"
+	if _, err := handler.conformanceInventoryDetails(result); err == nil {
+		t.Fatal("cross-Host inventory ownership unexpectedly passed")
 	}
 }
 

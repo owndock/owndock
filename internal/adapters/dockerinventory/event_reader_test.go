@@ -21,6 +21,22 @@ type eventEngineStub struct {
 	err      error
 }
 
+type eofWithoutMessageCloseEngineStub struct {
+	message events.Message
+}
+
+func (s *eofWithoutMessageCloseEngineStub) Events(
+	_ context.Context,
+	_ client.EventsListOptions,
+) client.EventsResult {
+	messages := make(chan events.Message, 1)
+	messages <- s.message
+	errorsChannel := make(chan error, 1)
+	errorsChannel <- io.EOF
+	close(errorsChannel)
+	return client.EventsResult{Messages: messages, Err: errorsChannel}
+}
+
 func (s *eventEngineStub) Events(
 	_ context.Context,
 	options client.EventsListOptions,
@@ -102,6 +118,23 @@ func TestEventReaderBoundsAndFailsClosedOnStreamError(t *testing.T) {
 		context.Background(), since, since.Add(time.Second), 1,
 	); err == nil {
 		t.Fatal("event stream error = nil")
+	}
+}
+
+func TestEventReaderTreatsEOFAsCompletionWhenMobyLeavesMessagesOpen(t *testing.T) {
+	since := time.Unix(100, 0).UTC()
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	batch, err := NewEventReader(&eofWithoutMessageCloseEngineStub{
+		message: events.Message{
+			Type: events.ContainerEventType, Action: events.ActionStart,
+			Actor:    events.Actor{ID: "container-1"},
+			TimeNano: since.Add(time.Millisecond).UnixNano(),
+		},
+	}).ReadWindow(ctx, since, since.Add(time.Second), 10)
+	if err != nil || batch.Truncated || len(batch.Events) != 1 ||
+		batch.Events[0].RuntimeID != "container-1" {
+		t.Fatalf("EOF-completed event batch = %#v, %v", batch, err)
 	}
 }
 

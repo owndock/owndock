@@ -51,6 +51,7 @@ case "$runtime_mode" in
 		reconnect_command_suffix=
 		outage_command_suffix=
 		deployment_capabilities=false
+		inventory_capabilities=false
 		;;
 	1)
 		initial_runtime_probe=ready
@@ -59,14 +60,16 @@ case "$runtime_mode" in
 		reconnect_command_suffix='host-b-reconnect'
 		outage_command_suffix='host-a-outage'
 		deployment_capabilities=true
+		inventory_capabilities=true
 		;;
 	*) fail "OWNDOCK_DUAL_AGENT_RUNTIME must be 0 or 1" ;;
 esac
 
 wait_for_file() {
     path=$1
+	limit=${2:-150}
     attempt=0
-    while [ "$attempt" -lt 150 ]; do
+    while [ "$attempt" -lt "$limit" ]; do
         [ -s "$path" ] && return
         attempt=$((attempt + 1))
         sleep 0.1
@@ -107,12 +110,13 @@ run_dual_deployment_phase() {
 		--ready-file "$phase_ready" --result-a "$phase_result_a" \
 		--result-b "$phase_result_b" --runtime-probe ready \
 		--deployment-capabilities=true --deployment-command "$deployment_kind" \
+		--inventory-capabilities=true \
 		--deployment-container "$deployment_container" --command-suffix dual-runtime \
-		--timeout 2m >"$workspace/deployment-$deployment_operation-server.log" 2>&1 &
+		--timeout 4m >"$workspace/deployment-$deployment_operation-server.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$phase_ready"
-	wait_for_file "$phase_result_a"
-	wait_for_file "$phase_result_b"
+	wait_for_file "$phase_result_a" 2100
+	wait_for_file "$phase_result_b" 2100
 	wait "$server_pid" || fail "dual Agent $deployment_kind phase failed"
 	server_pid=
 	for host in a b; do
@@ -126,6 +130,46 @@ run_dual_deployment_phase() {
 			"$phase_result" || fail "deployment $deployment_operation reached the wrong Host"
 		grep -qx 'command_status=deployment_succeeded' "$phase_result" || \
 			fail "deployment $deployment_operation did not succeed on Host $host"
+	done
+}
+
+run_dual_inventory_phase() {
+	inventory_kind=$1
+	inventory_operation=${inventory_kind#runtime.inventory.}
+	phase_ready=$workspace/inventory-$inventory_operation-ready
+	phase_result_a=$workspace/inventory-$inventory_operation-result-a
+	phase_result_b=$workspace/inventory-$inventory_operation-result-b
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$phase_result_a" \
+		--result-b "$phase_result_b" --runtime-probe ready \
+		--deployment-capabilities=true --inventory-capabilities=true \
+		--inventory-command "$inventory_kind" --deployment-container "$deployment_container" \
+		--command-suffix dual-runtime --timeout 4m \
+		>"$workspace/inventory-$inventory_operation-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	wait_for_file "$phase_result_a" 2100
+	wait_for_file "$phase_result_b" 2100
+	wait "$server_pid" || fail "dual Agent $inventory_kind phase failed"
+	server_pid=
+	for host in a b; do
+		case "$host" in
+			a) phase_result=$phase_result_a ;;
+			b) phase_result=$phase_result_b ;;
+		esac
+		grep -qx "managed_host_id=conformance-host-$host" "$phase_result" || \
+			fail "inventory $inventory_operation crossed Host $host identity"
+		grep -qx "command_id=conformance-inventory-$inventory_operation-conformance-host-$host-dual-runtime" \
+			"$phase_result" || fail "inventory $inventory_operation reached the wrong Host"
+		grep -qx 'command_status=inventory_succeeded' "$phase_result" || \
+			fail "inventory $inventory_operation did not succeed on Host $host"
+		if [ "$inventory_operation" = prepare ]; then
+			grep -qx 'inventory_expected_chunks=1' "$phase_result" || \
+				fail "inventory prepare was not a one-chunk bounded snapshot on Host $host"
+		elif [ "$inventory_operation" = chunk ]; then
+			grep -qx "inventory_deployment_id=conformance-deployment-conformance-host-$host" \
+				"$phase_result" || fail "inventory chunk crossed Host $host ownership"
+		fi
 	done
 }
 
@@ -169,6 +213,7 @@ result_b_one=$workspace/result-b-one
 	--runtime-probe "$initial_runtime_probe" \
 	--command-suffix "$initial_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
+	--inventory-capabilities="$inventory_capabilities" \
 	>"$workspace/server-one.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_one"
@@ -177,10 +222,12 @@ listen=${endpoint#https://}
 listen=${listen%/api/v1/agent/connect}
 "$tool" config --output "$materials_a" --endpoint "$endpoint" \
 	--host-id conformance-host-a --docker-socket "$docker_socket_a" \
-	--deployment-capabilities="$deployment_capabilities"
+	--deployment-capabilities="$deployment_capabilities" \
+	--inventory-capabilities="$inventory_capabilities"
 "$tool" config --output "$materials_b" --endpoint "$endpoint" \
 	--host-id conformance-host-b --docker-socket "$docker_socket_b" \
-	--deployment-capabilities="$deployment_capabilities"
+	--deployment-capabilities="$deployment_capabilities" \
+	--inventory-capabilities="$inventory_capabilities"
 
 "$agent" -conf "$materials_a/agent.yaml" >"$workspace/agent-a.log" 2>&1 &
 agent_a_pid=$!
@@ -211,6 +258,7 @@ result_b_two=$workspace/result-b-two
 	--runtime-probe "$initial_runtime_probe" \
 	--command-suffix "$reconnect_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
+	--inventory-capabilities="$inventory_capabilities" \
     >"$workspace/server-two.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_two"
@@ -238,10 +286,12 @@ result_a_three=$workspace/result-a-three
 	--runtime-probe "$third_runtime_probe" \
 	--command-suffix "$outage_command_suffix" \
 	--deployment-capabilities="$deployment_capabilities" \
+	--inventory-capabilities="$inventory_capabilities" \
+	--timeout 45s \
     >"$workspace/server-three.log" 2>&1 &
 server_pid=$!
 wait_for_file "$ready_three"
-wait_for_file "$result_a_three"
+wait_for_file "$result_a_three" 450
 wait "$server_pid" || fail "Host A did not recover through the shared endpoint"
 server_pid=
 grep -qx 'managed_host_id=conformance-host-a' "$result_a_three" || fail "Host A recovered as the wrong Host"
@@ -271,10 +321,12 @@ if [ "$runtime_mode" = 1 ]; then
 		--result-b "$workspace/unused-b-four" --only-host conformance-host-a \
 		--runtime-probe ready --command-suffix host-a-recovery \
 		--deployment-capabilities=true \
+		--inventory-capabilities=true \
+		--timeout 45s \
 		>"$workspace/server-four.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$ready_four"
-	wait_for_file "$result_a_four"
+	wait_for_file "$result_a_four" 450
 	wait "$server_pid" || fail "Host A runtime did not recover after Engine restart"
 	server_pid=
 	grep -qx 'managed_host_id=conformance-host-a' "$result_a_four" || \
@@ -298,6 +350,9 @@ if [ "$runtime_mode" = 1 ]; then
 		fail "Host A stable deployment identity is invalid: $state_a"
 	[ "$state_b" = 'true conformance-deployment-conformance-host-b' ] || \
 		fail "Host B stable deployment identity is invalid: $state_b"
+	run_dual_inventory_phase runtime.inventory.prepare
+	run_dual_inventory_phase runtime.inventory.chunk
+	run_dual_inventory_phase runtime.inventory.release
 fi
 
 kill -TERM "$agent_a_pid"
@@ -308,7 +363,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, outage and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, inventory, outage and recovery passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

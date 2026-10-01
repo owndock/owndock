@@ -28,6 +28,7 @@ import (
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
+	"github.com/owndock/owndock/internal/shared/runtimeinventory"
 	"github.com/owndock/owndock/internal/shared/runtimespec"
 )
 
@@ -104,10 +105,27 @@ type agentCommandResult struct {
 	Status       agentprotocol.AgentCommandStatus `json:"status"`
 	ErrorCode    string                           `json:"error_code,omitempty"`
 	RuntimeProbe *agentRuntimeProbeResult         `json:"runtime_probe,omitempty"`
+	Inventory    *agentRuntimeInventoryResult     `json:"runtime_inventory,omitempty"`
 }
 
 type agentRuntimeProbeResult struct {
 	Status agentprotocol.RuntimeProbeStatus `json:"status"`
+}
+
+type agentRuntimeInventoryResult struct {
+	Manifest *agentRuntimeInventoryManifest `json:"manifest,omitempty"`
+	Chunk    *runtimeinventory.Chunk        `json:"chunk,omitempty"`
+	Events   *runtimeinventory.EventBatch   `json:"events,omitempty"`
+}
+
+type agentRuntimeInventoryManifest struct {
+	ObservationID     string                   `json:"observation_id"`
+	SchemaVersion     int                      `json:"schema_version"`
+	ExpectedChunks    int                      `json:"expected_chunks"`
+	ExpectedResources int                      `json:"expected_resources"`
+	RetentionSeconds  int                      `json:"retention_seconds"`
+	Events            []runtimeinventory.Event `json:"events,omitempty"`
+	EventsTruncated   bool                     `json:"events_truncated,omitempty"`
 }
 
 type serverFrame struct {
@@ -261,12 +279,13 @@ func initializeMaterialDirectory(paths materialPaths) error {
 func runConfig(arguments []string) error {
 	flags := flag.NewFlagSet("config", flag.ContinueOnError)
 	var output, endpoint, dockerSocket, fixtureHostID, fixtureIdentityID, fixtureInstanceID string
-	var enableRotation, deploymentCapabilities bool
+	var enableRotation, deploymentCapabilities, inventoryCapabilities bool
 	flags.StringVar(&output, "output", "", "absolute material directory")
 	flags.StringVar(&endpoint, "endpoint", "", "Agent control HTTPS endpoint")
 	flags.StringVar(&dockerSocket, "docker-socket", "/var/run/docker.sock", "absolute Docker Engine Unix socket")
 	flags.BoolVar(&enableRotation, "enable-rotation", false, "enable immediate conformance rotation")
 	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "enable deployment command capabilities")
+	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "enable runtime inventory capabilities")
 	flags.StringVar(&fixtureHostID, "host-id", hostID, "fixture managed host ID")
 	flags.StringVar(&fixtureIdentityID, "identity-id", identityID, "fixture Agent identity ID")
 	flags.StringVar(&fixtureInstanceID, "instance-id", instanceID, "fixture Agent instance ID")
@@ -315,10 +334,10 @@ func runConfig(arguments []string) error {
 	config.Control.ReconnectMinimum = "100ms"
 	config.Control.ReconnectMaximum = "500ms"
 	config.Control.ReconnectStableAfter = "1s"
-	config.Control.Capabilities = []string{agentprotocol.CapabilityRuntimeProbe}
-	if deploymentCapabilities {
-		config.Control.Capabilities = conformanceDeploymentCapabilities()
-	}
+	config.Control.Capabilities = conformanceCapabilities(
+		deploymentCapabilities,
+		inventoryCapabilities,
+	)
 	config.Runtime.DockerSocket = dockerSocket
 	config.Runtime.StateDirectory = paths.state
 	config.CertificateRotation.Enabled = enableRotation
@@ -441,8 +460,8 @@ func runDualServer(arguments []string) error {
 	flags := flag.NewFlagSet("serve-dual", flag.ContinueOnError)
 	var listen, materialDirectory, readyFile, resultA, resultB string
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
-	var commandSuffix, deploymentCommand, deploymentContainer string
-	var deploymentCapabilities bool
+	var commandSuffix, deploymentCommand, deploymentContainer, inventoryCommand string
+	var deploymentCapabilities, inventoryCapabilities bool
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
 	flags.StringVar(&materialDirectory, "materials", "", "authority material directory")
@@ -459,13 +478,18 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&deploymentCommand, "deployment-command", "", "optional deployment command kind")
 	flags.StringVar(&deploymentContainer, "deployment-container", "owndock-conformance", "stable deployment container name")
 	flags.BoolVar(&deploymentCapabilities, "deployment-capabilities", false, "expect deployment command capabilities")
+	flags.StringVar(&inventoryCommand, "inventory-command", "", "optional runtime inventory command kind")
+	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
 		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
 		runtimeProbe != "expired" && runtimeProbe != "ready" && runtimeProbe != "unreachable" ||
 		commandSuffix != "" && !validCommandSuffix(commandSuffix) ||
 		!validConformanceDeploymentCommand(deploymentCommand) ||
-		deploymentCommand != "" && !deploymentCapabilities {
+		deploymentCommand != "" && !deploymentCapabilities ||
+		!validConformanceInventoryCommand(inventoryCommand) ||
+		inventoryCommand != "" && !inventoryCapabilities ||
+		deploymentCommand != "" && inventoryCommand != "" {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	if !strings.HasPrefix(listen, "127.0.0.1:") {
@@ -524,7 +548,7 @@ func runDualServer(arguments []string) error {
 	}
 	completed := make(chan error, 1)
 	runtimeDeadline := time.Time{}
-	if runtimeProbe != "expired" || deploymentCommand != "" {
+	if runtimeProbe != "expired" || deploymentCommand != "" || inventoryCommand != "" {
 		runtimeDeadline = time.Now().Add(timeout + 30*time.Second).UTC()
 	}
 	handler := &dualConformanceHandler{
@@ -536,6 +560,8 @@ func runDualServer(arguments []string) error {
 		deploymentCommand:      deploymentCommand,
 		deploymentContainer:    deploymentContainer,
 		deploymentCapabilities: deploymentCapabilities,
+		inventoryCommand:       inventoryCommand,
+		inventoryCapabilities:  inventoryCapabilities,
 		states:                 make(map[string]bool), completed: completed,
 	}
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
@@ -575,6 +601,8 @@ type dualConformanceHandler struct {
 	deploymentCommand      string
 	deploymentContainer    string
 	deploymentCapabilities bool
+	inventoryCommand       string
+	inventoryCapabilities  bool
 	states                 map[string]bool
 	completed              chan<- error
 	mu                     sync.Mutex
@@ -594,24 +622,6 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		}
 		return
 	}
-	handler.mu.Lock()
-	if handler.states[host] {
-		handler.mu.Unlock()
-		child := &conformanceHandler{
-			resultFile: handler.results[host], identity: identity,
-			runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
-			runtimeDeadline:        handler.runtimeDeadline,
-			deploymentCommand:      handler.deploymentCommand,
-			deploymentContainer:    handler.deploymentContainer,
-			deploymentCapabilities: handler.deploymentCapabilities,
-		}
-		if err := child.handle(writer, request); err != nil {
-			handler.once.Do(func() { handler.completed <- err })
-		}
-		return
-	}
-	handler.states[host] = true
-	handler.mu.Unlock()
 	child := &conformanceHandler{
 		resultFile: handler.results[host], identity: identity,
 		runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
@@ -619,16 +629,16 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		deploymentCommand:      handler.deploymentCommand,
 		deploymentContainer:    handler.deploymentContainer,
 		deploymentCapabilities: handler.deploymentCapabilities,
+		inventoryCommand:       handler.inventoryCommand,
+		inventoryCapabilities:  handler.inventoryCapabilities,
 	}
 	err := child.handle(writer, request)
 	if err != nil {
-		handler.mu.Lock()
-		delete(handler.states, host)
-		handler.mu.Unlock()
 		handler.once.Do(func() { handler.completed <- err })
 		return
 	}
 	handler.mu.Lock()
+	handler.states[host] = true
 	required := len(handler.identities)
 	if handler.onlyHost != "" {
 		required = 1
@@ -1059,6 +1069,8 @@ type conformanceHandler struct {
 	deploymentCommand      string
 	deploymentContainer    string
 	deploymentCapabilities bool
+	inventoryCommand       string
+	inventoryCapabilities  bool
 	once                   sync.Once
 }
 
@@ -1105,10 +1117,10 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		return errors.New("Agent hello shape is invalid")
 	}
 	hello := helloFrame.Hello
-	expectedCapabilities := []string{agentprotocol.CapabilityRuntimeProbe}
-	if h.deploymentCapabilities {
-		expectedCapabilities = conformanceDeploymentCapabilities()
-	}
+	expectedCapabilities := conformanceCapabilities(
+		h.deploymentCapabilities,
+		h.inventoryCapabilities,
+	)
 	if hello.OrganizationID != h.identity.organizationID || hello.ManagedHostID != h.identity.hostID ||
 		hello.AgentIdentityID != h.identity.identityID || hello.InstanceID != h.identity.instanceID ||
 		hello.BootID != "conformance-boot" || hello.AgentVersion == "" ||
@@ -1154,6 +1166,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 	lastAgentSequence := helloFrame.Sequence
 	heartbeatReceived := false
 	commandResultReceived := false
+	var validatedResult agentprotocol.AgentCommandResult
 	for !heartbeatReceived || !commandResultReceived {
 		if !scanner.Scan() {
 			return errors.New("Agent heartbeat or command result is missing")
@@ -1194,10 +1207,29 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 					Status: frame.CommandResult.RuntimeProbe.Status,
 				}
 			}
+			if frame.CommandResult.Inventory != nil {
+				inventory := frame.CommandResult.Inventory
+				result.Inventory = &agentprotocol.RuntimeInventoryResult{
+					Chunk: inventory.Chunk, Events: inventory.Events,
+				}
+				if inventory.Manifest != nil {
+					manifest := inventory.Manifest
+					result.Inventory.Manifest = &agentprotocol.RuntimeInventoryManifest{
+						ObservationID:     manifest.ObservationID,
+						SchemaVersion:     manifest.SchemaVersion,
+						ExpectedChunks:    manifest.ExpectedChunks,
+						ExpectedResources: manifest.ExpectedResources,
+						RetentionSeconds:  manifest.RetentionSeconds,
+						Events:            append([]runtimeinventory.Event(nil), manifest.Events...),
+						EventsTruncated:   manifest.EventsTruncated,
+					}
+				}
+			}
 			if err := result.Validate(command); err != nil ||
 				!h.validConformanceResult(result, expectedRuntimeProbe) {
 				return errors.New("Agent conformance command result is invalid")
 			}
+			validatedResult = result
 			commandResultReceived = true
 			if err := encoder.Encode(serverFrame{
 				Type: "command_result_ack", Sequence: serverSequence,
@@ -1223,12 +1255,49 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		command.ID,
 		h.conformanceCommandStatus(expectedRuntimeProbe),
 	)
+	if h.inventoryCommand != "" {
+		inventoryDetails, err := h.conformanceInventoryDetails(validatedResult)
+		if err != nil {
+			return err
+		}
+		result += inventoryDetails
+	}
 	return writeFile(h.resultFile, []byte(result), 0o600)
 }
 
 func (h *conformanceHandler) conformanceCommand(
 	expectedRuntimeProbe string,
 ) (agentprotocol.AgentCommand, error) {
+	if h.inventoryCommand != "" {
+		if h.runtimeDeadline.IsZero() {
+			return agentprotocol.AgentCommand{},
+				errors.New("inventory conformance command deadline is missing")
+		}
+		operation := strings.TrimPrefix(h.inventoryCommand, "runtime.inventory.")
+		commandID := "conformance-inventory-" + operation + "-" + h.identity.hostID
+		if h.commandSuffix != "" {
+			commandID += "-" + h.commandSuffix
+		}
+		inventory := &agentprotocol.RuntimeInventoryCommand{
+			RuntimeTargetID: "conformance-target-" + h.identity.hostID,
+			ObservationID:   "conformance-observation-" + h.identity.hostID,
+		}
+		kind := agentprotocol.AgentCommandKind(h.inventoryCommand)
+		switch kind {
+		case agentprotocol.AgentCommandInventoryPrepare:
+			inventory.MaxChunkBytes = runtimeinventory.DefaultChunkBytes
+		case agentprotocol.AgentCommandInventoryChunk:
+			inventory.MaxChunkBytes = runtimeinventory.DefaultChunkBytes
+			inventory.ChunkIndex = 0
+		case agentprotocol.AgentCommandInventoryRelease:
+		default:
+			return agentprotocol.AgentCommand{}, errors.New("inventory conformance kind is invalid")
+		}
+		return agentprotocol.AgentCommand{
+			ID: commandID, Kind: kind, Deadline: h.runtimeDeadline,
+			Inventory: inventory,
+		}, nil
+	}
 	if h.deploymentCommand == "" {
 		commandID := "conformance-probe-" + h.identity.hostID
 		if h.commandSuffix != "" {
@@ -1295,6 +1364,10 @@ func (h *conformanceHandler) validConformanceResult(
 	result agentprotocol.AgentCommandResult,
 	expectedRuntimeProbe string,
 ) bool {
+	if h.inventoryCommand != "" {
+		return result.Status == agentprotocol.AgentCommandSucceeded &&
+			result.ErrorCode == "" && result.RuntimeProbe == nil
+	}
 	if h.deploymentCommand != "" {
 		return result.Status == agentprotocol.AgentCommandSucceeded &&
 			result.ErrorCode == "" && result.RuntimeProbe == nil
@@ -1303,20 +1376,89 @@ func (h *conformanceHandler) validConformanceResult(
 }
 
 func (h *conformanceHandler) conformanceCommandStatus(expectedRuntimeProbe string) string {
+	if h.inventoryCommand != "" {
+		return "inventory_succeeded"
+	}
 	if h.deploymentCommand != "" {
 		return "deployment_succeeded"
 	}
 	return conformanceRuntimeProbeStatus(expectedRuntimeProbe)
 }
 
-func conformanceDeploymentCapabilities() []string {
-	return []string{
-		agentprotocol.CapabilityRuntimeProbe,
-		agentprotocol.CapabilityDeploymentPrepare,
-		agentprotocol.CapabilityDeploymentStage,
-		agentprotocol.CapabilityDeploymentActivate,
-		agentprotocol.CapabilityDeploymentCancel,
+func (h *conformanceHandler) conformanceInventoryDetails(
+	result agentprotocol.AgentCommandResult,
+) (string, error) {
+	if result.Inventory == nil {
+		if h.inventoryCommand == string(agentprotocol.AgentCommandInventoryRelease) {
+			return "", nil
+		}
+		return "", errors.New("Agent conformance inventory result is missing")
 	}
+	switch agentprotocol.AgentCommandKind(h.inventoryCommand) {
+	case agentprotocol.AgentCommandInventoryPrepare:
+		manifest := result.Inventory.Manifest
+		if manifest == nil || manifest.ExpectedChunks != 1 ||
+			manifest.ExpectedResources < 1 {
+			return "", errors.New("Agent conformance inventory manifest is invalid")
+		}
+		return fmt.Sprintf(
+			"inventory_expected_chunks=%d\ninventory_expected_resources=%d\n",
+			manifest.ExpectedChunks,
+			manifest.ExpectedResources,
+		), nil
+	case agentprotocol.AgentCommandInventoryChunk:
+		chunk := result.Inventory.Chunk
+		if chunk == nil {
+			return "", errors.New("Agent conformance inventory chunk is missing")
+		}
+		expectedDeployment := "conformance-deployment-" + h.identity.hostID
+		found := false
+		for _, resource := range chunk.Resources {
+			if resource.Kind != runtimeinventory.KindContainer ||
+				resource.Name != h.deploymentContainer {
+				continue
+			}
+			if resource.Labels["net.owndock.deployment_id"] != expectedDeployment {
+				return "", errors.New("Agent conformance inventory crossed Host ownership")
+			}
+			found = true
+		}
+		if !found {
+			return "", errors.New("Agent conformance deployment is absent from inventory")
+		}
+		return fmt.Sprintf(
+			"inventory_resources=%d\ninventory_deployment_id=%s\n",
+			len(chunk.Resources),
+			expectedDeployment,
+		), nil
+	case agentprotocol.AgentCommandInventoryRelease:
+		return "", nil
+	default:
+		return "", errors.New("Agent conformance inventory command is invalid")
+	}
+}
+
+func conformanceCapabilities(deployment, inventory bool) []string {
+	capabilities := []string{agentprotocol.CapabilityRuntimeProbe}
+	if deployment {
+		capabilities = append(
+			capabilities,
+			agentprotocol.CapabilityDeploymentPrepare,
+			agentprotocol.CapabilityDeploymentStage,
+			agentprotocol.CapabilityDeploymentActivate,
+			agentprotocol.CapabilityDeploymentCancel,
+		)
+	}
+	if inventory {
+		capabilities = append(
+			capabilities,
+			agentprotocol.CapabilityInventoryPrepare,
+			agentprotocol.CapabilityInventoryChunk,
+			agentprotocol.CapabilityInventoryRelease,
+			agentprotocol.CapabilityInventoryEvents,
+		)
+	}
+	return capabilities
 }
 
 func validConformanceDeploymentCommand(value string) bool {
@@ -1324,6 +1466,17 @@ func validConformanceDeploymentCommand(value string) bool {
 	case "", agentprotocol.AgentCommandDeploymentPrepare,
 		agentprotocol.AgentCommandDeploymentStage,
 		agentprotocol.AgentCommandDeploymentActivate:
+		return true
+	default:
+		return false
+	}
+}
+
+func validConformanceInventoryCommand(value string) bool {
+	switch agentprotocol.AgentCommandKind(value) {
+	case "", agentprotocol.AgentCommandInventoryPrepare,
+		agentprotocol.AgentCommandInventoryChunk,
+		agentprotocol.AgentCommandInventoryRelease:
 		return true
 	default:
 		return false

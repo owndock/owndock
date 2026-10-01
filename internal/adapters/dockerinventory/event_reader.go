@@ -52,6 +52,29 @@ func (r *EventReader) ReadWindow(
 	batch := inventory.EventBatch{Events: make([]inventory.Event, 0, maximum)}
 	messages := result.Messages
 	errorsChannel := result.Err
+	drainMessages := func() {
+		for messages != nil {
+			select {
+			case message, open := <-messages:
+				if !open {
+					messages = nil
+					return
+				}
+				event, ok := projectDockerEvent(message)
+				if !ok {
+					continue
+				}
+				batch.Events = append(batch.Events, event)
+				if len(batch.Events) == maximum {
+					batch.Truncated = true
+					cancel()
+					return
+				}
+			default:
+				return
+			}
+		}
+	}
 	for messages != nil || errorsChannel != nil {
 		select {
 		case <-ctx.Done():
@@ -73,13 +96,16 @@ func (r *EventReader) ReadWindow(
 			}
 		case streamErr, open := <-errorsChannel:
 			if !open {
-				errorsChannel = nil
-				continue
+				drainMessages()
+				return batch, nil
 			}
-			if streamErr != nil && !errors.Is(streamErr, io.EOF) {
+			if errors.Is(streamErr, io.EOF) {
+				drainMessages()
+				return batch, nil
+			}
+			if streamErr != nil {
 				return inventory.EventBatch{}, fmt.Errorf("read Docker events: %w", streamErr)
 			}
-			errorsChannel = nil
 		}
 	}
 	return batch, nil
