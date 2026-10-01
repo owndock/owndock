@@ -120,6 +120,9 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 		original, err := e.ingress.Begin(ctx, request)
 		e.observeManagedIngress("begin", started, err)
 		if err != nil {
+			if errors.Is(err, applicationroutebiz.ErrHostOperationPending) {
+				return errors.Join(biz.ErrExecutionRetryable, err)
+			}
 			return err
 		}
 		executionPlan := plan

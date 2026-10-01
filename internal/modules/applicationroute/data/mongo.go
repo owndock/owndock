@@ -226,7 +226,16 @@ func (r *MongoRepository) ListRetiring(
 	ctx context.Context,
 	limit int64,
 ) ([]biz.ApplicationRoute, error) {
-	return r.listForRetirement(ctx, bson.D{{Key: "status", Value: biz.StatusRetiring}}, limit)
+	return r.listRoutes(ctx, bson.D{{Key: "status", Value: biz.StatusRetiring}}, limit, "retirement")
+}
+
+func (r *MongoRepository) ListReconciliationCandidates(
+	ctx context.Context,
+	limit int64,
+) ([]biz.ApplicationRoute, error) {
+	return r.listRoutes(ctx, bson.D{{Key: "status", Value: bson.D{{Key: "$in", Value: bson.A{
+		biz.StatusPending, biz.StatusProvisioning,
+	}}}}}, limit, "reconciliation")
 }
 
 func (r *MongoRepository) ListByProductResource(
@@ -241,35 +250,36 @@ func (r *MongoRepository) ListByProductResource(
 	} else {
 		filter = append(filter, bson.E{Key: "environment_id", Value: environmentID})
 	}
-	return r.listForRetirement(ctx, filter, biz.MaxRoutesPerProject)
+	return r.listRoutes(ctx, filter, biz.MaxRoutesPerProject, "retirement")
 }
 
 func (r *MongoRepository) ListByRuntimeTarget(
 	ctx context.Context,
 	organizationID, projectID, runtimeTargetID string,
 ) ([]biz.ApplicationRoute, error) {
-	return r.listForRetirement(ctx, bson.D{{Key: "organization_id", Value: organizationID},
+	return r.listRoutes(ctx, bson.D{{Key: "organization_id", Value: organizationID},
 		{Key: "project_id", Value: projectID},
 		{Key: "runtime_target_id", Value: runtimeTargetID},
 		{Key: "status", Value: bson.D{{Key: "$ne", Value: biz.StatusRetired}}}},
-		biz.MaxRoutesPerProject)
+		biz.MaxRoutesPerProject, "retirement")
 }
 
-func (r *MongoRepository) listForRetirement(
+func (r *MongoRepository) listRoutes(
 	ctx context.Context,
 	filter bson.D,
 	limit int64,
+	operation string,
 ) ([]biz.ApplicationRoute, error) {
 	cursor, err := r.routes.Find(ctx, filter, options.Find().
 		SetSort(bson.D{{Key: "updated_at", Value: 1}, {Key: "_id", Value: 1}}).
 		SetLimit(limit))
 	if err != nil {
-		return nil, fmt.Errorf("find application routes for retirement: %w", err)
+		return nil, fmt.Errorf("find application routes for %s: %w", operation, err)
 	}
 	defer cursor.Close(ctx)
 	var documents []routeDocument
 	if err := cursor.All(ctx, &documents); err != nil {
-		return nil, fmt.Errorf("decode application routes for retirement: %w", err)
+		return nil, fmt.Errorf("decode application routes for %s: %w", operation, err)
 	}
 	items := make([]biz.ApplicationRoute, len(documents))
 	for index := range documents {

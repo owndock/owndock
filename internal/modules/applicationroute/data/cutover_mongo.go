@@ -98,7 +98,10 @@ func (s *MongoCutoverStore) begin(
 		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrCutoverConflict
 	}
 	if document.Retirement != nil {
-		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrCutoverConflict
+		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrHostOperationPending
+	}
+	if document.Reconciliation != nil {
+		return applicationroutebiz.CutoverTransaction{}, applicationroutebiz.ErrHostOperationPending
 	}
 	if document.Pending != nil {
 		transactionValue, decodeErr := document.Pending.domain(request.ManagedHostID)
@@ -134,6 +137,7 @@ func (s *MongoCutoverStore) begin(
 			{Key: "_id", Value: request.ManagedHostID}, {Key: "revision", Value: document.Revision},
 			{Key: "pending", Value: bson.D{{Key: "$exists", Value: false}}},
 			{Key: "retirement", Value: bson.D{{Key: "$exists", Value: false}}},
+			{Key: "reconciliation", Value: bson.D{{Key: "$exists", Value: false}}},
 		}, bson.D{{Key: "$set", Value: bson.D{
 			{Key: "revision", Value: desired.HostRevision}, {Key: "pending", Value: pending},
 		}}})
@@ -535,12 +539,13 @@ func pendingFilter(transactionValue applicationroutebiz.CutoverTransaction, stat
 }
 
 type hostConfigDocument struct {
-	ID             string                   `bson:"_id"`
-	OrganizationID string                   `bson:"organization_id"`
-	Revision       uint64                   `bson:"revision"`
-	Committed      []gatewayRouteDocument   `bson:"committed,omitempty"`
-	Pending        *cutoverDocument         `bson:"pending,omitempty"`
-	Retirement     *routeRetirementDocument `bson:"retirement,omitempty"`
+	ID             string                       `bson:"_id"`
+	OrganizationID string                       `bson:"organization_id"`
+	Revision       uint64                       `bson:"revision"`
+	Committed      []gatewayRouteDocument       `bson:"committed,omitempty"`
+	Pending        *cutoverDocument             `bson:"pending,omitempty"`
+	Retirement     *routeRetirementDocument     `bson:"retirement,omitempty"`
+	Reconciliation *routeReconciliationDocument `bson:"reconciliation,omitempty"`
 }
 
 type cutoverDocument struct {

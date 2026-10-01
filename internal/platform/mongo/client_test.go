@@ -74,6 +74,17 @@ type replayableIngressGateway struct {
 	abortCalls   int
 }
 
+type staticApplicationRouteBackendResolver struct {
+	backend applicationroutebiz.ActiveBackend
+}
+
+func (r staticApplicationRouteBackendResolver) ResolveActiveBackend(
+	context.Context,
+	applicationroutebiz.ApplicationRoute,
+) (applicationroutebiz.ActiveBackend, bool, error) {
+	return r.backend, true, nil
+}
+
 func (g *replayableIngressGateway) Prepare(
 	_ context.Context,
 	desired applicationroutebiz.HostDesiredConfig,
@@ -2305,7 +2316,7 @@ func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *
 		names[name] = true
 	}
 	for _, name := range []string{"uniq_application_route_hostname", "uniq_application_route_project_slot",
-		"idx_application_route_project_created", "idx_application_route_retirement",
+		"idx_application_route_project_created", "idx_application_route_status_updated",
 		"idx_application_route_target_status"} {
 		if !names[name] {
 			t.Errorf("application route index %q is missing: %#v", name, names)
@@ -2326,7 +2337,7 @@ func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *
 		names[name] = true
 	}
 	for _, name := range []string{"uniq_application_route_pending_deployment",
-		"uniq_application_route_retirement"} {
+		"uniq_application_route_retirement", "uniq_application_route_reconciliation"} {
 		if !names[name] {
 			t.Errorf("application route host index %q is missing: %#v", name, names)
 		}
@@ -3156,6 +3167,47 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 		restoredRoute.FailureCode != "" || restoredRoute.Observation == nil ||
 		restoredRoute.Observation.DeploymentID != replayedRequest.DeploymentID {
 		t.Fatalf("restored previous route = %+v, %v", restoredRoute, err)
+	}
+
+	lateRoute := newRoute("route-integration-late", "late.integration.example.com")
+	if _, err := repository.Create(ctx, lateRoute); err != nil {
+		t.Fatalf("create Route after successful Deployment: %v", err)
+	}
+	reconciliationStore, err := applicationroutedata.NewMongoReconciliationStore(
+		database, client, func() time.Time { return now.Add(3500 * time.Millisecond) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciliationGateway := &replayableIngressGateway{}
+	reconciliationCoordinator, err := applicationroutebiz.NewReconciliationCoordinator(
+		staticApplicationRouteBackendResolver{backend: applicationroutebiz.ActiveBackend{
+			OrganizationID: lateRoute.OrganizationID, ProjectID: lateRoute.ProjectID,
+			ApplicationID: lateRoute.ApplicationID, EnvironmentID: lateRoute.EnvironmentID,
+			RuntimeTargetID: lateRoute.RuntimeTargetID, ManagedHostID: request.ManagedHostID,
+			DeploymentID:    replayedRequest.DeploymentID,
+			CutoverSequence: replayedRequest.CutoverSequence, Port: 8080,
+		}}, reconciliationStore, reconciliationGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		completed, reconcileErr := reconciliationCoordinator.Reconcile(ctx, lateRoute)
+		if reconcileErr != nil || !completed {
+			t.Fatalf("route reconciliation attempt %d = %t, %v", attempt+1, completed, reconcileErr)
+		}
+	}
+	if reconciliationGateway.prepareCalls != 1 || reconciliationGateway.commitCalls != 1 {
+		t.Fatalf("route reconciliation gateway calls = %d/%d",
+			reconciliationGateway.prepareCalls, reconciliationGateway.commitCalls)
+	}
+	lateReady, err := repository.Get(ctx, lateRoute.OrganizationID, lateRoute.ProjectID, lateRoute.ID)
+	if err != nil || lateReady.Status != applicationroutebiz.StatusReady ||
+		lateReady.Observation == nil ||
+		lateReady.Observation.DeploymentID != replayedRequest.DeploymentID ||
+		lateReady.Observation.CutoverSequence != replayedRequest.CutoverSequence {
+		t.Fatalf("reconciled late Route = %+v, %v", lateReady, err)
 	}
 
 	retiringRoute, err := restoredRoute.BeginRetirement(

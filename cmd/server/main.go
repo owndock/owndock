@@ -117,6 +117,7 @@ func run() error {
 	var mongoClient *platformmongo.Client
 	var productAPI *server.ProductAPI
 	var deploymentWorkerServer *lifecycle.Server
+	var applicationRouteReconciliationWorkerServer *lifecycle.Server
 	var applicationRouteRetirementWorkerServer *lifecycle.Server
 	var runtimeTargetRetirementWorkerServer *lifecycle.Server
 	var productResourceRetirementWorkerServer *lifecycle.Server
@@ -745,8 +746,9 @@ func run() error {
 				runtimeGateways,
 			)
 			secretResolver := deploymentdata.NewEnvironmentSecretResolver()
+			executionResolver := deploymentdata.NewExecutionResolver(controlPlaneStore)
 			executor, err := deploymentworker.NewRuntimeExecutor(
-				deploymentdata.NewExecutionResolver(controlPlaneStore),
+				executionResolver,
 				secretResolver,
 				runtimeGateway,
 			)
@@ -780,6 +782,48 @@ func run() error {
 				if _, configureErr := executor.WithManagedIngress(cutover, 30*time.Second); configureErr != nil {
 					return fmt.Errorf("configure managed application ingress: %w", configureErr)
 				}
+				routeBackendResolver, resolverErr :=
+					deploymentdata.NewApplicationRouteBackendResolver(
+						deploymentStore, controlPlaneStore,
+					)
+				if resolverErr != nil {
+					return fmt.Errorf("create application route backend resolver: %w", resolverErr)
+				}
+				routeReconciliationStore, storeErr :=
+					applicationroutedata.NewMongoReconciliationStore(
+						mongoClient.Database(), mongoClient, time.Now,
+					)
+				if storeErr != nil {
+					return fmt.Errorf("create application route reconciliation store: %w", storeErr)
+				}
+				routeReconciliationStore.WithAudit(auditStore, id.New)
+				routeReconciliation, reconciliationErr :=
+					applicationroutebiz.NewReconciliationCoordinator(
+						routeBackendResolver, routeReconciliationStore, routeGateway,
+					)
+				if reconciliationErr != nil {
+					return fmt.Errorf("create application route reconciliation coordinator: %w", reconciliationErr)
+				}
+				applicationRouteUseCase.WithReconciliation(
+					applicationRouteRepository, routeReconciliation,
+				)
+				routeReconciliationLoop, reconciliationLoopErr :=
+					applicationrouteworker.NewReconciliationLoop(
+						applicationRouteUseCase, 16, pollInterval, operationTimeout,
+						func(workerErr error) {
+							_ = logger.Log(log.LevelError,
+								"component", "application_route_reconciliation_worker",
+								"error", workerErr)
+						},
+					)
+				if reconciliationLoopErr != nil {
+					return fmt.Errorf("create application route reconciliation worker loop: %w", reconciliationLoopErr)
+				}
+				routeReconciliationLoop.WithObservability(func(result string, duration time.Duration) {
+					metrics.RecordWorkerPoll("application_route_reconciliation", result, duration)
+				})
+				applicationRouteReconciliationWorkerServer =
+					lifecycle.NewServer(routeReconciliationLoop)
 				routeRetirementStore, storeErr := applicationroutedata.NewMongoRetirementStore(
 					mongoClient.Database(), mongoClient, time.Now,
 				)
@@ -1132,6 +1176,9 @@ func run() error {
 	managedServers := []transport.Server{httpServer}
 	if deploymentWorkerServer != nil {
 		managedServers = append(managedServers, deploymentWorkerServer)
+	}
+	if applicationRouteReconciliationWorkerServer != nil {
+		managedServers = append(managedServers, applicationRouteReconciliationWorkerServer)
 	}
 	if applicationRouteRetirementWorkerServer != nil {
 		managedServers = append(managedServers, applicationRouteRetirementWorkerServer)

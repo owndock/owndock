@@ -2300,7 +2300,7 @@ paths:
       tags: [Application Routes]
       operationId: createApplicationRoute
       summary: Create a managed public application route
-      description: Maintainer or Owner. Only an Agent Runtime Target can be selected. Automatic TLS is required outside development. Acceptance creates a pending desired state; it does not claim that DNS, certificates, or gateway convergence are ready.
+      description: Maintainer or Owner. Only an Agent Runtime Target can be selected. Automatic TLS is required outside development. Acceptance creates a pending desired state. If the slot already has a successful Deployment, a background controller reconciles the Route to that stable backend; otherwise the first successful Deployment owns convergence. Pending never claims that DNS, certificates, or the gateway are ready.
       security:
         - bearerAuth: []
       requestBody:
@@ -2344,7 +2344,7 @@ paths:
       tags: [Application Routes]
       operationId: updateApplicationRoute
       summary: Update route hostname, port, or TLS mode using optimistic locking
-      description: Maintainer or Owner. Application, Environment, and Runtime Target bindings are immutable. A successful update returns the route to pending until a later gateway reconciliation completes.
+      description: Maintainer or Owner. Application, Environment, and Runtime Target bindings are immutable. A successful update returns the route to pending. A background controller reconciles it to the current successful Deployment when one exists, without creating another Deployment.
       security:
         - bearerAuth: []
       requestBody:

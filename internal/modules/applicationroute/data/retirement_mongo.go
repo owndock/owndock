@@ -98,7 +98,7 @@ func (s *MongoRetirementStore) Begin(
 			transactionValue, decodeErr = host.Retirement.domain(host.ID, host.OrganizationID)
 			return decodeErr
 		}
-		if host.Pending != nil {
+		if host.Pending != nil || host.Reconciliation != nil {
 			return applicationroutebiz.ErrRetirementPending
 		}
 
@@ -118,6 +118,7 @@ func (s *MongoRetirementStore) Begin(
 			{Key: "committed.route_id", Value: route.ID},
 			{Key: "pending", Value: bson.D{{Key: "$exists", Value: false}}},
 			{Key: "retirement", Value: bson.D{{Key: "$exists", Value: false}}},
+			{Key: "reconciliation", Value: bson.D{{Key: "$exists", Value: false}}},
 		}, bson.D{{Key: "$set", Value: bson.D{
 			{Key: "revision", Value: transactionValue.Desired.HostRevision},
 			{Key: "retirement", Value: document},

@@ -263,6 +263,13 @@ func (r *fakeRepository) ListRetiring(context.Context, int64) ([]ApplicationRout
 	}
 	return nil, nil
 }
+
+func (r *fakeRepository) ListReconciliationCandidates(context.Context, int64) ([]ApplicationRoute, error) {
+	if r.item.ID == "" {
+		return nil, nil
+	}
+	return []ApplicationRoute{r.item}, nil
+}
 func (r *fakeRepository) ListByProductResource(context.Context, string, string, string, string) ([]ApplicationRoute, error) {
 	r.productLists++
 	if r.item.ID == "" || r.item.Status == StatusRetired {

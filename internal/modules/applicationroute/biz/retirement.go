@@ -50,6 +50,9 @@ func (u *UseCase) Delete(
 	if err != nil {
 		return false, err
 	}
+	if current.Status == StatusProvisioning {
+		return false, ErrRouteConflict
+	}
 	current, err = u.beginRetirement(ctx, principal, current, requestID)
 	if err != nil {
 		return false, err
@@ -189,6 +192,19 @@ func (u *UseCase) converge(
 	pending := false
 	var result error
 	for _, item := range items {
+		if item.Status == StatusProvisioning {
+			if u.reconciler == nil {
+				pending = true
+				continue
+			}
+			done, err := u.reconciler.Reconcile(ctx, item)
+			if err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
+			pending = pending || !done
+			continue
+		}
 		if item.Status != StatusRetiring {
 			var err error
 			item, err = u.beginRetirement(ctx, principal, item, requestID)

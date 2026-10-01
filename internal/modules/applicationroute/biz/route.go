@@ -417,14 +417,16 @@ type ReferenceResolver interface {
 }
 
 type UseCase struct {
-	repository           Repository
-	references           ReferenceResolver
-	newID                func() (string, error)
-	now                  func() time.Time
-	transaction          transaction.Manager
-	auditor              sharedaudit.Recorder
-	retirementRepository RetirementRepository
-	retirer              RouteRetirer
+	repository               Repository
+	references               ReferenceResolver
+	newID                    func() (string, error)
+	now                      func() time.Time
+	transaction              transaction.Manager
+	auditor                  sharedaudit.Recorder
+	retirementRepository     RetirementRepository
+	retirer                  RouteRetirer
+	reconciliationRepository ReconciliationRepository
+	reconciler               RouteReconciler
 }
 
 func NewUseCase(repository Repository, references ReferenceResolver, newID func() (string, error), now func() time.Time) (*UseCase, error) {
@@ -444,6 +446,14 @@ func (u *UseCase) WithRetirement(
 	retirer RouteRetirer,
 ) *UseCase {
 	u.retirementRepository, u.retirer = repository, retirer
+	return u
+}
+
+func (u *UseCase) WithReconciliation(
+	repository ReconciliationRepository,
+	reconciler RouteReconciler,
+) *UseCase {
+	u.reconciliationRepository, u.reconciler = repository, reconciler
 	return u
 }
 

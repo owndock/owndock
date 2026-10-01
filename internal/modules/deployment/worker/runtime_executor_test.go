@@ -283,6 +283,40 @@ func TestRuntimeExecutorCoordinatesManagedIngressPhases(t *testing.T) {
 	}
 }
 
+func TestRuntimeExecutorRetriesWhileRouteControllerOwnsHostConfig(t *testing.T) {
+	connection, err := runtimeaccess.NewAgent("host-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := biz.ExecutionPlan{DeploymentID: "deployment-1", WorkerID: "worker-1",
+		FencingToken: 2, CutoverSequence: 3, ProjectID: "project-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-1", ContainerName: "container-1",
+		TargetConnection: connection,
+		RuntimeSpec:      runtimespec.Spec{Ports: []runtimespec.Port{{Name: "http", ContainerPort: 8080}}}}
+	store := &workerCutoverStore{beginErr: applicationroutebiz.ErrHostOperationPending}
+	coordinator, err := applicationroutebiz.NewCutoverCoordinator(store, &workerRouteGateway{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &runtimeGatewayPlanProbe{}
+	executor, err := NewRuntimeExecutor(
+		executionResolverStub{plan: plan}, credentialResolverStub{}, gateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.WithManagedIngress(coordinator, 0); err != nil {
+		t.Fatal(err)
+	}
+	err = executor.Deploy(t.Context(), biz.Deployment{
+		ID: "deployment-1", OrganizationID: "organization-1",
+	})
+	if !errors.Is(err, biz.ErrExecutionRetryable) || gateway.staged {
+		t.Fatalf("Deploy() error = %v, staged = %t", err, gateway.staged)
+	}
+}
+
 func TestRuntimeExecutorSkipsManagedIngressCommitMarkForDirectTarget(t *testing.T) {
 	store := &workerCutoverStore{}
 	coordinator, err := applicationroutebiz.NewCutoverCoordinator(
@@ -526,6 +560,7 @@ func TestManagedIngressFailureCodeUsesOnlySafeExecutionCategories(t *testing.T) 
 
 type workerCutoverStore struct {
 	transaction applicationroutebiz.CutoverTransaction
+	beginErr    error
 	finished    bool
 	aborted     bool
 	failure     applicationroutebiz.FailureCode
@@ -536,7 +571,7 @@ func (*workerCutoverStore) Required(context.Context, applicationroutebiz.Cutover
 	return true, nil
 }
 func (s *workerCutoverStore) Begin(context.Context, applicationroutebiz.CutoverRequest) (applicationroutebiz.CutoverTransaction, error) {
-	return s.transaction, nil
+	return s.transaction, s.beginErr
 }
 func (*workerCutoverStore) Prepared(context.Context, applicationroutebiz.CutoverTransaction, applicationroutebiz.GatewayObservation) error {
 	return nil

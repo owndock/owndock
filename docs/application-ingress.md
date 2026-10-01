@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新先进入 `pending`，不直接代表公网入口已配置。Server Deployment Worker 已接入持久 Host cutover transaction：匹配 Route 时先固定 Host revision 与原始运行身份，再执行 stage、route prepare/私有探测、activate、Deployment `committing` + Route observation 原子事务、route commit、固定 30 秒 drain 和 retire；不确定响应保留可领取状态，后继 Worker 用新租约授权、按原始运行身份精确重放。取消按“恢复旧 Gateway 配置 → 在 Agent 持久化墓碑并清理原执行/恢复旧 backend → 清除 Server transaction”的顺序可重放，避免回滚窗口出现流量黑洞。Agent 具备类型化 `ingress.prepare/commit/abort`、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和 Host/SNI 私有探测。仓库的 Linux-kernel 容器门禁已通过真实 Gateway 和生产 Worker 组合链；自动 HTTPS、原生 systemd 主机和客户等价流量门禁仍未完成，因此不能据此宣称生产级低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新先进入 `pending`，不直接代表公网入口已配置。若绑定槽位已有成功 Deployment，独立 Route Reconciliation Worker 会解析该稳定运行身份和 Release 命名端口，以持久 Host transaction 执行完整配置 prepare、私有探测和 commit，无需为了新增域名或修改 TLS 再部署应用；没有成功 Deployment 时保持 `pending`，由首次 Deployment 切流接管。Server Deployment Worker 已接入另一条持久 Host cutover transaction：匹配 Route 时先固定 Host revision 与原始运行身份，再执行 stage、route prepare/私有探测、activate、Deployment `committing` + Route observation 原子事务、route commit、固定 30 秒 drain 和 retire；不确定响应保留可领取状态，后继 Worker 用新租约授权、按原始运行身份精确重放。三个 Host 配置写入者——Route 主动调和、Deployment 切流和 Route 退役——在同一 Host 文档上互斥并安全重试。Agent 具备类型化 `ingress.prepare/commit/abort`、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和 Host/SNI 私有探测。仓库的 Linux-kernel 容器门禁已通过真实 Gateway 和生产 Worker 组合链；自动 HTTPS、原生 systemd 主机和客户等价流量门禁仍未完成，因此不能据此宣称生产级低停机流量切换。
 
 ## 目标模式
 
@@ -67,7 +67,43 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 
 `ApplicationRoute` 属于 Project，固定 Application、Environment、Runtime Target、规范化 hostname、Release 命名 HTTP 端口和 TLS 模式。同一 Organization 中活动 hostname 唯一。API 只允许 Agent Runtime Target；`disabled` TLS 只允许 development Environment，staging/production 强制 `automatic`。一个 Project 最多保留 128 条活动 Route。
 
-控制面开放 `GET/POST /api/v1/projects/{project_id}/application-routes` 与 `GET/PATCH/DELETE /api/v1/projects/{project_id}/application-routes/{route_id}`。Application、Environment 和 Runtime Target 绑定创建后不可修改；PATCH 使用 `expected_version` 乐观锁，成功后回到 `pending`。DELETE 先把 Route 持久化为 `retiring`，再以单调 Host revision 通过 Agent 移除 Caddy 配置；网关提交后才进入 `retired`。Agent 暂时离线或 Host 上有其他事务时返回 `202`，后台 Worker 会从 MongoDB 恢复。
+控制面开放 `GET/POST /api/v1/projects/{project_id}/application-routes` 与 `GET/PATCH/DELETE /api/v1/projects/{project_id}/application-routes/{route_id}`。Application、Environment 和 Runtime Target 绑定创建后不可修改；PATCH 使用 `expected_version` 乐观锁，成功后回到 `pending`。已有成功 Deployment 时后台主动调和；没有时等待首次 Deployment。主动调和处于 `provisioning` 时 DELETE 返回冲突，避免把尚未确定的 Gateway prepare 与删除并发执行；客户端在本轮事务收敛后重试。DELETE 随后把 Route 持久化为 `retiring`，再以单调 Host revision 通过 Agent 移除 Caddy 配置；网关提交后才进入 `retired`。Agent 暂时离线或 Host 上有其他事务时返回 `202`，后台 Worker 会从 MongoDB 恢复。
+
+## 已有 Deployment 上的 Route 主动调和
+
+```mermaid
+sequenceDiagram
+    participant C as API Client
+    participant S as OwnDock Server
+    participant M as MongoDB
+    participant W as Route Reconciliation Worker
+    participant A as OwnDock Agent
+    participant G as Ingress Gateway
+
+    C->>S: POST/PATCH ApplicationRoute
+    S->>M: persist desired revision as pending
+    S-->>C: Route pending
+    W->>M: resolve latest succeeded Deployment<br/>and immutable named port
+    alt no successful Deployment
+        W-->>M: leave pending for first Deployment
+    else stable backend exists
+        W->>M: allocate monotonic Host revision<br/>Route → provisioning
+        W->>A: ingress.prepare(complete config + Route probe)
+        A->>G: load + Host/SNI private probe
+        alt deterministic probe/config failure
+            A->>G: restore committed config
+            W->>M: Route → degraded + bounded failure_code
+        else prepared
+            W->>A: ingress.commit(exact revision + digest)
+            W->>M: transaction: committed config<br/>Route → ready + observation + audit
+        end
+    end
+    opt Agent offline, response lost, or Host busy
+        W->>W: replay the same durable transaction
+    end
+```
+
+主动调和只读取最新成功 Deployment，不启动、替换或删除容器。它冻结 Deployment ID、cutover sequence、Managed Host、确定性 backend alias 和命名 TCP 端口；私有探测通过后才写 `ready`。配置错误或确定性探测失败进入 `degraded`，Agent 离线和响应不确定则保留可重放事务。Deployment 同时到达时会收到可重试占用结果，等待 Route 事务释放 Host 后继续，不会把短暂的配置竞争写成 Deployment 失败。
 
 Application、Environment 或 Runtime Target 的退役也会先收敛关联 Route。只有公网入口已从网关提交配置中消失后，控制面才继续删除运行实例和资源元数据，避免残留入口指向已退役容器。
 
@@ -155,7 +191,7 @@ Server 从 `/metrics` 暴露 `owndock_managed_ingress_operations_total{phase,res
 
 ## 验收门槛
 
-已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非 development 环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，Server Host revision/pending transaction/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Replica Set 用例还会把成功响应视为丢失，以新的 Store/Coordinator 和 Worker 租约重复 prepare、控制面提交、Gateway commit、finish、restore 与 abort，验证接管仍使用原始运行身份。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像；测试代码编译通过不等于已获得 Replica Set 实跑证据。
+已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非 development 环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，已有成功 Deployment 上的 Route 主动调和、Server Host revision/持久事务/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Replica Set 用例还会把成功响应视为丢失，以新的 Store/Coordinator 重复主动调和和退役，以及 Deployment prepare、控制面提交、Gateway commit、finish、restore 与 abort，验证重放仍使用原始运行身份。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像；测试代码编译通过不等于已获得 Replica Set 实跑证据。
 
 以下仍是执行面与联合验收门槛：
 
