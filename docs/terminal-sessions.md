@@ -2,7 +2,7 @@
 
 OwnDock 的终端不是“把 Docker 或 SSH 暴露给浏览器”，而是一项有目标、有权限、有时限、可终止、可审计的临时操作。
 
-当前已经实现 Terminal 权限、访问策略、`TerminalSession` 状态机、MongoDB 持久化、并发限制、一次性连接票据、REST API、同域 WSS 传输、活动会话周期复核与撤权、元数据审计，以及 direct/Agent 两种连接模式的受限容器和主机终端。真实远程 Linux/SSH 故障注入、两主机和浏览器系统验收仍未完成，因此这些能力仍按 pre-release 管理。
+当前已经实现 Terminal 权限、访问策略、`TerminalSession` 状态机、MongoDB 持久化、并发限制、一次性连接票据、REST API、同域 WSS 传输、活动会话周期复核与撤权、元数据审计，以及 direct/Agent 两种连接模式的受限容器和主机终端。仓内还会启动共享 MongoDB、两个真实 Server 进程和一个反向代理，让两条 WSS 分别打开固定 Host Key 的 SSH PTY，并验证一次策略撤权由两个实例独立发现、关闭和持久化。真实浏览器、客户反向代理、远程 Linux 故障注入和两主机系统验收仍未完成，因此这些能力仍按 pre-release 管理。
 
 ## 用户看到的两个入口
 
@@ -117,7 +117,36 @@ sequenceDiagram
     Note over W,H: 浏览器不能选择地址、账号、Shell、命令、env 或 sudo
 ```
 
-连接成功不代表权限被永久缓存。WSS 默认每 2 秒从 MongoDB 读取权威会话，并重新解析绑定的登录会话、当前 Project 角色、有效策略和固定目标。管理员终止会话、目标停止或实例身份变化会立即进入关闭流程；登录退出、成员移除、角色降级或策略收紧会先发送稳定错误码 `terminal_permission_revoked`，再遵守复核时读取到的 `revocation_grace_period`。宽限期允许设为 0 到 5 分钟，权限在宽限期内恢复时会取消待关闭计时。复核依赖存储或身份服务发生异常时失败关闭，不继续保留高权限通道。多实例部署不依赖进程内广播，因此最长发现延迟约为一个复核周期。固定 MongoDB Replica Set 已验证两个独立 Repository 并发时策略乐观锁、一次性 Ticket 和目标槽位均只有一个成功者；两个独立仓内 HTTP/WSS 服务也会分别从共享权威状态发现管理员终止并关闭连接。真实双 Server 进程经反向代理的撤权发现延迟仍属于发布前系统门禁。
+连接成功不代表权限被永久缓存。WSS 默认每 2 秒从 MongoDB 读取权威会话，并重新解析绑定的登录会话、当前 Project 角色、有效策略和固定目标。管理员终止会话、目标停止或实例身份变化会立即进入关闭流程；登录退出、成员移除、角色降级或策略收紧会先发送稳定错误码 `terminal_permission_revoked`，再遵守复核时读取到的 `revocation_grace_period`。宽限期允许设为 0 到 5 分钟，权限在宽限期内恢复时会取消待关闭计时。复核依赖存储或身份服务发生异常时失败关闭，不继续保留高权限通道。多实例部署不依赖进程内广播，因此最长发现延迟约为一个复核周期。固定 MongoDB Replica Set 已验证两个独立 Repository 并发时策略乐观锁、一次性 Ticket 和目标槽位均只有一个成功者；`make test-terminal-process` 进一步启动两个真实 Server 进程，经一个反向代理分别承载两条 WSS 和固定 Host Key SSH PTY。任一实例提交 Organization 策略禁用后，两边都必须在 8 秒门禁内返回 `terminal_permission_revoked`、关闭连接并保存 `closed`，且终态可由另一实例读取。真实浏览器、客户 TLS 终止/负载均衡器与客户网络仍属于发布前系统验收。
+
+```mermaid
+sequenceDiagram
+    participant B as WSS Client
+    participant P as Reverse Proxy
+    participant A as Server A
+    participant C as Server B
+    participant M as Shared MongoDB
+    participant H as Pinned SSH Host
+
+    B->>P: connect Session A / Session B
+    par Session A
+        P->>A: WSS upgrade
+        A->>H: fixed user + key + Host Key PTY
+    and Session B
+        P->>C: WSS upgrade
+        C->>H: fixed user + key + Host Key PTY
+    end
+    A->>M: disable Organization terminal policy
+    loop 每个实例独立复核
+        A->>M: review Session A
+        C->>M: review Session B
+    end
+    A-->>B: terminal_permission_revoked + close
+    C-->>B: terminal_permission_revoked + close
+    A->>M: persist Session A closed
+    C->>M: persist Session B closed
+    Note over A,C: 对端 Server 必须可读取另一会话的终态
+```
 
 ```mermaid
 sequenceDiagram

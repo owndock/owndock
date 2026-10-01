@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-isolated-egress test-terminal-security test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process test-agent-dual-runtime-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
+.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-isolated-egress test-terminal-security test-terminal-process test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process test-agent-dual-runtime-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -125,6 +125,11 @@ test-terminal-security:
 		./internal/modules/managedhost/data ./internal/modules/managedhost/service \
 		./internal/platform/observability -count=1
 
+test-terminal-process:
+	OWNDOCK_RUN_TERMINAL_PROCESS_INTEGRATION=1 go test ./cmd/server \
+		-run TestTwoServerProcessesObserveTerminalPolicyRevocationThroughReverseProxy \
+		-count=1 -timeout=5m
+
 # test-release-candidate is the repeatable repository-local gate for an
 # immutable release tag. Customer-equivalent remote hosts, browser E2E and
 # external KMS/Registry matrices remain explicit system acceptance gates.
@@ -193,6 +198,7 @@ test-release-candidate: check test-community-deployment
 	$(MAKE) test-agent-rotation-process
 	$(MAKE) test-agent-dual-process
 	$(MAKE) test-terminal-security
+	$(MAKE) test-terminal-process
 
 test-agent-package:
 	go test ./packaging/agent ./internal/tools/agentpackage -count=1

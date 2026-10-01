@@ -25,7 +25,7 @@ make test-terminal-security
 | 主机 Shell 结束后遗留子进程 | 独立 PTY/进程组，TERM 后关闭控制 PTY，短宽限后 KILL | 本机真实 Shell + 长时子进程回收测试 |
 | 畸形帧、超大输入或消息洪峰耗尽内存 | 严格方向/字段/序号，4 KiB 控制帧、32 KiB 数据帧、200 输入消息/秒和有界队列；只持久化稳定违规码 | 浏览器协议、Agent 协议、超大 payload 不落流和错误字段泄漏测试 |
 | Agent 断线、慢消费者或复用错 Host | 每会话序号与有界队列；WSS 输出写入有截止时间；断线关闭且不恢复旧 PTY；Registry 按固定 Host 路由 | WSS 慢读、阻塞输入、浏览器硬断线、Gateway、Registry 和竞态测试 |
-| 多 Server 同时修改策略或占用会话槽位 | 策略使用版本条件更新；活动用户/目标槽位由 MongoDB partial unique index 仲裁 | 固定 MongoDB Replica Set 上两个独立 Repository 的并发策略更新与槽位竞争均严格一胜一冲突 |
+| 多 Server 同时修改策略或占用会话槽位 | 策略使用版本条件更新；活动用户/目标槽位由 MongoDB partial unique index 仲裁 | 固定 MongoDB Replica Set 上两个独立 Repository 的并发策略更新与槽位竞争均严格一胜一冲突；两个真实 Server 进程经反向代理承载不同 WSS，并共同观察共享策略撤权 |
 | 终端内容进入日志、Trace、指标或 MongoDB | 普通可观测接口只接收固定 kind/mode/reason；持久化只写会话元数据和安全错误码 | 指标不受信标签归一化与泄漏断言 |
 
 ## 背压与故障如何收敛
@@ -75,7 +75,7 @@ Server `/metrics` 暴露以下低基数指标：
 
 - 仓内 WSS 已覆盖慢输出消费者、阻塞终端输入和浏览器硬断线；仍需两台真实 Agent 主机上的网络分区、Agent 重启、容器退出和跨主机背压故障注入；
 - 真实浏览器的 Cookie、反向代理、关闭码、后台标签页、网络切换和 CSP 矩阵；
-- 多 Server 的策略更新、Ticket 消费和槽位竞争已在固定 MongoDB Replica Set 验证；两个独立仓内 HTTP/WSS 服务也已证明无需进程内广播即可发现共享管理员终止。仍需两个真实 Server 进程经反向代理对登录撤销、角色与策略变更做默认 2 秒周期下的最大发现延迟验收；
+- 多 Server 的策略更新、Ticket 消费和槽位竞争已在固定 MongoDB Replica Set 验证；两个真实 Server 进程现已通过同一反向代理分别承载 WSS/SSH PTY，并在一次共享策略禁用后独立返回撤权通知、关闭、持久化，终态可跨实例读取。仍需真实浏览器、客户 TLS 终止/负载均衡器，以及登录撤销和角色变化的客户等价最大延迟验收；
 - 主机 PTY/direct SSH 已具备固定身份、最小环境、PTY 进程组回收、公钥认证和 SHA-256 Host Key 固定的本地/协议测试；仍需真实远程 Linux/SSH 的进程树、断网、服务重启、Host Key 轮换和秘密哨兵系统门禁；
 - 对 MongoDB、审计导出、Access Log、Trace backend、Prometheus 和测试 artifact 的端到端秘密哨兵扫描。
 

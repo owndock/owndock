@@ -82,7 +82,7 @@ Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host �
 
 创建容器会话只接受 Deployment ID，创建主机会话只接受路径中的 Managed Host ID。原始连接票据只返回一次，MongoDB 只保存 SHA-256 hash；HTTP 通过限定 connect path 的 Secure、HttpOnly、SameSite=Strict Cookie 下发，不把票据写进 JSON、URL、日志或 Trace。浏览器 WSS 使用独立的严格同域 Origin 边界，不复用 REST CORS 白名单；TerminalSession 绑定创建时的登录会话 ID，连接时实时确认该登录会话仍有效，再原子消费 ticket。
 
-`internal/shared/terminalprotocol` 固定浏览器侧 `owndock.terminal.v1` 的控制消息、二进制数据边界和消息/窗口/速率上限。WSS transport 先按容器/主机类型，再按 direct/Agent 连接模式选择受限 Gateway。容器路径共享 Deployment writer 的稳定容器身份契约，在 exec 前后和连接期间核对当前 Deployment/cutover sequence；Agent 使用独立的 `terminal.container` capability 并再次推导容器名。主机路径中，Agent 的 `terminal.host` OPEN 只传类型和窗口尺寸，本机配置固定系统身份与 Shell；direct SSH 使用 Host 上全量登记的地址、用户、SHA-256 Host Key 和外部私钥引用。两条主机路径都不接受浏览器提供命令、用户、环境、工作目录、sudo 密码或特权参数。活动 WSS 每 2 秒从权威存储复核会话、登录、角色、策略和固定目标；管理员终止与目标失效立即断流，权限撤销发送稳定通知并执行当前策略的宽限期。慢消费者、Agent 重连、容器替换或主机失效都会关闭会话，不恢复旧 PTY，详见[安全终端会话](terminal-sessions.md)。
+`internal/shared/terminalprotocol` 固定浏览器侧 `owndock.terminal.v1` 的子协议名、控制消息、二进制数据边界和消息/窗口/速率上限。WSS transport 先按容器/主机类型，再按 direct/Agent 连接模式选择受限 Gateway。容器路径共享 Deployment writer 的稳定容器身份契约，在 exec 前后和连接期间核对当前 Deployment/cutover sequence；Agent 使用独立的 `terminal.container` capability 并再次推导容器名。主机路径中，Agent 的 `terminal.host` OPEN 只传类型和窗口尺寸，本机配置固定系统身份与 Shell；direct SSH 使用 Host 上全量登记的地址、用户、SHA-256 Host Key 和外部私钥引用。两条主机路径都不接受浏览器提供命令、用户、环境、工作目录、sudo 密码或特权参数。活动 WSS 每 2 秒从权威存储复核会话、登录、角色、策略和固定目标；管理员终止与目标失效立即断流，权限撤销发送稳定通知并执行当前策略的宽限期。仓内双真实 Server/反向代理门禁已验证不同实例承载 WSS/SSH PTY 时无需进程内广播即可共同观察策略撤权并跨实例读取终态。慢消费者、Agent 重连、容器替换或主机失效都会关闭会话，不恢复旧 PTY，详见[安全终端会话](terminal-sessions.md)。
 
 ## Runtime Inventory 边界
 

@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	terminalSubprotocol    = "owndock.terminal.v1"
+	terminalSubprotocol    = terminalprotocol.Subprotocol
 	terminalOpenTimeout    = 10 * time.Second
 	terminalWriteTimeout   = 10 * time.Second
 	terminalCloseTimeout   = 5 * time.Second

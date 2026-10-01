@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	Version = "v1"
+	Version     = "v1"
+	Subprotocol = "owndock.terminal.v1"
 
 	MaximumControlMessageBytes    = 4 * 1024
 	MaximumDataMessageBytes       = 32 * 1024
