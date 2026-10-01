@@ -379,10 +379,11 @@ run_host_inventory_event_phase() {
 	esac
 }
 
-run_host_container_terminal_exit_phase() {
-	phase_ready=$workspace/container-terminal-exit-ready
-	phase_result=$workspace/container-terminal-exit-result-a
-	unused_result=$workspace/container-terminal-exit-unused-b
+run_host_container_terminal_fault_phase() {
+	fault=$1
+	phase_ready=$workspace/container-terminal-$fault-ready
+	phase_result=$workspace/container-terminal-$fault-result-a
+	unused_result=$workspace/container-terminal-$fault-unused-b
 	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
 		--ready-file "$phase_ready" --result-a "$phase_result" \
 		--result-b "$unused_result" --only-host conformance-host-a \
@@ -391,7 +392,7 @@ run_host_container_terminal_exit_phase() {
 		--terminal-container "$terminal_container" \
 		--terminal-deployment-id "$terminal_deployment_id" \
 		--terminal-cutover-sequence 1 --timeout 20s \
-		>"$workspace/container-terminal-exit-server.log" 2>&1 &
+		>"$workspace/container-terminal-$fault-server.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$phase_ready"
 	sleep 10
@@ -405,10 +406,20 @@ run_host_container_terminal_exit_phase() {
 		fail "Host A container terminal shell did not open"
 			;;
 	esac
-	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
-		stop --time 5 "$terminal_container" >/dev/null
+	case "$fault" in
+		exit)
+			docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+				stop --time 5 "$terminal_container" >/dev/null
+			;;
+		runtime-disconnect)
+			kill -TERM "$proxy_a_pid" >/dev/null 2>&1 || true
+			wait "$proxy_a_pid" >/dev/null 2>&1 || true
+			proxy_a_pid=
+			;;
+		*) fail "container terminal fault is invalid" ;;
+	esac
 	wait_for_file "$phase_result" 200
-	wait "$server_pid" || fail "Host A container terminal exit phase failed"
+	wait "$server_pid" || fail "Host A container terminal $fault phase failed"
 	server_pid=
 	[ ! -e "$unused_result" ] || fail "container terminal crossed Host identity"
 	grep -qx 'managed_host_id=conformance-host-a' "$phase_result" || \
@@ -420,16 +431,17 @@ run_host_container_terminal_exit_phase() {
 }
 
 run_host_a_probe_after_terminal() {
-	phase_ready=$workspace/container-terminal-recovery-ready
-	phase_result=$workspace/container-terminal-recovery-result-a
-	unused_result=$workspace/container-terminal-recovery-unused-b
+	fault=$1
+	phase_ready=$workspace/container-terminal-$fault-recovery-ready
+	phase_result=$workspace/container-terminal-$fault-recovery-result-a
+	unused_result=$workspace/container-terminal-$fault-recovery-unused-b
 	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
 		--ready-file "$phase_ready" --result-a "$phase_result" \
 		--result-b "$unused_result" --only-host conformance-host-a \
-		--runtime-probe ready --command-suffix terminal-recovery \
+		--runtime-probe ready --command-suffix "terminal-$fault-recovery" \
 		--deployment-capabilities=true --inventory-capabilities=true \
 		--terminal-capabilities=true --timeout 45s \
-		>"$workspace/container-terminal-recovery-server.log" 2>&1 &
+		>"$workspace/container-terminal-$fault-recovery-server.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$phase_ready"
 	wait_for_file "$phase_result" 450
@@ -733,7 +745,7 @@ if [ "$runtime_mode" = 1 ]; then
 		--env TERMINAL_PRIVATE=terminal-private-sentinel-host-a \
 		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b' \
 		>/dev/null
-	run_host_container_terminal_exit_phase
+	run_host_container_terminal_fault_phase exit
 	attempt=0
 	while [ "$attempt" -lt 100 ]; do
 		terminal_running=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
@@ -743,7 +755,21 @@ if [ "$runtime_mode" = 1 ]; then
 		sleep 0.1
 	done
 	[ "$terminal_running" = false ] || fail "Host A terminal target did not exit"
-	run_host_a_probe_after_terminal
+	run_host_a_probe_after_terminal exit
+	docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		start "$terminal_container" >/dev/null
+	run_host_container_terminal_fault_phase runtime-disconnect
+	terminal_running=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		inspect --format '{{.State.Running}}' "$terminal_container")
+	[ "$terminal_running" = true ] || \
+		fail "Host A terminal runtime disconnect stopped the target container"
+	rm -f "$docker_socket_a"
+	proxy_a_ready=$workspace/proxy-a-terminal-recovery-ready
+	"$tool" docker-proxy --listen "$docker_socket_a" --upstream "$engine_a_address" \
+		--ready-file "$proxy_a_ready" >"$workspace/proxy-a-terminal-recovery.log" 2>&1 &
+	proxy_a_pid=$!
+	wait_for_file "$proxy_a_ready"
+	run_host_a_probe_after_terminal runtime-disconnect
 	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
 		"$deployment_container")
@@ -765,7 +791,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit, secret-safe bounded inventory Event flood, outage, restart fencing and recovery passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi
