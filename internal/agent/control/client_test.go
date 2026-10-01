@@ -227,6 +227,94 @@ func TestClientBridgesContainerTerminalFrames(t *testing.T) {
 	}
 }
 
+func TestClientClosesBlockedTerminalWhenInputQueueFills(t *testing.T) {
+	stream := newControlTerminalStreamStub()
+	client, err := NewClient(
+		http.DefaultClient,
+		&probeExecutorStub{},
+		ClientConfig{
+			Endpoint: "https://control.example.com/api/v1/agent/connect",
+			Identity: testIdentity(), HandshakeTimeout: time.Second,
+			ServerSilenceTimeout: 2 * time.Second, MaxFrameBytes: 64 * 1024,
+			MaxConcurrentCommands: 1,
+			Capabilities: []string{
+				agentprotocol.CapabilityTerminalContainer,
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.WithContainerTerminal(&containerTerminalExecutorStub{
+		stream: stream, opens: make(chan agentprotocol.TerminalOpen, 1),
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	outbound := make(chan outboundFrame, 4)
+	var workers sync.WaitGroup
+	open := agentprotocol.TerminalOpen{
+		Kind:         agentprotocol.TerminalKindContainer,
+		DeploymentID: "deployment-1", ProjectID: "project-1",
+		ApplicationID: "application-1", EnvironmentID: "environment-1",
+		RuntimeTargetID: "target-1", ContainerName: "owndock-container-1",
+		CutoverSequence: 1, Columns: 100, Rows: 40,
+	}
+	if err := client.handleTerminalFrame(
+		ctx,
+		agentprotocol.TerminalFrame{
+			SessionID: "blocked-terminal", Sequence: 1,
+			Type: agentprotocol.TerminalFrameOpen, Open: &open,
+		},
+		outbound,
+		&workers,
+	); err != nil {
+		t.Fatal(err)
+	}
+	<-outbound
+	first := agentprotocol.TerminalFrame{
+		SessionID: "blocked-terminal", Sequence: 2,
+		Type: agentprotocol.TerminalFrameStdin, Data: []byte("first"),
+	}
+	if err := client.handleTerminalFrame(ctx, first, outbound, &workers); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for len(stream.writes) != 1 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(stream.writes) != 1 {
+		t.Fatal("first terminal input did not reach the stream")
+	}
+	for sequence := uint64(3); sequence <= 20; sequence++ {
+		frame := agentprotocol.TerminalFrame{
+			SessionID: "blocked-terminal", Sequence: sequence,
+			Type: agentprotocol.TerminalFrameStdin, Data: []byte("blocked"),
+		}
+		err = client.handleTerminalFrame(ctx, frame, outbound, &workers)
+		if sequence < 20 && err != nil {
+			t.Fatalf("terminal frame %d error = %v", sequence, err)
+		}
+	}
+	if !errors.Is(err, ErrConnectionUnavailable) {
+		t.Fatalf("full terminal input queue error = %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		workers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("blocked terminal worker did not stop")
+	}
+	select {
+	case <-stream.closed:
+	default:
+		t.Fatal("blocked terminal stream was not closed")
+	}
+}
+
 func TestClientRoutesHostTerminalOnlyToHostCapability(t *testing.T) {
 	stream := newControlTerminalStreamStub()
 	executor := &hostTerminalExecutorStub{

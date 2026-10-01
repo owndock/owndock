@@ -496,6 +496,7 @@ func runDualServer(arguments []string) error {
 	var inventoryEventSinceA, inventoryEventSinceB string
 	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated, terminalCapabilities bool
 	var terminalBackpressure bool
+	var terminalInputFlood bool
 	var deploymentSequence uint64
 	var terminalCutoverSequence uint64
 	var timeout time.Duration
@@ -529,6 +530,7 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&terminalDeploymentID, "terminal-deployment-id", "", "container terminal deployment ID")
 	flags.Uint64Var(&terminalCutoverSequence, "terminal-cutover-sequence", 0, "container terminal cutover sequence")
 	flags.BoolVar(&terminalBackpressure, "terminal-output-backpressure", false, "stop consuming flooding terminal output")
+	flags.BoolVar(&terminalInputFlood, "terminal-input-backpressure", false, "flood a blocked terminal input")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
 		hostA == hostB || onlyHost != "" && onlyHost != hostA && onlyHost != hostB ||
@@ -557,7 +559,8 @@ func runDualServer(arguments []string) error {
 			deploymentCommand != "" || inventoryCommand != "" ||
 			terminalDeploymentID == "" || terminalCutoverSequence == 0) ||
 		terminalContainer == "" && (terminalDeploymentID != "" || terminalCutoverSequence != 0 ||
-			terminalBackpressure) {
+			terminalBackpressure || terminalInputFlood) ||
+		terminalBackpressure && terminalInputFlood {
 		return errors.New("serve-dual arguments are invalid")
 	}
 	eventSinceA, eventSinceB, err := parseInventoryEventCursors(
@@ -643,6 +646,7 @@ func runDualServer(arguments []string) error {
 		terminalDeploymentID:     terminalDeploymentID,
 		terminalCutoverSequence:  terminalCutoverSequence,
 		terminalBackpressure:     terminalBackpressure,
+		terminalInputFlood:       terminalInputFlood,
 		inventoryCommand:         inventoryCommand,
 		inventoryCapabilities:    inventoryCapabilities,
 		inventoryResult:          inventoryResult,
@@ -701,6 +705,7 @@ type dualConformanceHandler struct {
 	terminalDeploymentID     string
 	terminalCutoverSequence  uint64
 	terminalBackpressure     bool
+	terminalInputFlood       bool
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -740,6 +745,7 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		terminalDeploymentID:     handler.terminalDeploymentID,
 		terminalCutoverSequence:  handler.terminalCutoverSequence,
 		terminalBackpressure:     handler.terminalBackpressure,
+		terminalInputFlood:       handler.terminalInputFlood,
 		inventoryCommand:         handler.inventoryCommand,
 		inventoryCapabilities:    handler.inventoryCapabilities,
 		inventoryResult:          handler.inventoryResult,
@@ -1192,6 +1198,7 @@ type conformanceHandler struct {
 	terminalDeploymentID     string
 	terminalCutoverSequence  uint64
 	terminalBackpressure     bool
+	terminalInputFlood       bool
 	inventoryCommand         string
 	inventoryCapabilities    bool
 	inventoryResult          string
@@ -1275,6 +1282,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		return h.handleContainerTerminal(
 			encoder,
 			controller,
+			scanner,
 			hello,
 			peer,
 		)
@@ -1411,6 +1419,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 func (h *conformanceHandler) handleContainerTerminal(
 	encoder *json.Encoder,
 	controller *http.ResponseController,
+	scanner *bufio.Scanner,
 	hello *agentHello,
 	peer *x509.Certificate,
 ) error {
@@ -1445,6 +1454,8 @@ func (h *conformanceHandler) handleContainerTerminal(
 		terminalInput = []byte(
 			"sleep 2; dd if=/dev/zero bs=32768 count=512 2>/dev/null\\n",
 		)
+	} else if h.terminalInputFlood {
+		terminalInput = []byte("sleep 30\n")
 	}
 	for _, outbound := range []agentprotocol.TerminalFrame{
 		{
@@ -1469,9 +1480,44 @@ func (h *conformanceHandler) handleContainerTerminal(
 	if err := controller.Flush(); err != nil {
 		return err
 	}
-	timer := time.NewTimer(15 * time.Second)
-	defer timer.Stop()
-	<-timer.C
+	if h.terminalInputFlood {
+		time.Sleep(time.Second)
+		payload := bytes.Repeat(
+			[]byte{'x'},
+			agentprotocol.MaximumTerminalDataBytes,
+		)
+		for sequence := uint64(4); sequence < 260; sequence++ {
+			serverSequence++
+			frame := agentprotocol.TerminalFrame{
+				SessionID: sessionID, Sequence: sequence,
+				Type: agentprotocol.TerminalFrameStdin,
+				Data: payload,
+			}
+			if err := encoder.Encode(serverFrame{
+				Type: "terminal", Sequence: serverSequence, Terminal: &frame,
+			}); err != nil {
+				break
+			}
+		}
+		_ = controller.Flush()
+		disconnected := make(chan struct{})
+		go func() {
+			for scanner.Scan() {
+			}
+			close(disconnected)
+		}()
+		timer := time.NewTimer(20 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-disconnected:
+		case <-timer.C:
+			return errors.New("Agent blocked terminal input did not close its control stream")
+		}
+	} else {
+		timer := time.NewTimer(15 * time.Second)
+		defer timer.Stop()
+		<-timer.C
+	}
 	result := fmt.Sprintf(
 		"agent_version=%s\nprotocol_version=%s\nmanaged_host_id=%s\ncertificate_serial=%s\nterminal_session_id=%s\nterminal_status=frames_sent\nstatus=passed\n",
 		hello.AgentVersion,

@@ -408,7 +408,13 @@ wait_for_terminal_records_empty() {
 run_host_container_terminal_fault_phase() {
 	fault=$1
 	terminal_output_backpressure=false
+	terminal_input_backpressure=false
+	terminal_phase_timeout=20s
 	[ "$fault" = output-backpressure ] && terminal_output_backpressure=true
+	if [ "$fault" = input-backpressure ]; then
+		terminal_input_backpressure=true
+		terminal_phase_timeout=35s
+	fi
 	phase_ready=$workspace/container-terminal-$fault-ready
 	phase_result=$workspace/container-terminal-$fault-result-a
 	unused_result=$workspace/container-terminal-$fault-unused-b
@@ -421,7 +427,8 @@ run_host_container_terminal_fault_phase() {
 		--terminal-deployment-id "$terminal_deployment_id" \
 		--terminal-cutover-sequence 1 \
 		--terminal-output-backpressure="$terminal_output_backpressure" \
-		--timeout 20s \
+		--terminal-input-backpressure="$terminal_input_backpressure" \
+		--timeout "$terminal_phase_timeout" \
 		>"$workspace/container-terminal-$fault-server.log" 2>&1 &
 	server_pid=$!
 	wait_for_file "$phase_ready"
@@ -473,9 +480,11 @@ run_host_container_terminal_fault_phase() {
 			wait "$agent_a_pid" >/dev/null 2>&1 || true
 			agent_a_pid=
 			;;
-		output-backpressure)
+		output-backpressure | input-backpressure)
+			backpressure_attempt_limit=100
+			[ "$fault" = input-backpressure ] && backpressure_attempt_limit=250
 			attempt=0
-			while [ "$attempt" -lt 100 ]; do
+			while [ "$attempt" -lt "$backpressure_attempt_limit" ]; do
 				terminal_processes=$(docker exec "$engine_a_id" \
 					docker --host tcp://127.0.0.1:2375 top \
 					"$terminal_container" -eo pid,args)
@@ -487,7 +496,7 @@ run_host_container_terminal_fault_phase() {
 				sleep 0.1
 			done
 			case "$terminal_processes" in
-				*'/bin/sh'*) fail "Host A terminal output backpressure left its shell running" ;;
+				*'/bin/sh'*) fail "Host A terminal $fault left its shell running" ;;
 			esac
 			;;
 		*) fail "container terminal fault is invalid" ;;
@@ -868,6 +877,9 @@ if [ "$runtime_mode" = 1 ]; then
 	run_host_container_terminal_fault_phase output-backpressure
 	wait_for_terminal_records_empty
 	run_host_a_probe_after_terminal output-backpressure
+	run_host_container_terminal_fault_phase input-backpressure
+	wait_for_terminal_records_empty
+	run_host_a_probe_after_terminal input-backpressure
 	state_b_after_terminal=$(docker exec "$engine_b_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \
 		"$deployment_container")
@@ -889,7 +901,7 @@ wait "$agent_b_pid" || fail "Host B Agent did not stop cleanly"
 agent_b_pid=
 
 if [ "$runtime_mode" = 1 ]; then
-	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement/Agent-restart/backpressure recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
+	printf '%s\n' "OwnDock dual Agent processes, isolated Engines, deployment, container terminal exit/disconnect/replacement/Agent-restart/output-input-backpressure recovery, secret-safe bounded inventory Event flood, outage and restart fencing passed"
 else
 	printf '%s\n' "OwnDock shared-control dual Agent routing and single-Host rejection recovery passed"
 fi

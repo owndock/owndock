@@ -758,6 +758,7 @@ func (c *Client) handleTerminalFrame(
 		c.terminalMu.Unlock()
 		return nil
 	default:
+		state.cancel()
 		c.terminalMu.Unlock()
 		return ErrConnectionUnavailable
 	}
@@ -817,6 +818,15 @@ func (c *Client) runTerminal(
 		return
 	}
 	defer stream.Close()
+	closeWatcherDone := make(chan struct{})
+	defer close(closeWatcherDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = stream.Close()
+		case <-closeWatcherDone:
+		}
+	}()
 	sequence := uint64(1)
 	if enqueueTerminalFrame(ctx, outbound, agentprotocol.TerminalFrame{
 		SessionID: openFrame.SessionID, Sequence: sequence,

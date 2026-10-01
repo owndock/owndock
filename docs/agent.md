@@ -224,7 +224,7 @@ Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell�
 
 双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。门禁还会在两个 Engine 各自创建唯一容器，执行 `runtime.inventory.events` 有界持续读取，要求每个 Agent 只能返回本机 Docker Event 的 Runtime ID；第一次响应中的 Docker 原生 `occurred_at` 会原样作为下一次 `Since`，两端必须再次返回同一事件，证明断线后的 inclusive cursor 重放链路有效。读取期间切断 A 的本地 Docker 通道必须稳定归类 `inventory_unavailable`，B 在 A 故障时继续成功，重建同一路径代理后 A 无需重启即可读取新事件。恢复后每个 Engine 再制造 70 条带私密 Label 哨兵的真实 create Event，两端都必须只返回前 64 条并显式设置 `truncated`，且结果和进程日志中均不得出现 Docker Actor attributes，避免事件洪峰突破协议、内存和秘密边界。最后以 `SIGKILL` 中断 Agent A，再从原状态目录启动同一真实二进制：A 必须以更高 cutover sequence 完成新部署，并在重启后拒绝延迟的旧 activate；B 的稳定容器身份保持不变。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误、Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待，以及流式 HTTP 请求在响应头前连接失效时 `net/http` 等待请求体而不再重连的问题。Agent 现在用握手超时同时关闭请求管道与请求上下文，保证该阶段有界返回并由 Runner 重连。独立执行器门禁继续验证 activate 中断恢复；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
 
-同一真实双 Agent 门禁还在 Host A 创建带完整稳定身份 Label 的 canonical 容器，控制面只向 Host A 下发 `terminal.container` OPEN、stdin 和 resize 帧。五个阶段依次在固定 Shell 打开后停止目标容器、保持容器运行但切断 Agent 的本地 Docker 通道、以相同 canonical 名称和标签创建不同容器 ID 的替换实例、用 `SIGKILL` 中断 Agent 并从原状态目录启动同一二进制，以及让 Shell 产生 16 MiB 输出但控制端停止消费。每个阶段都要求 Agent 有界收敛旧会话，恢复后重新连接控制面并返回 `runtime_ready`；进程重启还必须通过持久撤销记录回收遗留 Docker exec Shell，背压阶段必须清除 Shell 和撤销记录。替换容器保持运行，Host B 的稳定部署身份不得变化。容器携带的私密环境哨兵必须不出现在 Agent、控制面、代理或 Engine 日志中。该证据覆盖仓内隔离 Engine 的资源退出、本地 Runtime 断线、同名实例替换、Agent 进程崩溃恢复和单 Host 输出背压，不替代客户主机网络分区、跨主机背压和浏览器 E2E。
+同一真实双 Agent 门禁还在 Host A 创建带完整稳定身份 Label 的 canonical 容器，控制面只向 Host A 下发 `terminal.container` OPEN、stdin 和 resize 帧。六个阶段依次在固定 Shell 打开后停止目标容器、保持容器运行但切断 Agent 的本地 Docker 通道、以相同 canonical 名称和标签创建不同容器 ID 的替换实例、用 `SIGKILL` 中断 Agent 并从原状态目录启动同一二进制、让 Shell 产生 16 MiB 输出但控制端停止消费，以及让 Shell 停止读取时发送 8 MiB 有界 stdin。每个阶段都要求 Agent 有界收敛旧会话，恢复后重新连接控制面并返回 `runtime_ready`；进程重启和双向背压阶段还必须清除 Shell 与持久撤销记录。输入队列满会立即取消终端，独立 watcher 关闭底层 stream 以解除阻塞写。替换容器保持运行，Host B 的稳定部署身份不得变化。容器携带的私密环境哨兵必须不出现在 Agent、控制面、代理或 Engine 日志中。该证据覆盖仓内隔离 Engine 的资源退出、本地 Runtime 断线、同名实例替换、Agent 进程崩溃恢复和单 Host 双向背压，不替代客户主机网络分区、跨主机背压和浏览器 E2E。
 
 ```mermaid
 sequenceDiagram
@@ -341,6 +341,12 @@ sequenceDiagram
     A--xC: bounded outbound queue reaches backpressure
     A->>DA: revoke exec and confirm shell exit
     A->>C: reconnect and runtime.probe
+    A-->>C: runtime_ready
+    C->>A: reopen terminal; shell stops reading stdin
+    C->>A: 8 MiB input as bounded 32 KiB frames
+    A->>A: bounded inbound queue fills; cancel terminal
+    A->>DA: close stream, unblock write, revoke exec
+    A--xC: close control request and reconnect
     A-->>C: runtime_ready
     Note over DA,DB: A remains cutover 2; B remains cutover 1
 ```
