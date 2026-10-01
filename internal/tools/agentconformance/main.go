@@ -461,7 +461,7 @@ func runDualServer(arguments []string) error {
 	var listen, materialDirectory, readyFile, resultA, resultB string
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
 	var commandSuffix, deploymentCommand, deploymentContainer, deploymentResult, inventoryCommand string
-	var inventoryEventIDA, inventoryEventIDB string
+	var inventoryEventIDA, inventoryEventIDB, inventoryResult string
 	var deploymentCapabilities, inventoryCapabilities bool
 	var deploymentSequence uint64
 	var timeout time.Duration
@@ -485,6 +485,7 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&inventoryCommand, "inventory-command", "", "optional runtime inventory command kind")
 	flags.StringVar(&inventoryEventIDA, "inventory-event-id-a", "", "expected Host A Docker event runtime ID")
 	flags.StringVar(&inventoryEventIDB, "inventory-event-id-b", "", "expected Host B Docker event runtime ID")
+	flags.StringVar(&inventoryResult, "inventory-result", "succeeded", "expected inventory result: succeeded or unavailable")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
@@ -499,6 +500,9 @@ func runDualServer(arguments []string) error {
 			deploymentCommand != string(agentprotocol.AgentCommandDeploymentActivate) ||
 		!validConformanceInventoryCommand(inventoryCommand) ||
 		inventoryCommand != "" && !inventoryCapabilities ||
+		inventoryResult != "succeeded" && inventoryResult != "unavailable" ||
+		inventoryResult == "unavailable" &&
+			inventoryCommand != string(agentprotocol.AgentCommandInventoryEvents) ||
 		inventoryCommand == string(agentprotocol.AgentCommandInventoryEvents) &&
 			(!validConformanceRuntimeID(inventoryEventIDA) ||
 				!validConformanceRuntimeID(inventoryEventIDB) ||
@@ -580,6 +584,7 @@ func runDualServer(arguments []string) error {
 		deploymentCapabilities: deploymentCapabilities,
 		inventoryCommand:       inventoryCommand,
 		inventoryCapabilities:  inventoryCapabilities,
+		inventoryResult:        inventoryResult,
 		inventoryEventIDs: map[string]string{
 			hostA: inventoryEventIDA,
 			hostB: inventoryEventIDB,
@@ -627,6 +632,7 @@ type dualConformanceHandler struct {
 	deploymentCapabilities bool
 	inventoryCommand       string
 	inventoryCapabilities  bool
+	inventoryResult        string
 	inventoryEventIDs      map[string]string
 	states                 map[string]bool
 	completed              chan<- error
@@ -658,6 +664,7 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 		deploymentCapabilities: handler.deploymentCapabilities,
 		inventoryCommand:       handler.inventoryCommand,
 		inventoryCapabilities:  handler.inventoryCapabilities,
+		inventoryResult:        handler.inventoryResult,
 		inventoryEventID:       handler.inventoryEventIDs[host],
 		inventoryForbiddenID:   handler.inventoryEventIDs[otherFixtureHost(handler.identities, host)],
 	}
@@ -1102,6 +1109,7 @@ type conformanceHandler struct {
 	deploymentCapabilities bool
 	inventoryCommand       string
 	inventoryCapabilities  bool
+	inventoryResult        string
 	inventoryEventID       string
 	inventoryForbiddenID   string
 	once                   sync.Once
@@ -1288,7 +1296,7 @@ func (h *conformanceHandler) handle(writer http.ResponseWriter, request *http.Re
 		command.ID,
 		h.conformanceCommandStatus(expectedRuntimeProbe),
 	)
-	if h.inventoryCommand != "" {
+	if h.inventoryCommand != "" && h.inventoryResult == "succeeded" {
 		inventoryDetails, err := h.conformanceInventoryDetails(validatedResult)
 		if err != nil {
 			return err
@@ -1411,6 +1419,11 @@ func (h *conformanceHandler) validConformanceResult(
 	expectedRuntimeProbe string,
 ) bool {
 	if h.inventoryCommand != "" {
+		if h.inventoryResult == "unavailable" {
+			return result.Status == agentprotocol.AgentCommandFailed &&
+				result.ErrorCode == "inventory_unavailable" &&
+				result.RuntimeProbe == nil && result.Inventory == nil
+		}
 		return result.Status == agentprotocol.AgentCommandSucceeded &&
 			result.ErrorCode == "" && result.RuntimeProbe == nil
 	}
@@ -1427,6 +1440,9 @@ func (h *conformanceHandler) validConformanceResult(
 
 func (h *conformanceHandler) conformanceCommandStatus(expectedRuntimeProbe string) string {
 	if h.inventoryCommand != "" {
+		if h.inventoryResult == "unavailable" {
+			return "inventory_unavailable"
+		}
 		return "inventory_succeeded"
 	}
 	if h.deploymentCommand != "" {

@@ -269,6 +269,75 @@ run_dual_inventory_event_phase() {
 	done
 }
 
+run_host_inventory_event_phase() {
+	host=$1
+	expected_result=$2
+	command_suffix=$3
+	phase_name=$host-$expected_result-$command_suffix
+	phase_ready=$workspace/inventory-events-$phase_name-ready
+	phase_result=$workspace/inventory-events-$phase_name-result
+	case "$host" in
+		a)
+			result_a=$phase_result
+			result_b=$workspace/inventory-events-$phase_name-unused-b
+			only_host=conformance-host-a
+			expected_event_id=$event_id_a
+			;;
+		b)
+			result_a=$workspace/inventory-events-$phase_name-unused-a
+			result_b=$phase_result
+			only_host=conformance-host-b
+			expected_event_id=$event_id_b
+			;;
+		*) fail "single-Host inventory Event phase has an invalid Host" ;;
+	esac
+	"$tool" serve-dual --listen "$listen" --materials "$materials_a" \
+		--ready-file "$phase_ready" --result-a "$result_a" --result-b "$result_b" \
+		--only-host "$only_host" --runtime-probe ready \
+		--deployment-capabilities=true --inventory-capabilities=true \
+		--inventory-command runtime.inventory.events --inventory-result "$expected_result" \
+		--inventory-event-id-a "$event_id_a" --inventory-event-id-b "$event_id_b" \
+		--command-suffix "$command_suffix" --timeout 4m \
+		>"$workspace/inventory-events-$phase_name-server.log" 2>&1 &
+	server_pid=$!
+	wait_for_file "$phase_ready"
+	if [ "$expected_result" = unavailable ]; then
+		sleep 1
+		case "$host" in
+			a)
+				kill -TERM "$proxy_a_pid" >/dev/null 2>&1 || true
+				wait "$proxy_a_pid" >/dev/null 2>&1 || true
+				proxy_a_pid=
+				;;
+			b)
+				kill -TERM "$proxy_b_pid" >/dev/null 2>&1 || true
+				wait "$proxy_b_pid" >/dev/null 2>&1 || true
+				proxy_b_pid=
+				;;
+		esac
+	fi
+	wait_for_file "$phase_result" 2100
+	wait "$server_pid" || fail "Host $host runtime.inventory.events $expected_result phase failed"
+	server_pid=
+	grep -qx "managed_host_id=$only_host" "$phase_result" || \
+		fail "single-Host inventory Event phase reached the wrong Host"
+	grep -qx "command_id=conformance-inventory-events-$only_host-$command_suffix" \
+		"$phase_result" || fail "single-Host inventory Event phase returned the wrong command"
+	case "$expected_result" in
+		succeeded)
+			grep -qx 'command_status=inventory_succeeded' "$phase_result" || \
+				fail "Host $host inventory Event recovery did not succeed"
+			grep -qx "inventory_event_runtime_id=$expected_event_id" "$phase_result" || \
+				fail "Host $host inventory Event recovery omitted its Runtime ID"
+			;;
+		unavailable)
+			grep -qx 'command_status=inventory_unavailable' "$phase_result" || \
+				fail "Host $host inventory Event disconnect was not classified safely"
+			;;
+		*) fail "single-Host inventory Event phase has an invalid expected result" ;;
+	esac
+}
+
 materials_a=$workspace/materials-a
 materials_b=$workspace/materials-b
 "$tool" materials --output "$materials_a" --host-id conformance-host-a
@@ -463,6 +532,19 @@ if [ "$runtime_mode" = 1 ]; then
 	[ "${#event_id_a}" -eq 64 ] && [ "${#event_id_b}" -eq 64 ] || \
 		fail "isolated Docker Event Runtime IDs have invalid lengths"
 	run_dual_inventory_event_phase
+	run_host_inventory_event_phase a unavailable event-outage
+	run_host_inventory_event_phase b succeeded host-a-outage
+	rm -f "$docker_socket_a"
+	proxy_a_ready=$workspace/proxy-a-event-recovery-ready
+	"$tool" docker-proxy --listen "$docker_socket_a" --upstream "$engine_a_address" \
+		--ready-file "$proxy_a_ready" >"$workspace/proxy-a-event-recovery.log" 2>&1 &
+	proxy_a_pid=$!
+	wait_for_file "$proxy_a_ready"
+	event_id_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
+		create --name owndock-event-a-recovered \
+		'nginx@sha256:1eff5a5f3fcf8431a0abb7eddf5471fec24e5e1905a2581aeacdb07a4479b92b')
+	[ "${#event_id_a}" -eq 64 ] || fail "recovered Host A Docker Event Runtime ID is invalid"
+	run_host_inventory_event_phase a succeeded event-recovery
 
 	# An abrupt Agent process loss must not erase its independently persisted
 	# cutover watermark. Host B remains available, while Host A restarts from the

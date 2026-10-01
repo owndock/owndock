@@ -317,6 +317,19 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 	if _, err := handler.conformanceInventoryDetails(eventResult); err == nil {
 		t.Fatal("cross-Host inventory Event unexpectedly passed")
 	}
+	handler.inventoryResult = "unavailable"
+	unavailable := agentprotocol.AgentCommandResult{
+		CommandID: eventCommand.ID,
+		Status:    agentprotocol.AgentCommandFailed,
+		ErrorCode: "inventory_unavailable",
+	}
+	if err := unavailable.Validate(eventCommand); err != nil {
+		t.Fatalf("inventory unavailable validation: %v", err)
+	}
+	if !handler.validConformanceResult(unavailable, "ready") ||
+		handler.conformanceCommandStatus("ready") != "inventory_unavailable" {
+		t.Fatal("inventory unavailable result was not accepted")
+	}
 }
 
 func TestCommandSuffixValidation(t *testing.T) {
