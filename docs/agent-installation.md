@@ -64,7 +64,7 @@ sudo owndock-agentctl enroll \
 
 安装器默认授权部署、Runtime Inventory 和容器终端能力，不授权主机终端或 managed ingress。确实需要网页进入主机 Shell 时，由管理员显式增加 `--enable-host-terminal`；这只授予 Agent 身份能力上限，用户仍必须通过独立 RBAC、重新确认和审计门禁。
 
-为该 Host 启用 managed HTTP/HTTPS 入口时，在首次 enrollment 增加 `--enable-ingress`。安装器会把 `ingress.reconcile` 同时写入机器身份授权和本机配置，启动固定 digest 的独立 Caddy Gateway，再启动 Agent；Gateway 失败时不会以只启动 Agent 的方式伪装成功：
+为该 Host 启用 managed HTTP/HTTPS 入口时，在首次 enrollment 增加 `--enable-ingress`。安装器会把 `ingress.prepare/commit/abort` 作为不可拆分的一组同时写入机器身份授权和本机配置，启动固定 digest 的独立 Caddy Gateway，再启动 Agent；Gateway 失败时不会以只启动 Agent 的方式伪装成功：
 
 ```bash
 sudo owndock-agentctl enroll \

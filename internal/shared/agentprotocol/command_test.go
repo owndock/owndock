@@ -198,7 +198,7 @@ func TestCutoverReleaseCommandIsNarrowAndRoundTrips(t *testing.T) {
 	}
 }
 
-func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
+func TestIngressTransactionCommandsAreTypedBoundedAndRoundTrip(t *testing.T) {
 	routes := []IngressRoute{{RouteID: "route-1", Revision: 2,
 		DeploymentID: "deployment-2", CutoverSequence: 7, RuntimeTargetID: "target-1",
 		Hostname: "api.example.com", BackendAlias: "deployment-2", BackendPort: 8080,
@@ -207,14 +207,14 @@ func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := AgentCommand{ID: "ingress-command-1", Kind: AgentCommandIngressReconcile,
+	command := AgentCommand{ID: "ingress-command-1", Kind: AgentCommandIngressPrepare,
 		Deadline: time.Unix(1000, 0).UTC(), Ingress: &IngressCommand{
-			HostRevision: 9, ConfigDigest: digest, Routes: routes}}
+			HostRevision: 9, ConfigDigest: digest, Routes: routes, ProbeRouteIDs: []string{"route-1"}}}
 	if err := command.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	if command.Kind.DurableResult() {
-		t.Fatal("ingress reconcile must reach the persistent fence and actual Gateway on replay")
+		t.Fatal("ingress transaction must reach persistent state and actual Gateway on replay")
 	}
 	roundTrip := NewCommandDocument(command).Domain()
 	if !command.Equivalent(roundTrip) {
@@ -229,6 +229,14 @@ func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
 	wrong.Ingress = &IngressResult{HostRevision: 8, ConfigDigest: digest}
 	if !errors.Is(wrong.Validate(command), ErrResultInvalid) {
 		t.Fatal("result accepted a different Host revision")
+	}
+	for _, kind := range []AgentCommandKind{AgentCommandIngressCommit, AgentCommandIngressAbort} {
+		transaction := command
+		transaction.Kind = kind
+		transaction.ID = "command-" + string(kind)
+		if err := transaction.Validate(); err != nil || transaction.Kind.DurableResult() {
+			t.Fatalf("%s validation/durability = %v/%t", kind, err, transaction.Kind.DurableResult())
+		}
 	}
 
 	unsafe := command
@@ -250,6 +258,13 @@ func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
 	ingress = IngressCommand{HostRevision: 10, ConfigDigest: digest, Routes: duplicate}
 	if !errors.Is(ingress.Validate(), ErrCommandInvalid) {
 		t.Fatal("ingress accepted duplicate hostname")
+	}
+	badProbe := command
+	probeIngress := *command.Ingress
+	probeIngress.ProbeRouteIDs = []string{"missing-route"}
+	badProbe.Ingress = &probeIngress
+	if !errors.Is(badProbe.Validate(), ErrCommandInvalid) {
+		t.Fatal("ingress command accepted a probe outside the complete config")
 	}
 }
 

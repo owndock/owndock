@@ -99,7 +99,7 @@ func TestDockerExecutorFailsClosedWithoutIngressGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := agentprotocol.AgentCommand{ID: "ingress-command-1",
-		Kind: agentprotocol.AgentCommandIngressReconcile, Deadline: time.Now().Add(time.Minute),
+		Kind: agentprotocol.AgentCommandIngressPrepare, Deadline: time.Now().Add(time.Minute),
 		Ingress: &agentprotocol.IngressCommand{HostRevision: 1, ConfigDigest: digest, Routes: routes}}
 	result, err := executor.Execute(t.Context(), command)
 	if err != nil {

@@ -125,7 +125,9 @@ func NewClient(
 		for _, capability := range agentprotocol.SupportedCapabilities() {
 			if capability != agentprotocol.CapabilityTerminalContainer &&
 				capability != agentprotocol.CapabilityTerminalHost &&
-				capability != agentprotocol.CapabilityIngressReconcile {
+				capability != agentprotocol.CapabilityIngressPrepare &&
+				capability != agentprotocol.CapabilityIngressCommit &&
+				capability != agentprotocol.CapabilityIngressAbort {
 				config.Capabilities = append(config.Capabilities, capability)
 			}
 		}

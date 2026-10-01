@@ -503,7 +503,7 @@ func validIdentitySegment(value string) bool {
 }
 
 func normalizeCapabilities(values []string) ([]string, error) {
-	const maximumCapabilities = 16
+	const maximumCapabilities = 64
 	if len(values) > maximumCapabilities {
 		return nil, ErrInvalidAgentIdentity
 	}

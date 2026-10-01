@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
@@ -208,7 +209,9 @@ control:
   client_private_key_file: /etc/owndock/agent-key.pem
   capabilities:
     - runtime.probe
-    - ingress.reconcile
+    - ingress.prepare
+    - ingress.commit
+    - ingress.abort
 runtime: {}
 ingress:
   enabled: %s
@@ -225,6 +228,14 @@ ingress:
 		if enabled == "true" && err != nil {
 			t.Fatalf("enabled ingress error = %v", err)
 		}
+	}
+	partial := strings.Replace(base, "    - ingress.commit\n    - ingress.abort\n", "", 1)
+	path := filepath.Join(t.TempDir(), "agent.yaml")
+	if err := os.WriteFile(path, []byte(fmt.Sprintf(partial, "false")), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("partial ingress capability set error = %v", err)
 	}
 }
 

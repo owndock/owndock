@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -46,6 +47,7 @@ func TestBuildCaddyConfigIsDeterministicAndConstrained(t *testing.T) {
 		`"listen":[":8080",":8443"]`, `"strict_sni_host":true`,
 		`"skip":["route-2.example.com"]`, `"status_code":404`,
 		`"dial":"deployment-1:8080"`, `"stream_close_delay":"5m"`,
+		`"header":{"X-OwnDock-Route-Probe"`, `"response":{"set":{"X-OwnDock-Route-Probe"`,
 	} {
 		if !strings.Contains(encoded, required) {
 			t.Fatalf("generated config missing %s: %s", required, encoded)
@@ -56,6 +58,44 @@ func TestBuildCaddyConfigIsDeterministicAndConstrained(t *testing.T) {
 			t.Fatalf("generated config contains forbidden %q", forbidden)
 		}
 	}
+}
+
+func TestCaddyGatewayPrivateProbeUsesHostTLSAndExactMarker(t *testing.T) {
+	command := ingressCommand(t, 2,
+		[]agentprotocol.IngressRoute{ingressRoute("route-1", 1, "deployment-1", 1)})
+	command.ProbeRouteIDs = []string{"route-1"}
+	token := caddyProbeToken(command.ConfigDigest, "route-1")
+	var seen *http.Request
+	gateway := &CaddyGateway{timeout: time.Second, probeClient: &http.Client{
+		Transport: roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+			seen = request
+			header := make(http.Header)
+			header.Set(caddyProbeHeader, token)
+			return &http.Response{StatusCode: http.StatusNotFound,
+				Header: header,
+				Body:   io.NopCloser(strings.NewReader("application response"))}, nil
+		}),
+	}}
+	if err := gateway.Probe(t.Context(), command); err != nil {
+		t.Fatal(err)
+	}
+	if seen == nil || seen.URL.Scheme != "https" || seen.URL.Host != "route-1.example.com:443" ||
+		seen.Host != "route-1.example.com:443" || seen.Header.Get(caddyProbeHeader) != token {
+		t.Fatalf("probe request = %#v", seen)
+	}
+	gateway.probeClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader("unmarked"))}, nil
+	})}
+	if err := gateway.Probe(t.Context(), command); !errors.Is(err, ErrIngressBackendUnhealthy) {
+		t.Fatalf("unmarked response error = %v", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestBuildCaddyConfigDoesNotExposeHTTPSForDevelopmentOnlyRoutes(t *testing.T) {

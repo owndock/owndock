@@ -49,7 +49,9 @@ const (
 	AgentCommandInventoryChunk     = agentprotocol.AgentCommandInventoryChunk
 	AgentCommandInventoryRelease   = agentprotocol.AgentCommandInventoryRelease
 	AgentCommandInventoryEvents    = agentprotocol.AgentCommandInventoryEvents
-	AgentCommandIngressReconcile   = agentprotocol.AgentCommandIngressReconcile
+	AgentCommandIngressPrepare     = agentprotocol.AgentCommandIngressPrepare
+	AgentCommandIngressCommit      = agentprotocol.AgentCommandIngressCommit
+	AgentCommandIngressAbort       = agentprotocol.AgentCommandIngressAbort
 	AgentCommandSucceeded          = agentprotocol.AgentCommandSucceeded
 	AgentCommandFailed             = agentprotocol.AgentCommandFailed
 	RuntimeProbeReady              = agentprotocol.RuntimeProbeReady

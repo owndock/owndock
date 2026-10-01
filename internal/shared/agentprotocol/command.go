@@ -44,7 +44,9 @@ const (
 	AgentCommandInventoryChunk     AgentCommandKind = "runtime.inventory.chunk"
 	AgentCommandInventoryRelease   AgentCommandKind = "runtime.inventory.release"
 	AgentCommandInventoryEvents    AgentCommandKind = "runtime.inventory.events"
-	AgentCommandIngressReconcile   AgentCommandKind = "ingress.reconcile"
+	AgentCommandIngressPrepare     AgentCommandKind = "ingress.prepare"
+	AgentCommandIngressCommit      AgentCommandKind = "ingress.commit"
+	AgentCommandIngressAbort       AgentCommandKind = "ingress.abort"
 )
 
 func (k AgentCommandKind) Valid() bool {
@@ -61,7 +63,9 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
 		AgentCommandInventoryEvents,
-		AgentCommandIngressReconcile:
+		AgentCommandIngressPrepare,
+		AgentCommandIngressCommit,
+		AgentCommandIngressAbort:
 		return true
 	default:
 		return false
@@ -159,7 +163,9 @@ func (c AgentCommand) Validate() error {
 			!validInventoryCommand(c.Kind, *c.Inventory) {
 			return ErrCommandInvalid
 		}
-	case AgentCommandIngressReconcile:
+	case AgentCommandIngressPrepare,
+		AgentCommandIngressCommit,
+		AgentCommandIngressAbort:
 		if c.RuntimeProbe != nil || c.Deployment != nil || c.Cutover != nil || c.Inventory != nil ||
 			c.Ingress == nil || !validIngressCommand(*c.Ingress) {
 			return ErrCommandInvalid
@@ -239,6 +245,10 @@ func (c AgentCommand) Fingerprint() ([sha256.Size]byte, error) {
 		writeFingerprintUint64(hasher, uint64(len(c.Ingress.Routes)))
 		for _, route := range c.Ingress.Routes {
 			writeIngressRouteFingerprint(hasher, route)
+		}
+		writeFingerprintUint64(hasher, uint64(len(c.Ingress.ProbeRouteIDs)))
+		for _, routeID := range c.Ingress.ProbeRouteIDs {
+			writeFingerprintString(hasher, routeID)
 		}
 	}
 	var fingerprint [sha256.Size]byte
@@ -387,7 +397,9 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 				r.Inventory.Events == nil || r.Inventory.Events.Validate() != nil {
 				return ErrResultInvalid
 			}
-		case AgentCommandIngressReconcile:
+		case AgentCommandIngressPrepare,
+			AgentCommandIngressCommit,
+			AgentCommandIngressAbort:
 			if r.RuntimeProbe != nil || r.Inventory != nil || r.Ingress == nil ||
 				r.Ingress.HostRevision == 0 || !ingressDigest.MatchString(r.Ingress.ConfigDigest) {
 				return ErrResultInvalid
@@ -427,7 +439,9 @@ func (k AgentCommandKind) DurableResult() bool {
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
 		AgentCommandInventoryEvents,
-		AgentCommandIngressReconcile:
+		AgentCommandIngressPrepare,
+		AgentCommandIngressCommit,
+		AgentCommandIngressAbort:
 		return false
 	default:
 		return k.Valid()

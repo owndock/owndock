@@ -3,6 +3,9 @@ package agentruntime
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +26,9 @@ const (
 	DefaultCaddyAdminSocket = "/run/owndock-ingress/admin.sock"
 	caddyHTTPPort           = 8080
 	caddyHTTPSPort          = 8443
+	caddyPublicHTTPPort     = 80
+	caddyPublicHTTPSPort    = 443
+	caddyProbeHeader        = "X-OwnDock-Route-Probe"
 	maximumCaddyResponse    = 4 * 1024
 	maximumCaddyConfig      = 256 * 1024
 )
@@ -38,6 +44,7 @@ type CaddyGatewayConfig struct {
 type CaddyGateway struct {
 	adminSocket string
 	client      *http.Client
+	probeClient *http.Client
 	timeout     time.Duration
 }
 
@@ -57,8 +64,23 @@ func NewCaddyGateway(config CaddyGatewayConfig) (*CaddyGateway, error) {
 			return (&net.Dialer{}).DialContext(ctx, "unix", socket)
 		},
 	}
+	probeTransport := &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+		TLSClientConfig:   &tls.Config{MinVersion: tls.VersionTLS13},
+		DialContext: func(ctx context.Context, _, address string) (net.Conn, error) {
+			_, port, err := net.SplitHostPort(address)
+			if err != nil || port != "80" && port != "443" {
+				return nil, ErrIngressConfiguration
+			}
+			return (&net.Dialer{}).DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", port))
+		},
+	}
 	return &CaddyGateway{adminSocket: socket,
-		client: &http.Client{Transport: transport}, timeout: config.RequestTimeout}, nil
+		client: &http.Client{Transport: transport},
+		probeClient: &http.Client{Transport: probeTransport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
+		timeout: config.RequestTimeout}, nil
 }
 
 func (g *CaddyGateway) Apply(ctx context.Context, command agentprotocol.IngressCommand) (string, error) {
@@ -103,6 +125,59 @@ func (g *CaddyGateway) Apply(ctx context.Context, command agentprotocol.IngressC
 		return "", ErrIngressPortConflict
 	}
 	return "", ErrIngressConfiguration
+}
+
+func (g *CaddyGateway) Clear(ctx context.Context) error {
+	digest, err := agentprotocol.IngressConfigDigest(1, nil)
+	if err != nil {
+		return ErrIngressConfiguration
+	}
+	_, err = g.Apply(ctx, agentprotocol.IngressCommand{
+		HostRevision: 1,
+		ConfigDigest: digest,
+		Routes:       []agentprotocol.IngressRoute{},
+	})
+	return err
+}
+
+func (g *CaddyGateway) Probe(ctx context.Context, command agentprotocol.IngressCommand) error {
+	if command.Validate() != nil {
+		return ErrIngressConfiguration
+	}
+	if len(command.ProbeRouteIDs) == 0 {
+		return nil
+	}
+	routes := make(map[string]agentprotocol.IngressRoute, len(command.Routes))
+	for _, route := range command.Routes {
+		routes[route.RouteID] = route
+	}
+	probeContext, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	for _, routeID := range command.ProbeRouteIDs {
+		route := routes[routeID]
+		scheme, port := "http", caddyPublicHTTPPort
+		if route.TLSMode == agentprotocol.IngressTLSAutomatic {
+			scheme, port = "https", caddyPublicHTTPSPort
+		}
+		request, err := http.NewRequestWithContext(probeContext, http.MethodGet,
+			fmt.Sprintf("%s://%s:%d/", scheme, route.Hostname, port), nil)
+		if err != nil {
+			return ErrIngressConfiguration
+		}
+		token := caddyProbeToken(command.ConfigDigest, route.RouteID)
+		request.Header.Set(caddyProbeHeader, token)
+		response, err := g.probeClient.Do(request)
+		if err != nil {
+			return ErrIngressBackendUnhealthy
+		}
+		readBytes, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maximumCaddyResponse+1))
+		closeErr := response.Body.Close()
+		if readErr != nil || closeErr != nil || readBytes > maximumCaddyResponse ||
+			response.Header.Get(caddyProbeHeader) != token {
+			return ErrIngressBackendUnhealthy
+		}
+	}
+	return nil
 }
 
 func (g *CaddyGateway) isCurrent(ctx context.Context, configID string) (bool, error) {
@@ -157,6 +232,18 @@ func buildCaddyConfig(adminSocket string, command agentprotocol.IngressCommand) 
 	skipped := make([]string, 0, len(command.Routes))
 	hasAutomaticTLS := false
 	for _, route := range command.Routes {
+		probeToken := caddyProbeToken(command.ConfigDigest, route.RouteID)
+		routes = append(routes, caddyRoute{
+			Match: []caddyMatcher{{Host: []string{route.Hostname},
+				Header: map[string][]string{caddyProbeHeader: {probeToken}}}},
+			Handle: []caddyHandler{{Handler: "reverse_proxy",
+				Upstreams: []caddyUpstream{{Dial: net.JoinHostPort(route.BackendAlias,
+					fmt.Sprintf("%d", route.BackendPort))}}, StreamCloseDelay: "5m",
+				Headers: &caddyHeaders{Response: &caddyResponseHeaders{
+					Set: map[string][]string{caddyProbeHeader: {probeToken}},
+				}}}},
+			Terminal: true,
+		})
 		routes = append(routes, caddyRoute{
 			Match: []caddyMatcher{{Host: []string{route.Hostname}}},
 			Handle: []caddyHandler{{Handler: "reverse_proxy",
@@ -203,6 +290,11 @@ func buildCaddyConfig(adminSocket string, command agentprotocol.IngressCommand) 
 		return nil, "", ErrIngressConfiguration
 	}
 	return value, configID, nil
+}
+
+func caddyProbeToken(configDigest, routeID string) string {
+	digest := sha256.Sum256([]byte(configDigest + "\x00" + routeID))
+	return hex.EncodeToString(digest[:16])
 }
 
 type caddyConfig struct {
@@ -259,7 +351,8 @@ type caddyRoute struct {
 }
 
 type caddyMatcher struct {
-	Host []string `json:"host"`
+	Host   []string            `json:"host"`
+	Header map[string][]string `json:"header,omitempty"`
 }
 
 type caddyHandler struct {
@@ -267,6 +360,15 @@ type caddyHandler struct {
 	Upstreams        []caddyUpstream `json:"upstreams,omitempty"`
 	StreamCloseDelay string          `json:"stream_close_delay,omitempty"`
 	StatusCode       int             `json:"status_code,omitempty"`
+	Headers          *caddyHeaders   `json:"headers,omitempty"`
+}
+
+type caddyHeaders struct {
+	Response *caddyResponseHeaders `json:"response,omitempty"`
+}
+
+type caddyResponseHeaders struct {
+	Set map[string][]string `json:"set,omitempty"`
 }
 
 type caddyUpstream struct {

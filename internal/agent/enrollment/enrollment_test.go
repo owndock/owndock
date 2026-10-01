@@ -29,11 +29,16 @@ func TestStandardCapabilitiesRequireExplicitIngress(t *testing.T) {
 	without := StandardCapabilities(false, false)
 	with := StandardCapabilities(false, true)
 	for _, capability := range without {
-		if capability == agentprotocol.CapabilityIngressReconcile {
+		if capability == agentprotocol.CapabilityIngressPrepare ||
+			capability == agentprotocol.CapabilityIngressCommit ||
+			capability == agentprotocol.CapabilityIngressAbort {
 			t.Fatal("standard capabilities enabled ingress without an explicit decision")
 		}
 	}
-	if with[len(with)-1] != agentprotocol.CapabilityIngressReconcile {
+	if len(with) != len(without)+3 ||
+		with[len(with)-3] != agentprotocol.CapabilityIngressPrepare ||
+		with[len(with)-2] != agentprotocol.CapabilityIngressCommit ||
+		with[len(with)-1] != agentprotocol.CapabilityIngressAbort {
 		t.Fatalf("explicit ingress capabilities = %#v", with)
 	}
 }

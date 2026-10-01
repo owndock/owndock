@@ -281,11 +281,20 @@ func (c Config) Validate() error {
 			ErrInvalidConfig,
 		)
 	}
-	ingressCapability := capabilityEnabled(c.Control.Capabilities,
-		agentprotocol.CapabilityIngressReconcile)
-	if ingressCapability != c.Ingress.Enabled {
+	ingressCapabilities := 0
+	for _, capability := range []string{
+		agentprotocol.CapabilityIngressPrepare,
+		agentprotocol.CapabilityIngressCommit,
+		agentprotocol.CapabilityIngressAbort,
+	} {
+		if capabilityEnabled(c.Control.Capabilities, capability) {
+			ingressCapabilities++
+		}
+	}
+	if ingressCapabilities != 0 && ingressCapabilities != 3 ||
+		(ingressCapabilities == 3) != c.Ingress.Enabled {
 		return fmt.Errorf(
-			"%w: ingress.reconcile capability and ingress.enabled must match",
+			"%w: ingress transaction capabilities and ingress.enabled must match",
 			ErrInvalidConfig,
 		)
 	}

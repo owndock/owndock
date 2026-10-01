@@ -21,9 +21,10 @@ const (
 )
 
 type IngressCommand struct {
-	HostRevision uint64
-	ConfigDigest string
-	Routes       []IngressRoute
+	HostRevision  uint64
+	ConfigDigest  string
+	Routes        []IngressRoute
+	ProbeRouteIDs []string
 }
 
 type IngressRoute struct {
@@ -56,6 +57,7 @@ func validIngressCommand(command IngressCommand) bool {
 	}
 	previousID := ""
 	hostnames := make(map[string]struct{}, len(command.Routes))
+	routeIDs := make(map[string]struct{}, len(command.Routes))
 	for _, route := range command.Routes {
 		if !validIngressRoute(route) || route.RouteID <= previousID {
 			return false
@@ -64,7 +66,21 @@ func validIngressCommand(command IngressCommand) bool {
 			return false
 		}
 		hostnames[route.Hostname] = struct{}{}
+		routeIDs[route.RouteID] = struct{}{}
 		previousID = route.RouteID
+	}
+	if len(command.ProbeRouteIDs) > MaxIngressRoutes {
+		return false
+	}
+	previousID = ""
+	for _, routeID := range command.ProbeRouteIDs {
+		if !validIdentifier(routeID) || routeID <= previousID {
+			return false
+		}
+		if _, exists := routeIDs[routeID]; !exists {
+			return false
+		}
+		previousID = routeID
 	}
 	digest, err := IngressConfigDigest(command.HostRevision, command.Routes)
 	return err == nil && digest == command.ConfigDigest

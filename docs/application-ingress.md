@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent 已具备类型化 `ingress.reconcile` 协议、Server adapter、跨重启 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和显式运行配置；Agent 包也携带固定 digest 的 Gateway 安装材料。真实 Linux Gateway 门禁和 Deployment 切流编排尚未完成，因此当前版本仍只交付容器，也不应宣称自动低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent 已具备类型化 `ingress.prepare/commit/abort` 协议、Server adapter、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter、Host/SNI 私有探测和显式运行配置；Agent 包也携带固定 digest 的 Gateway 安装材料。真实 Linux Gateway 门禁和 Server Deployment 状态编排尚未完成，因此当前版本仍只交付容器，也不应宣称自动低停机流量切换。
 
 ## 目标模式
 
@@ -13,9 +13,9 @@ managed ingress 首期只支持 Agent Runtime Target。网关不会挂载 Docker
 
 ## Agent desired config 与 fence
 
-Server 每次发送同一 Host 的完整期望配置，而不是增量补丁或任意 Caddy JSON。`ingress.reconcile` 最多携带 128 条按 Route ID 排序的类型化 Route；每条只包含 Route revision、Deployment ID、cutover sequence、Runtime Target ID、规范 hostname、受限 backend alias/port 和 TLS 模式。命令不携带 Header、插件、文件路径、证书、ACME 凭据、Docker Socket 或应用 Secret。
+Server 每次发送同一 Host 的完整期望配置，而不是增量补丁或任意 Caddy JSON。三个 Ingress 事务命令最多携带 128 条按 Route ID 排序的类型化 Route；每条只包含 Route revision、Deployment ID、cutover sequence、Runtime Target ID、规范 hostname、受限 backend alias/port 和 TLS 模式。prepare 另列出需要私有探测的已有 Route ID。命令不携带用户 Header、插件、文件路径、证书、ACME 凭据、Docker Socket 或应用 Secret。
 
-Host revision 对完整配置单调递增，config digest 覆盖 Host revision 和全部 Route 字段。Agent 在调用网关之前检查本机持久 fence：旧 Host revision、同 revision 不同 digest、旧 Route revision、旧 cutover sequence，以及同一水位换 Deployment 都会失败关闭。网关只有返回完全相同的 config digest 后才提交 fence；失败或响应不匹配不会把未确认配置记录为成功。
+Host revision 对完整配置单调递增，config digest 覆盖 Host revision 和全部 Route 字段。Agent 在调用网关之前检查本机持久 fence：旧 Host revision、同 revision 不同 digest、旧 Route revision、旧 cutover sequence，以及同一水位换 Deployment 都会失败关闭。prepare 只写 pending，并保留上一个 committed 完整配置；Caddy load 与 Host/SNI 私有探测都成功、Server 的 Mongo 事务提交后，commit 才推进不可逆 fence。abort 会先恢复 committed Gateway 配置，再清除 pending。Agent/Worker 在任一阶段重启都从同一原子状态文件继续。
 
 Route 从完整配置中消失后，Agent 仍保留其 inactive 高水位。该记录不按 TTL、时间或容量淘汰，因此延迟命令不能重新引入已删除 Route；容量达到上限时拒绝新的 Route ID。状态文件使用受限权限、原子替换和重启恢复。后续资源退役必须提供显式、安全的精确回收协议，不能通过删最旧记录释放容量。
 
@@ -26,21 +26,27 @@ sequenceDiagram
     participant F as Persistent fence
     participant G as Ingress Gateway
 
-    S->>A: ingress.reconcile(host revision + digest + complete routes)
+    S->>A: ingress.prepare(revision + digest + complete routes + probe IDs)
     A->>F: reject stale/conflicting host and route watermarks
-    alt idempotent committed config
-        F-->>A: exact replay is allowed
-        A->>G: verify digest metadata ID; reload if resume state is absent
-        G-->>A: current or reloaded digest
-        A-->>S: committed revision + digest
-    else newer safe config
-        A->>G: apply typed complete config
-        G-->>A: loaded config digest
-        alt digest differs or apply fails
-            A-->>S: stable safe failure
-        else digest matches
-            A->>F: atomically commit host + route watermarks
+    A->>F: persist exact pending config
+    A->>G: load typed complete config
+    A->>G: loopback Host/SNI private probes
+    alt load or probe fails
+        A->>G: restore committed config (or clear initial config)
+        A->>F: clear pending after restore
+        A-->>S: stable safe failure
+    else prepared
+        A-->>S: prepared revision + digest
+        alt Server transaction and activation succeed
+            S->>S: commit Deployment + Route observation transaction
+            S->>A: ingress.commit(exact transaction)
+            A->>G: verify/reload exact config
+            A->>F: promote pending to committed watermarks
             A-->>S: committed revision + digest
+        else Server transaction or activation fails
+            S->>A: ingress.abort(exact transaction)
+            A->>G: restore committed config
+            A->>F: clear pending
         end
     end
 ```
@@ -74,13 +80,16 @@ sequenceDiagram
     A->>D: start and wait for health
     A-->>W: candidate healthy
     W->>W: revalidate lease, route revision and cutover fence
-    W->>A: activate complete desired route config
-    A->>G: atomic load over local Unix socket
+    W->>A: ingress.prepare(complete desired config + probe IDs)
+    A->>G: atomic load over local Unix socket + private probe
     alt load or private probe fails
         G-->>A: preserve or restore old config
         A-->>W: safe route failure
-    else new backend responds
-        A-->>W: route active + config digest
+    else prepared
+        A-->>W: prepared revision + digest
+        W->>W: commit Deployment + Route observation transaction
+        W->>A: ingress.commit(exact transaction)
+        A-->>W: committed revision + digest
         W->>A: drain then retire old backend
     end
 ```

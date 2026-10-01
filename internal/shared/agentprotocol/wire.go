@@ -25,9 +25,10 @@ type RuntimeProbeDocument struct {
 }
 
 type IngressDocument struct {
-	HostRevision uint64                 `json:"host_revision"`
-	ConfigDigest string                 `json:"config_digest"`
-	Routes       []IngressRouteDocument `json:"routes"`
+	HostRevision  uint64                 `json:"host_revision"`
+	ConfigDigest  string                 `json:"config_digest"`
+	Routes        []IngressRouteDocument `json:"routes"`
+	ProbeRouteIDs []string               `json:"probe_route_ids,omitempty"`
 }
 
 type IngressRouteDocument struct {
@@ -137,8 +138,9 @@ func NewCommandDocument(command AgentCommand) *CommandDocument {
 	}
 	if command.Ingress != nil {
 		document.Ingress = &IngressDocument{HostRevision: command.Ingress.HostRevision,
-			ConfigDigest: command.Ingress.ConfigDigest,
-			Routes:       make([]IngressRouteDocument, len(command.Ingress.Routes))}
+			ConfigDigest:  command.Ingress.ConfigDigest,
+			Routes:        make([]IngressRouteDocument, len(command.Ingress.Routes)),
+			ProbeRouteIDs: append([]string(nil), command.Ingress.ProbeRouteIDs...)}
 		for index, route := range command.Ingress.Routes {
 			document.Ingress.Routes[index] = ingressRouteDocumentFromDomain(route)
 		}
@@ -180,8 +182,9 @@ func (d CommandDocument) Domain() AgentCommand {
 	}
 	if d.Ingress != nil {
 		command.Ingress = &IngressCommand{HostRevision: d.Ingress.HostRevision,
-			ConfigDigest: d.Ingress.ConfigDigest,
-			Routes:       make([]IngressRoute, len(d.Ingress.Routes))}
+			ConfigDigest:  d.Ingress.ConfigDigest,
+			Routes:        make([]IngressRoute, len(d.Ingress.Routes)),
+			ProbeRouteIDs: append([]string(nil), d.Ingress.ProbeRouteIDs...)}
 		for index, route := range d.Ingress.Routes {
 			command.Ingress.Routes[index] = route.domain()
 		}

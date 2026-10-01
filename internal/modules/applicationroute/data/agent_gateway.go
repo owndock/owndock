@@ -27,7 +27,19 @@ func NewAgentGateway(dispatcher managedhostbiz.AgentCommandDispatcher, newID fun
 	return &AgentGateway{dispatcher: dispatcher, newID: newID, now: now, timeout: timeout}, nil
 }
 
-func (g *AgentGateway) Reconcile(ctx context.Context, desired applicationroutebiz.HostDesiredConfig) (applicationroutebiz.GatewayObservation, error) {
+func (g *AgentGateway) Prepare(ctx context.Context, desired applicationroutebiz.HostDesiredConfig) (applicationroutebiz.GatewayObservation, error) {
+	return g.execute(ctx, desired, agentprotocol.AgentCommandIngressPrepare)
+}
+
+func (g *AgentGateway) Commit(ctx context.Context, desired applicationroutebiz.HostDesiredConfig) (applicationroutebiz.GatewayObservation, error) {
+	return g.execute(ctx, desired, agentprotocol.AgentCommandIngressCommit)
+}
+
+func (g *AgentGateway) Abort(ctx context.Context, desired applicationroutebiz.HostDesiredConfig) (applicationroutebiz.GatewayObservation, error) {
+	return g.execute(ctx, desired, agentprotocol.AgentCommandIngressAbort)
+}
+
+func (g *AgentGateway) execute(ctx context.Context, desired applicationroutebiz.HostDesiredConfig, kind agentprotocol.AgentCommandKind) (applicationroutebiz.GatewayObservation, error) {
 	managedHostID := strings.TrimSpace(desired.ManagedHostID)
 	if managedHostID == "" || desired.HostRevision == 0 || len(desired.Routes) > agentprotocol.MaxIngressRoutes {
 		return applicationroutebiz.GatewayObservation{}, applicationroutebiz.ErrGatewayConfiguration
@@ -41,12 +53,14 @@ func (g *AgentGateway) Reconcile(ctx context.Context, desired applicationroutebi
 			BackendAlias: route.BackendAlias, BackendPort: route.BackendPort, TLSMode: tlsMode}
 	}
 	sort.Slice(routes, func(i, j int) bool { return routes[i].RouteID < routes[j].RouteID })
+	probeRouteIDs := append([]string(nil), desired.ProbeRouteIDs...)
+	sort.Strings(probeRouteIDs)
 	digest, err := agentprotocol.IngressConfigDigest(desired.HostRevision, routes)
 	if err != nil {
 		return applicationroutebiz.GatewayObservation{}, applicationroutebiz.ErrGatewayConfiguration
 	}
 	ingress := agentprotocol.IngressCommand{HostRevision: desired.HostRevision,
-		ConfigDigest: digest, Routes: routes}
+		ConfigDigest: digest, Routes: routes, ProbeRouteIDs: probeRouteIDs}
 	if err := ingress.Validate(); err != nil {
 		return applicationroutebiz.GatewayObservation{}, applicationroutebiz.ErrGatewayConfiguration
 	}
@@ -59,7 +73,7 @@ func (g *AgentGateway) Reconcile(ctx context.Context, desired applicationroutebi
 		deadline = contextDeadline.UTC()
 	}
 	command := managedhostbiz.AgentCommand{ID: commandID,
-		Kind: agentprotocol.AgentCommandIngressReconcile, Deadline: deadline, Ingress: &ingress}
+		Kind: kind, Deadline: deadline, Ingress: &ingress}
 	result, err := g.dispatcher.Dispatch(ctx, managedHostID, command)
 	if err != nil {
 		return applicationroutebiz.GatewayObservation{}, mapAgentIngressDispatchError(ctx, err)
@@ -100,6 +114,8 @@ func mapAgentIngressResultError(code string) error {
 		return applicationroutebiz.ErrGatewayStateFull
 	case "ingress_port_conflict":
 		return applicationroutebiz.ErrGatewayPortConflict
+	case "ingress_backend_unhealthy":
+		return applicationroutebiz.ErrGatewayBackendUnhealthy
 	case "ingress_configuration":
 		return applicationroutebiz.ErrGatewayConfiguration
 	default:

@@ -137,7 +137,11 @@ func StandardCapabilities(hostTerminal, ingress bool) []string {
 		values = append(values, agentprotocol.CapabilityTerminalHost)
 	}
 	if ingress {
-		values = append(values, agentprotocol.CapabilityIngressReconcile)
+		values = append(values,
+			agentprotocol.CapabilityIngressPrepare,
+			agentprotocol.CapabilityIngressCommit,
+			agentprotocol.CapabilityIngressAbort,
+		)
 	}
 	return values
 }
@@ -318,7 +322,7 @@ func normalizeOptions(options Options) (Options, *url.URL, error) {
 	if !validVersion.MatchString(options.AgentVersion) || len(options.AgentVersion) > 64 ||
 		agentconfig.ValidateCapabilities(options.Capabilities) != nil ||
 		hasCapability(options.Capabilities, agentprotocol.CapabilityTerminalHost) != options.HostTerminal ||
-		hasCapability(options.Capabilities, agentprotocol.CapabilityIngressReconcile) != options.Ingress ||
+		!validIngressCapabilities(options.Capabilities, options.Ingress) ||
 		validatePaths(options.Paths) != nil {
 		return Options{}, nil, ErrInvalidEnrollment
 	}
@@ -340,6 +344,20 @@ func normalizeOptions(options Options) (Options, *url.URL, error) {
 	}
 	options.Capabilities = append([]string(nil), options.Capabilities...)
 	return options, enrollmentURL, nil
+}
+
+func validIngressCapabilities(capabilities []string, enabled bool) bool {
+	count := 0
+	for _, capability := range []string{
+		agentprotocol.CapabilityIngressPrepare,
+		agentprotocol.CapabilityIngressCommit,
+		agentprotocol.CapabilityIngressAbort,
+	} {
+		if hasCapability(capabilities, capability) {
+			count++
+		}
+	}
+	return (count == 0 || count == 3) && (count == 3) == enabled
 }
 
 func validateEndpoint(raw, expectedPath string) (*url.URL, error) {

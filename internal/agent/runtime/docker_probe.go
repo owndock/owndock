@@ -164,8 +164,10 @@ func (e *DockerExecutor) execute(
 		agentprotocol.AgentCommandInventoryRelease,
 		agentprotocol.AgentCommandInventoryEvents:
 		result, executeError = e.executeInventory(commandContext, command)
-	case agentprotocol.AgentCommandIngressReconcile:
-		result, executeError = e.reconcileIngress(commandContext, command)
+	case agentprotocol.AgentCommandIngressPrepare,
+		agentprotocol.AgentCommandIngressCommit,
+		agentprotocol.AgentCommandIngressAbort:
+		result, executeError = e.executeIngress(commandContext, command)
 	default:
 		return agentprotocol.AgentCommandResult{},
 			agentprotocol.ErrCommandInvalid
@@ -190,12 +192,23 @@ func (e *DockerExecutor) execute(
 	return result, e.store(command, result)
 }
 
-func (e *DockerExecutor) reconcileIngress(ctx context.Context, command agentprotocol.AgentCommand) (agentprotocol.AgentCommandResult, error) {
+func (e *DockerExecutor) executeIngress(ctx context.Context, command agentprotocol.AgentCommand) (agentprotocol.AgentCommandResult, error) {
 	if e.ingress == nil {
 		return agentprotocol.AgentCommandResult{CommandID: command.ID,
 			Status: agentprotocol.AgentCommandFailed, ErrorCode: "ingress_unavailable"}, nil
 	}
-	observation, err := e.ingress.Reconcile(ctx, *command.Ingress)
+	var observation agentprotocol.IngressResult
+	var err error
+	switch command.Kind {
+	case agentprotocol.AgentCommandIngressPrepare:
+		observation, err = e.ingress.Prepare(ctx, *command.Ingress)
+	case agentprotocol.AgentCommandIngressCommit:
+		observation, err = e.ingress.Commit(ctx, *command.Ingress)
+	case agentprotocol.AgentCommandIngressAbort:
+		observation, err = e.ingress.Abort(ctx, *command.Ingress)
+	default:
+		return agentprotocol.AgentCommandResult{}, agentprotocol.ErrCommandInvalid
+	}
 	if err == nil {
 		return agentprotocol.AgentCommandResult{CommandID: command.ID,
 			Status: agentprotocol.AgentCommandSucceeded, Ingress: &observation}, nil
@@ -210,6 +223,8 @@ func (e *DockerExecutor) reconcileIngress(ctx context.Context, command agentprot
 		code = "ingress_state_full"
 	case errors.Is(err, ErrIngressPortConflict):
 		code = "ingress_port_conflict"
+	case errors.Is(err, ErrIngressBackendUnhealthy):
+		code = "ingress_backend_unhealthy"
 	case errors.Is(err, ErrInvalidIngressStore), errors.Is(err, ErrIngressConfiguration):
 		code = "ingress_configuration"
 	}

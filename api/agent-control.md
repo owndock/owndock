@@ -27,7 +27,7 @@ Server 还会使用证书序列号和 SHA-256 指纹查询 MongoDB，并确认�
 - hello frame 中的身份字段与证书身份完全一致。
 - hello 上报的 capabilities 是 enrollment 时写入 Agent Identity 能力授权的子集。
 - Agent 二进制新增 capability 不会自动扩大已有 Identity 权限；实际 hello 使用本机配置的列表。Runtime Inventory 的 prepare/chunk/release/events 必须作为一组授权和启用。
-- `ingress.reconcile` 必须同时具备 Agent 本机 Gateway 配置和 enrollment 授权；当前生产配置模板不启用它，未 wiring 时执行器稳定返回 `ingress_unavailable`。
+- `ingress.prepare/commit/abort` 必须作为一组同时具备 Agent 本机 Gateway 配置和 enrollment 授权；当前生产配置模板不启用它们，未 wiring 时执行器稳定返回 `ingress_unavailable`。
 
 TLS 校验成功不等于应用身份成功；两层都通过后才能把 Host 标记为 `online`。
 
@@ -83,7 +83,7 @@ Server 对同一 Agent Identity 的同一 `rotation_id + CSR SHA-256` 幂等返�
 - Agent `sequence` 必须为大于零的单调递增整数；
 - Server 使用独立的单调递增 `sequence`；
 - Agent 可以发送 `hello`、`heartbeat`、`command_result` 和 `terminal`；Server 可以发送确认、安全错误、严格类型化的 `command` 和 `terminal`；
-- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/cancel`、`deployment.runtime.remove`、`deployment.cutover.release`、`runtime.inventory.prepare/chunk/release/events` 和 `ingress.reconcile`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
+- `v1` 已注册 `runtime.probe`、`deployment.prepare/stage/activate/retire/cancel`、`deployment.runtime.remove`、`deployment.cutover.release`、`runtime.inventory.prepare/chunk/release/events` 和 `ingress.prepare/commit/abort`；目标只能使用 Server 已解析的 Runtime Target/Managed Host，不能由调用方提交 Docker endpoint；
 - frame 中不能携带 Docker endpoint、Socket、SSH 地址、用户选择的 Shell 或任意宿主机命令；
 - 连接建立后的协议错误通过安全 `error` frame 返回，不透传数据库或证书错误。
 
@@ -210,23 +210,24 @@ Server 接受并缓存结果后给出确认，Agent 之后才能安全清理自�
 - 每条新命令下发前都会检查当前已认证 hello 是否声明该 command capability；未声明时命令不会入队，Deployment Gateway 返回 `unsupported_target`；
 - 已完成结果保存在 Server 进程内的全局有界缓存中，默认最多 256 条；缓存只保留 command kind、SHA-256 指纹和安全结果，不保留完整命令或秘密；同一进程内重连后可重放结果，Server 重启或缓存淘汰后不能把它当作持久化事实；
 - Runtime Inventory 四类命令是例外：chunk 可能接近 frame 上限，prepare 对应 Agent 内存快照，events 是短时实时结果，都不能作为跨重启事实，因此 Agent 磁盘缓存和 Server 已完成结果缓存都明确跳过它们；快照重试会重新下发同一 observation/index，Agent 进程仍在时从同一内存快照返回，Agent 重启后返回 snapshot missing 并重新开始 observation；
-- `ingress.reconcile` 也不进入通用结果缓存。每次重放都必须到达 Agent 的持久 fence，并通过 Caddy config digest metadata ID 核对当前或 resume 后的实际配置；否则 Gateway 丢失 autosave 后可能回放旧“成功”而没有恢复 route；
+- 三类 Ingress 事务命令也不进入通用结果缓存。每次重放都必须到达 Agent 的持久事务状态，并通过 Caddy config digest metadata ID 核对当前或 resume 后的实际配置；否则 Gateway 丢失 autosave 后可能回放旧“成功”而没有恢复 route；
 - command deadline 到期、Agent 断线、Host 被禁用或新 session 替换旧 session 时，所有仍在等待的调用都会得到明确失败；
 - 重复且完全相同的结果可安全确认；未知、冲突或结构不匹配的结果会关闭当前协议连接；
 - Project Runtime Target 已有受 RBAC 保护的 probe API，Server 侧会从数据库 Target/Host 映射到 `runtime.probe` command；Agent 控制客户端通过受信任的本机 Unix Socket Ping Docker，并把安全结果写入 `0600`、原子替换、有界的磁盘缓存。缓存 v2 只保存 command kind、SHA-256 指纹和安全结果，不保存 Runtime Target ID、Registry authorization、Environment 值或原始错误；旧版只含 probe 标识的缓存可以读取，并在后续写入时升级。Agent Control Server 启用后，composition root 会把 Agent prober 与已实现的 Deployment Gateway 配套注册；离线或未启用仍安全返回不可达/不可用，不会回退 direct。
 
-## Ingress 完整配置与持久 fence
+## Ingress 完整配置、私有探测与持久事务
 
-`ingress.reconcile` 只接受完整、排序且有界的类型化 desired config，不接受任意 Caddy JSON、Caddyfile、Header、插件、文件路径、证书、ACME 凭据、Docker endpoint 或应用 Secret。单个命令最多 128 条 Route，完整 wire 仍受 60 KiB command document 上限约束：
+`ingress.prepare/commit/abort` 都只接受同一份完整、排序且有界的类型化 desired config，不接受任意 Caddy JSON、Caddyfile、Header、插件、文件路径、证书、ACME 凭据、Docker endpoint 或应用 Secret。单个命令最多 128 条 Route，完整 wire 仍受 60 KiB command document 上限约束：
 
 ```json
 {
   "command_id": "command-ingress-1",
-  "kind": "ingress.reconcile",
+  "kind": "ingress.prepare",
   "deadline": "2026-09-01T10:00:30Z",
   "ingress": {
     "host_revision": 42,
     "config_digest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "probe_route_ids": ["route-1"],
     "routes": [
       {
         "route_id": "route-1",
@@ -244,9 +245,11 @@ Server 接受并缓存结果后给出确认，Agent 之后才能安全清理自�
 }
 ```
 
-`config_digest` 是 Host revision 和全部 canonical Route 字段的 SHA-256；Agent 会重新计算，不信任调用方摘要。Host revision 单调保护整份配置，Route revision 保护路由规格，cutover sequence 与 Deployment ID 保护后端切换。以下情况在调用网关前拒绝：旧 Host/Route/cutover 水位、同 Host revision 不同 digest、同 Route revision 不同规格、同 cutover sequence 不同 Deployment，以及 inactive Route 在相同 revision 下被重新引入。
+`config_digest` 是 Host revision 和全部 canonical Route 字段的 SHA-256；Agent 会重新计算，不信任调用方摘要。`probe_route_ids` 是排序、去重且必须存在于完整配置中的事务字段，不改变 desired config digest。Host revision 单调保护整份配置，Route revision 保护路由规格，cutover sequence 与 Deployment ID 保护后端切换。以下情况在调用网关前拒绝：旧 Host/Route/cutover 水位、同 Host revision 不同 digest、同 Route revision 不同规格、同 cutover sequence 不同 Deployment，以及 inactive Route 在相同 revision 下被重新引入。
 
-Agent 只在网关返回完全相同的 digest 后，原子提交 Host 和 Route fence。Route 从完整配置中移除时转为持久 tombstone，高水位跨 Agent 重启保留且不按 TTL/容量淘汰；状态满时返回 `ingress_state_full`。完全相同的已提交配置不再次调用网关，直接返回：
+`prepare` 先持久保存 pending 完整配置，再用 Caddy `/load` 原子加载，并通过宿主 loopback 80/443、精确 Host/SNI 和仅生成器可创建的 marker route 探测指定 backend。加载或探测失败时，Agent 恢复上一个 committed 完整配置；首次配置则清为空配置，随后清除 pending。MongoDB 中 Deployment 与 Route observation 事务成功后，Server 才发送完全相同的 `commit`；Agent 再推进不可逆 Host/Route fence 并清除 pending。Mongo 事务、运行时激活或 Worker 接管失败时发送 `abort`，Agent 恢复 committed 配置后清除 pending。同一 Host 同时只能存在一个 pending 事务，三个阶段及其响应丢失均可按 revision、digest 和 probe 集精确重放。
+
+Route 从 committed 完整配置中移除时转为持久 tombstone，高水位跨 Agent 重启保留且不按 TTL/容量淘汰；状态满时返回 `ingress_state_full`。三类命令每次都会核对实际 Gateway，不由通用缓存短路。成功结果只返回事务 revision 和 digest：
 
 ```json
 {
@@ -259,7 +262,7 @@ Agent 只在网关返回完全相同的 digest 后，原子提交 Host 和 Route
 }
 ```
 
-稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关错误不进入 wire 或持久结果。当前 capability、fence、固定 Gateway adapter 与显式本机 wiring 已实现，但默认配置不会宣告该能力；Server 切流编排和真实流量验收完成前不能据此报告公网入口 ready。
+稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_backend_unhealthy`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关/应用错误不进入 wire 或持久结果。当前三阶段 capability、持久事务、固定 Gateway adapter 与显式本机 wiring 已实现，但默认配置不会宣告该能力；Server Deployment 状态编排和真实流量验收完成前不能据此报告公网入口 ready。
 
 ## 终端会话复用
 

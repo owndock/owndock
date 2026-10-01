@@ -15,7 +15,9 @@ const (
 	CapabilityInventoryEvents    = "runtime.inventory.events"
 	CapabilityTerminalContainer  = "terminal.container"
 	CapabilityTerminalHost       = "terminal.host"
-	CapabilityIngressReconcile   = "ingress.reconcile"
+	CapabilityIngressPrepare     = "ingress.prepare"
+	CapabilityIngressCommit      = "ingress.commit"
+	CapabilityIngressAbort       = "ingress.abort"
 )
 
 var supportedCapabilities = []string{
@@ -33,7 +35,9 @@ var supportedCapabilities = []string{
 	CapabilityInventoryEvents,
 	CapabilityTerminalContainer,
 	CapabilityTerminalHost,
-	CapabilityIngressReconcile,
+	CapabilityIngressPrepare,
+	CapabilityIngressCommit,
+	CapabilityIngressAbort,
 }
 
 // SupportedCapabilities returns the exact capabilities implemented by this
@@ -79,8 +83,12 @@ func RequiredCapability(kind AgentCommandKind) (string, bool) {
 		return CapabilityInventoryRelease, true
 	case AgentCommandInventoryEvents:
 		return CapabilityInventoryEvents, true
-	case AgentCommandIngressReconcile:
-		return CapabilityIngressReconcile, true
+	case AgentCommandIngressPrepare:
+		return CapabilityIngressPrepare, true
+	case AgentCommandIngressCommit:
+		return CapabilityIngressCommit, true
+	case AgentCommandIngressAbort:
+		return CapabilityIngressAbort, true
 	default:
 		return "", false
 	}

@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ func TestAgentGatewayBuildsCanonicalTypedCommand(t *testing.T) {
 		t.Fatal(err)
 	}
 	desired := applicationroutebiz.HostDesiredConfig{ManagedHostID: "host-1", HostRevision: 3,
+		ProbeRouteIDs: []string{"route-b", "route-a"},
 		Routes: []applicationroutebiz.GatewayRoute{
 			{RouteID: "route-b", Revision: 1, DeploymentID: "deployment-b", CutoverSequence: 2,
 				RuntimeTargetID: "target-1", Hostname: "b.example.com", BackendAlias: "deployment-b",
@@ -32,13 +34,14 @@ func TestAgentGatewayBuildsCanonicalTypedCommand(t *testing.T) {
 			Status: agentprotocol.AgentCommandSucceeded, Ingress: &agentprotocol.IngressResult{
 				HostRevision: command.Ingress.HostRevision, ConfigDigest: command.Ingress.ConfigDigest}}
 	}
-	observation, err := gateway.Reconcile(context.Background(), desired)
+	observation, err := gateway.Prepare(context.Background(), desired)
 	if err != nil || observation.HostRevision != 3 || observation.ConfigDigest == "" {
-		t.Fatalf("Reconcile() = %#v, %v", observation, err)
+		t.Fatalf("Prepare() = %#v, %v", observation, err)
 	}
 	if dispatcher.hostID != "host-1" || dispatcher.command.Ingress == nil ||
 		dispatcher.command.Ingress.Routes[0].RouteID != "route-a" ||
-		dispatcher.command.Kind != agentprotocol.AgentCommandIngressReconcile {
+		dispatcher.command.Ingress.ProbeRouteIDs[0] != "route-a" ||
+		dispatcher.command.Kind != agentprotocol.AgentCommandIngressPrepare {
 		t.Fatalf("dispatch = %q/%+v", dispatcher.hostID, dispatcher.command)
 	}
 }
@@ -51,8 +54,38 @@ func TestAgentGatewayMapsSafeFenceErrors(t *testing.T) {
 	gateway, _ := NewAgentGateway(dispatcher, func() (string, error) { return "command-1", nil },
 		func() time.Time { return time.Unix(100, 0).UTC() }, time.Minute)
 	desired := applicationroutebiz.HostDesiredConfig{ManagedHostID: "host-1", HostRevision: 1}
-	if _, err := gateway.Reconcile(context.Background(), desired); !errors.Is(err, applicationroutebiz.ErrGatewayFenceStale) {
+	if _, err := gateway.Prepare(context.Background(), desired); !errors.Is(err, applicationroutebiz.ErrGatewayFenceStale) {
 		t.Fatalf("stale result error = %v", err)
+	}
+}
+
+func TestAgentGatewayDispatchesCommitAndAbort(t *testing.T) {
+	dispatcher := &ingressDispatcherStub{}
+	dispatcher.result = func(command managedhostbiz.AgentCommand) managedhostbiz.AgentCommandResult {
+		return managedhostbiz.AgentCommandResult{CommandID: command.ID,
+			Status: agentprotocol.AgentCommandSucceeded, Ingress: &agentprotocol.IngressResult{
+				HostRevision: command.Ingress.HostRevision, ConfigDigest: command.Ingress.ConfigDigest}}
+	}
+	nextID := 0
+	gateway, err := NewAgentGateway(dispatcher, func() (string, error) {
+		nextID++
+		return fmt.Sprintf("command-%d", nextID), nil
+	}, func() time.Time { return time.Unix(100, 0).UTC() }, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	desired := applicationroutebiz.HostDesiredConfig{ManagedHostID: "host-1", HostRevision: 1}
+	if _, err := gateway.Commit(context.Background(), desired); err != nil {
+		t.Fatalf("Commit() error = %v", err)
+	}
+	if dispatcher.command.Kind != agentprotocol.AgentCommandIngressCommit {
+		t.Fatalf("commit kind = %q", dispatcher.command.Kind)
+	}
+	if _, err := gateway.Abort(context.Background(), desired); err != nil {
+		t.Fatalf("Abort() error = %v", err)
+	}
+	if dispatcher.command.Kind != agentprotocol.AgentCommandIngressAbort {
+		t.Fatalf("abort kind = %q", dispatcher.command.Kind)
 	}
 }
 

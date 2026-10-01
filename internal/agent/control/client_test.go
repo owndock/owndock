@@ -76,8 +76,10 @@ func TestDefaultCapabilitiesDoNotEnableUnwiredIngress(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, capability := range client.config.Capabilities {
-		if capability == agentprotocol.CapabilityIngressReconcile {
-			t.Fatal("unconfigured client must not advertise ingress.reconcile")
+		if capability == agentprotocol.CapabilityIngressPrepare ||
+			capability == agentprotocol.CapabilityIngressCommit ||
+			capability == agentprotocol.CapabilityIngressAbort {
+			t.Fatal("unconfigured client must not advertise ingress transaction capabilities")
 		}
 	}
 }

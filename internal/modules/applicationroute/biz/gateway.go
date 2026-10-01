@@ -6,12 +6,13 @@ import (
 )
 
 var (
-	ErrGatewayUnavailable   = errors.New("application ingress gateway is unavailable")
-	ErrGatewayFenceStale    = errors.New("application ingress gateway fence is stale")
-	ErrGatewayFenceConflict = errors.New("application ingress gateway fence conflicts")
-	ErrGatewayConfiguration = errors.New("application ingress gateway configuration is invalid")
-	ErrGatewayStateFull     = errors.New("application ingress gateway state is full")
-	ErrGatewayPortConflict  = errors.New("application ingress public ports are unavailable")
+	ErrGatewayUnavailable      = errors.New("application ingress gateway is unavailable")
+	ErrGatewayFenceStale       = errors.New("application ingress gateway fence is stale")
+	ErrGatewayFenceConflict    = errors.New("application ingress gateway fence conflicts")
+	ErrGatewayConfiguration    = errors.New("application ingress gateway configuration is invalid")
+	ErrGatewayStateFull        = errors.New("application ingress gateway state is full")
+	ErrGatewayPortConflict     = errors.New("application ingress public ports are unavailable")
+	ErrGatewayBackendUnhealthy = errors.New("application ingress backend private probe failed")
 )
 
 type GatewayRoute struct {
@@ -30,6 +31,7 @@ type HostDesiredConfig struct {
 	ManagedHostID string
 	HostRevision  uint64
 	Routes        []GatewayRoute
+	ProbeRouteIDs []string
 }
 
 type GatewayObservation struct {
@@ -38,5 +40,7 @@ type GatewayObservation struct {
 }
 
 type Gateway interface {
-	Reconcile(context.Context, HostDesiredConfig) (GatewayObservation, error)
+	Prepare(context.Context, HostDesiredConfig) (GatewayObservation, error)
+	Commit(context.Context, HostDesiredConfig) (GatewayObservation, error)
+	Abort(context.Context, HostDesiredConfig) (GatewayObservation, error)
 }
