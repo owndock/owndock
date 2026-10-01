@@ -182,6 +182,6 @@ sudo owndock-agentctl rollback --version 0.1.0
 
 Agent unit 使用 `NoNewPrivileges`、只读系统文件、私有临时目录/设备、空 capability set、namespace/kernel/control-group 防护、地址族白名单、进程数与文件描述符上限。唯一声明的可写路径是 `/var/lib/owndock-agent`。
 
-Ingress unit 以独立 non-login 账号运行固定 Compose 文件，只写 `/run/owndock-ingress` 和 `/var/lib/owndock-ingress`。Caddy 容器本身为 non-root、只读根、无 Linux capabilities、无 Docker Socket；容器使用 8080/8443，因此不需要 `CAP_NET_BIND_SERVICE`，Docker 仅做精确的宿主 80/443 端口映射。Agent 与 Gateway 共享的只有 Unix Socket group，不共享证书目录。
+Ingress unit 以独立 non-login 账号运行固定 Compose 文件，只写 `/run/owndock-ingress` 和 `/var/lib/owndock-ingress`。Caddy 容器本身为 non-root、只读根、无 Docker Socket，先移除全部 Linux capabilities，再仅加入 `NET_BIND_SERVICE`。这是让带同名文件 capability 的固定上游二进制在 `no-new-privileges` 下可执行所需的最小例外；Caddy 实际仍只监听容器 8080/8443，Docker 仅做精确的宿主 80/443 端口映射。Agent 与 Gateway 共享的只有 Unix Socket group，不共享证书目录。
 
 主机终端也继承这些限制。即使如此，Agent 仍可通过 Docker Socket 管理容器，因此生产开放前仍必须完成真实主机、升级中断、网络分区和秘密扫描验收。

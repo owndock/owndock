@@ -1,6 +1,9 @@
 package architecture
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,6 +56,42 @@ func TestDockerContainerCleanupRemovesAnonymousVolumes(t *testing.T) {
 				!strings.Contains(line, " -v ") {
 				t.Errorf("%s:%d: Docker container cleanup must remove anonymous volumes", filepath.ToSlash(relative), number+1)
 			}
+		}
+		if filepath.Ext(path) == ".go" {
+			fileSet := token.NewFileSet()
+			file, err := parser.ParseFile(fileSet, path, content, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				literal, ok := node.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				selector, ok := literal.Type.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "ContainerRemoveOptions" {
+					return true
+				}
+				removesVolumes := false
+				for _, element := range literal.Elts {
+					field, ok := element.(*ast.KeyValueExpr)
+					if !ok {
+						continue
+					}
+					key, keyOK := field.Key.(*ast.Ident)
+					value, valueOK := field.Value.(*ast.Ident)
+					if keyOK && valueOK && key.Name == "RemoveVolumes" && value.Name == "true" {
+						removesVolumes = true
+						break
+					}
+				}
+				if !removesVolumes {
+					position := fileSet.Position(literal.Pos())
+					t.Errorf("%s:%d: Docker API container cleanup must set RemoveVolumes: true",
+						filepath.ToSlash(relative), position.Line)
+				}
+				return true
+			})
 		}
 		return nil
 	})

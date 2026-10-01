@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新先进入 `pending`，不直接代表公网入口已配置。Server Deployment Worker 已接入持久 Host cutover transaction：匹配 Route 时先固定 Host revision 与原始运行身份，再执行 stage、route prepare/私有探测、activate、Deployment `committing` + Route observation 原子事务、route commit、固定 30 秒 drain 和 retire；不确定响应保留可领取状态，后继 Worker 用新租约授权、按原始运行身份精确重放。取消按“恢复旧 Gateway 配置 → 在 Agent 持久化墓碑并清理原执行/恢复旧 backend → 清除 Server transaction”的顺序可重放，避免回滚窗口出现流量黑洞。Agent 具备类型化 `ingress.prepare/commit/abort`、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和 Host/SNI 私有探测。真实 Linux Gateway、自动 HTTPS 和客户流量门禁仍未完成，因此不能据此宣称生产级低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新先进入 `pending`，不直接代表公网入口已配置。Server Deployment Worker 已接入持久 Host cutover transaction：匹配 Route 时先固定 Host revision 与原始运行身份，再执行 stage、route prepare/私有探测、activate、Deployment `committing` + Route observation 原子事务、route commit、固定 30 秒 drain 和 retire；不确定响应保留可领取状态，后继 Worker 用新租约授权、按原始运行身份精确重放。取消按“恢复旧 Gateway 配置 → 在 Agent 持久化墓碑并清理原执行/恢复旧 backend → 清除 Server transaction”的顺序可重放，避免回滚窗口出现流量黑洞。Agent 具备类型化 `ingress.prepare/commit/abort`、跨重启 pending/committed 完整配置与 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和 Host/SNI 私有探测。仓库的 Linux-kernel 容器门禁已通过真实 Gateway 和生产 Worker 组合链；自动 HTTPS、原生 systemd 主机和客户等价流量门禁仍未完成，因此不能据此宣称生产级低停机流量切换。
 
 ## 目标模式
 
@@ -57,11 +57,11 @@ sequenceDiagram
 
 首个 Gateway 锁定为 `caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b`。镜像锁文件同时记录 linux/amd64 和 linux/arm64/v8 子 manifest digest；Compose 不接受 `latest` 或浮动 tag。
 
-Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、只读根文件系统、drop all capabilities、`no-new-privileges`，只映射宿主 80→容器 8080 和 443→8443。它不挂载 Docker Socket；唯一控制入口是共享运行目录中的 `0660` Unix Socket。证书数据 `/data` 与 Caddy autosave `/config` 分别持久化，启动时 `--resume` 先恢复最后成功配置；Agent 再通过 config digest 对应的 Caddy `@id` 检查当前配置，不一致才提交完整 `/load`。应用候选只能由类型化 stage 选择加入同名固定 Docker network，backend alias 由 Deployment ID 派生，Server 和用户不能指定任意网络或 alias。开发环境全部为 `tls=disabled` 时不会监听容器 HTTPS 端口。
+Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、只读根文件系统、先 drop all capabilities 再只加入 `NET_BIND_SERVICE`，并启用 `no-new-privileges`。固定上游 Caddy 二进制带该文件 capability；保留同名 capability 是在 `no-new-privileges` 下允许内核执行它所需的最小边界，实际配置仍只监听容器 8080/8443，并只映射宿主 80→容器 8080 和 443→8443。它不挂载 Docker Socket；唯一控制入口是共享运行目录中的 `0660` Unix Socket。证书数据 `/data` 与 Caddy autosave `/config` 分别持久化，启动时 `--resume` 先恢复最后成功配置；Agent 再通过 config digest 对应的 Caddy `@id` 检查当前配置，不一致才提交完整 `/load`。应用候选只能由类型化 stage 选择加入同名固定 Docker network，backend alias 由 Deployment ID 派生，Server 和用户不能指定任意网络或 alias。开发环境全部为 `tls=disabled` 时不会监听容器 HTTPS 端口。
 
 代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 
-仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy、三个静态后端和两个协议后端，通过实际 Unix admin socket 与流量验证多 Host 隔离、HTTP/1.1、WebSocket、长响应、prepare 切流、旧连接有界保留、新连接进入新后端、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。生产 Worker 组合链还断言坏后端最终只记录有界 `backend_unhealthy`，同时保留旧路由、旧稳定容器并清理候选。协议后端是门禁运行时由仓库源码构建的静态 Go 二进制，复制进固定 digest 容器，不引入浮动测试镜像。该门禁需要可用的 Linux Docker Host；在非 Linux 开发机上编译通过不等于门禁通过。
+仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy、三个静态后端和两个协议后端，通过实际 Unix admin socket 与流量验证多 Host 隔离、HTTP/1.1、WebSocket、长响应、prepare 切流、旧连接有界保留、新连接进入新后端、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。生产 Worker 组合链还断言坏后端最终只记录有界 `backend_unhealthy`，同时保留旧路由、旧稳定容器并清理候选。候选刚启动但 marker 尚未出现时，私有探测会在原请求超时预算内以 100 毫秒间隔重试；连接、TLS、上下文错误仍立即失败关闭。协议后端是门禁运行时由仓库源码构建的静态 Go 二进制，复制进固定 digest 容器，不引入浮动测试镜像。该门禁已在一次性 Linux arm64 容器与隔离 Docker Engine 中完整通过；这属于 Linux 内核执行证据，不替代原生 Ubuntu/systemd、宿主 80/443、公网 DNS/ACME 或客户物理主机认证。
 
 ## 资源边界
 

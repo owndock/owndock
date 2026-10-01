@@ -139,7 +139,7 @@ func (g *DockerGateway) Deploy(
 		if _, err := engine.ContainerRemove(
 			ctx,
 			candidate.Container.ID,
-			mobyclient.ContainerRemoveOptions{Force: true},
+			mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 		); err != nil {
 			return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 		}
@@ -261,7 +261,7 @@ func (g *DockerGateway) Cancel(
 			continue
 		}
 		if _, err := engine.ContainerRemove(
-			ctx, current.Container.ID, mobyclient.ContainerRemoveOptions{Force: true},
+			ctx, current.Container.ID, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 		); err != nil {
 			return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 		}
@@ -296,7 +296,7 @@ func (g *DockerGateway) RemoveRuntime(
 	if _, err := engine.ContainerRemove(
 		ctx,
 		current.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	); err != nil && !cerrdefs.IsNotFound(err) {
 		return &biz.ExecutionError{Category: biz.FailureRuntime, Cause: err}
 	}
@@ -470,7 +470,7 @@ func (g *DockerGateway) removeCandidate(containerID string, engine dockerEngine)
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, _ = engine.ContainerRemove(
-		cleanupContext, containerID, mobyclient.ContainerRemoveOptions{Force: true},
+		cleanupContext, containerID, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	)
 }
 
@@ -494,7 +494,7 @@ func (g *DockerGateway) removeNamedOwnedCandidate(
 	_, _ = engine.ContainerRemove(
 		cleanupContext,
 		candidate.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	)
 }
 
@@ -502,7 +502,7 @@ func (g *DockerGateway) removeContainer(container string, engine dockerEngine) {
 	cleanupContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := engine.ContainerRemove(
-		cleanupContext, container, mobyclient.ContainerRemoveOptions{Force: true},
+		cleanupContext, container, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	)
 	if err != nil && !cerrdefs.IsNotFound(err) {
 		return

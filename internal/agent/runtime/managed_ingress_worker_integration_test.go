@@ -109,12 +109,19 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	agent.newDeploymentEngine = func(socketPath string) (dockerDeploymentEngine, error) {
+		engine, err := newLocalDockerDeploymentEngine(socketPath)
+		if err != nil {
+			return nil, err
+		}
+		return &managedIngressDiagnosticEngine{dockerDeploymentEngine: engine, t: t}, nil
+	}
 	if err := agent.WithIngress(ingress); err != nil {
 		t.Fatal(err)
 	}
 
 	const hostID = "managed-ingress-host"
-	dispatcher := &managedIngressIntegrationDispatcher{hostID: hostID, executor: agent}
+	dispatcher := &managedIngressIntegrationDispatcher{hostID: hostID, executor: agent, t: t}
 	var commandSequence atomic.Uint64
 	newCommandID := func() (string, error) {
 		return fmt.Sprintf("worker-integration-command-%d", commandSequence.Add(1)), nil
@@ -162,7 +169,9 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 			t.Fatalf("prepare deployment %d: %v", index+1, err)
 		}
 		if err := executor.Deploy(ctx, deployment); err != nil {
-			t.Fatalf("deploy deployment %d: %v", index+1, err)
+			logs, logsErr := boundedIngressContainerLogs(ctx, caddyContainer)
+			t.Fatalf("deploy deployment %d: %v; gateway_logs=%q logs_error=%v",
+				index+1, err, logs, logsErr)
 		}
 		assertManagedIngressRuntimeOwner(t, ctx, inspection, stableName, plan)
 		assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusOK, "")
@@ -234,6 +243,65 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 type managedIngressIntegrationDispatcher struct {
 	hostID   string
 	executor *DockerExecutor
+	t        *testing.T
+}
+
+type managedIngressDiagnosticEngine struct {
+	dockerDeploymentEngine
+	t *testing.T
+}
+
+func (e *managedIngressDiagnosticEngine) ContainerCreate(
+	ctx context.Context,
+	options mobyclient.ContainerCreateOptions,
+) (mobyclient.ContainerCreateResult, error) {
+	result, err := e.dockerDeploymentEngine.ContainerCreate(ctx, options)
+	if err != nil {
+		e.t.Logf("managed ingress Docker ContainerCreate failed: %v", err)
+	}
+	return result, err
+}
+
+func (e *managedIngressDiagnosticEngine) ContainerStart(
+	ctx context.Context,
+	containerID string,
+	options mobyclient.ContainerStartOptions,
+) (mobyclient.ContainerStartResult, error) {
+	result, err := e.dockerDeploymentEngine.ContainerStart(ctx, containerID, options)
+	if err != nil {
+		e.t.Logf("managed ingress Docker ContainerStart failed: %v", err)
+	}
+	return result, err
+}
+
+func (e *managedIngressDiagnosticEngine) ContainerInspect(
+	ctx context.Context,
+	containerID string,
+	options mobyclient.ContainerInspectOptions,
+) (mobyclient.ContainerInspectResult, error) {
+	result, err := e.dockerDeploymentEngine.ContainerInspect(ctx, containerID, options)
+	if err != nil && !cerrdefs.IsNotFound(err) {
+		e.t.Logf("managed ingress Docker ContainerInspect failed: %v", err)
+	}
+	if err == nil && result.Container.State != nil &&
+		!result.Container.State.Running && result.Container.State.Status != "created" {
+		e.t.Logf("managed ingress candidate stopped: status=%s exit=%d error=%q",
+			result.Container.State.Status, result.Container.State.ExitCode,
+			result.Container.State.Error)
+	}
+	return result, err
+}
+
+func (e *managedIngressDiagnosticEngine) NetworkInspect(
+	ctx context.Context,
+	networkID string,
+	options mobyclient.NetworkInspectOptions,
+) (mobyclient.NetworkInspectResult, error) {
+	result, err := e.dockerDeploymentEngine.NetworkInspect(ctx, networkID, options)
+	if err != nil {
+		e.t.Logf("managed ingress Docker NetworkInspect failed: %v", err)
+	}
+	return result, err
 }
 
 func (d *managedIngressIntegrationDispatcher) Dispatch(
@@ -244,7 +312,13 @@ func (d *managedIngressIntegrationDispatcher) Dispatch(
 	if hostID != d.hostID {
 		return managedhostbiz.AgentCommandResult{}, managedhostbiz.ErrAgentNotConnected
 	}
-	return d.executor.Execute(ctx, command)
+	result, err := d.executor.Execute(ctx, command)
+	if err != nil {
+		d.t.Logf("managed ingress Agent command %s failed transport: %v", command.Kind, err)
+	} else if result.Status != agentprotocol.AgentCommandSucceeded {
+		d.t.Logf("managed ingress Agent command %s failed safely: %s", command.Kind, result.ErrorCode)
+	}
+	return result, err
 }
 
 type managedIngressIntegrationResolver struct {
@@ -496,7 +570,7 @@ func cleanupManagedIngressRuntimeContainers(
 		}
 		for _, name := range names {
 			_, err := client.ContainerRemove(
-				cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true},
+				cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 			)
 			if err != nil && !cerrdefs.IsNotFound(err) {
 				t.Errorf("remove managed ingress integration container %s: %v", name, err)

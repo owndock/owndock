@@ -97,7 +97,7 @@ func TestDockerGatewayEngineIntegration(t *testing.T) {
 		}
 		for _, name := range names {
 			_, _ = inspectionClient.ContainerRemove(
-				cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true},
+				cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 			)
 		}
 	})
@@ -253,7 +253,7 @@ func TestDockerGatewayMTLSCutoverRenameFailureAndRecoveryIntegration(t *testing.
 		defer cleanupCancel()
 		for _, name := range []string{stableName, candidateContainerName(first),
 			previousContainerName(first), candidateContainerName(second), previousContainerName(second)} {
-			_, _ = inspectionClient.ContainerRemove(cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true})
+			_, _ = inspectionClient.ContainerRemove(cleanupContext, name, mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true})
 		}
 	})
 

@@ -202,7 +202,13 @@ func TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration(t *testing.T
 		t.Fatalf("restart ingress gateway: %v", err)
 	}
 	waitForUnixSocket(t, ctx, adminSocket)
-	assertIngressResponseEventually(t, ctx, publicAddress, "application-a.example.com", "application-a-new")
+	publicAddress = ingressContainerAddress(t, ctx, caddy)
+	if err := waitForIngressResponse(ctx, publicAddress,
+		"application-a.example.com", "application-a-new"); err != nil {
+		logs, logsErr := boundedIngressContainerLogs(ctx, caddy)
+		t.Fatalf("resumed ingress did not become ready: %v; logs=%q logs_error=%v",
+			err, logs, logsErr)
+	}
 	assertIngressResponse(t, ctx, publicAddress, "application-b.example.com", http.StatusOK, "application-b")
 	assertIngressResponse(t, ctx, publicAddress, "protocol.example.com", http.StatusOK, "protocol-new")
 	if _, err := executor.Commit(ctx, third); err != nil {
@@ -257,28 +263,30 @@ func startIngressCaddy(
   "admin": {"listen": %q, "config": {"persist": true}},
   "storage": {"module": "file_system", "root": "/data/caddy"}
 }`, "unix/"+adminSocket+"|0660")
+	bootstrapPath := filepath.Join(socketDirectory, "bootstrap.json")
+	if err := os.WriteFile(bootstrapPath, []byte(bootstrap), 0o400); err != nil {
+		t.Fatalf("write ingress bootstrap: %v", err)
+	}
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        agentCaddyIntegrationImage,
 			ExposedPorts: []string{caddyIntegrationPort},
 			Cmd: []string{"caddy", "run", "--resume", "--config",
 				"/etc/caddy/owndock-bootstrap.json"},
-			Env:      map[string]string{"XDG_DATA_HOME": "/data", "XDG_CONFIG_HOME": "/config"},
-			Networks: []string{networkName},
-			User:     fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
-			Files: []testcontainers.ContainerFile{{
-				Reader: strings.NewReader(bootstrap), ContainerFilePath: "/etc/caddy/owndock-bootstrap.json",
-				FileMode: 0o444,
-			}},
+			Env:        map[string]string{"XDG_DATA_HOME": "/data", "XDG_CONFIG_HOME": "/config"},
+			Networks:   []string{networkName},
+			User:       fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()),
 			WaitingFor: wait.ForLog("serving initial configuration").WithStartupTimeout(30 * time.Second),
 			HostConfigModifier: func(config *containertypes.HostConfig) {
 				config.Binds = []string{
 					socketDirectory + ":" + socketDirectory,
 					dataDirectory + ":/data",
 					configDirectory + ":/config",
+					bootstrapPath + ":/etc/caddy/owndock-bootstrap.json:ro",
 				}
 				config.ReadonlyRootfs = true
 				config.CapDrop = []string{"ALL"}
+				config.CapAdd = []string{"NET_BIND_SERVICE"}
 				config.SecurityOpt = []string{"no-new-privileges:true"}
 				config.Tmpfs = map[string]string{
 					"/tmp": "rw,noexec,nosuid,nodev,size=16m,mode=0700",
@@ -290,12 +298,25 @@ func startIngressCaddy(
 				}
 			},
 		},
-		Started: true,
+		Started: false,
 	})
 	if err != nil {
-		t.Fatalf("start ingress gateway: %v", err)
+		t.Fatalf("create ingress gateway: %v", err)
 	}
 	terminateIngressContainer(t, container, "gateway")
+	if err := container.Start(ctx); err != nil {
+		logs, logsErr := boundedIngressContainerLogs(ctx, container)
+		t.Fatalf("start ingress gateway: %v: logs=%q logs_error=%v", err, logs, logsErr)
+	}
+	return container, ingressContainerAddress(t, ctx, container)
+}
+
+func ingressContainerAddress(
+	t *testing.T,
+	ctx context.Context,
+	container testcontainers.Container,
+) string {
+	t.Helper()
 	host, err := container.Host(ctx)
 	if err != nil {
 		t.Fatalf("resolve ingress gateway host: %v", err)
@@ -304,7 +325,7 @@ func startIngressCaddy(
 	if err != nil {
 		t.Fatalf("resolve ingress gateway port: %v", err)
 	}
-	return container, net.JoinHostPort(host, port.Port())
+	return net.JoinHostPort(host, port.Port())
 }
 
 func terminateIngressContainer(t *testing.T, container testcontainers.Container, description string) {
@@ -397,14 +418,12 @@ func assertIngressResponse(
 	}
 }
 
-func assertIngressResponseEventually(
-	t *testing.T,
+func waitForIngressResponse(
 	ctx context.Context,
 	address string,
 	hostname string,
 	wantBody string,
-) {
-	t.Helper()
+) error {
 	deadline := time.Now().Add(20 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -419,7 +438,7 @@ func assertIngressResponseEventually(
 				if readErr == nil && closeErr == nil && response.StatusCode == http.StatusOK &&
 					strings.TrimSpace(string(body)) == wantBody {
 					cancel()
-					return
+					return nil
 				}
 				lastErr = fmt.Errorf("status %d body %q read=%v close=%v",
 					response.StatusCode, body, readErr, closeErr)
@@ -432,11 +451,33 @@ func assertIngressResponseEventually(
 		cancel()
 		select {
 		case <-ctx.Done():
-			t.Fatalf("wait for resumed ingress: %v", ctx.Err())
+			return ctx.Err()
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	t.Fatalf("resumed ingress did not serve %s: %v", hostname, lastErr)
+	if lastErr == nil {
+		lastErr = errors.New("ingress response deadline elapsed before first attempt")
+	}
+	return fmt.Errorf("ingress host %s: %w", hostname, lastErr)
+}
+
+func boundedIngressContainerLogs(
+	ctx context.Context,
+	container testcontainers.Container,
+) (string, error) {
+	logs, err := container.Logs(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer logs.Close()
+	output, err := io.ReadAll(io.LimitReader(logs, 64*1024+1))
+	if err != nil {
+		return "", err
+	}
+	if len(output) > 64*1024 {
+		return "", errors.New("Ingress Gateway logs exceed 64 KiB")
+	}
+	return string(output), nil
 }
 
 func waitForUnixSocket(t *testing.T, ctx context.Context, path string) {

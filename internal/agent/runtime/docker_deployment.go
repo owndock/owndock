@@ -381,7 +381,7 @@ func retirePreviousDeployment(
 	if _, err := engine.ContainerRemove(
 		ctx,
 		previous.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	); err != nil && !cerrdefs.IsNotFound(err) {
 		return deploymentError("runtime_error", err)
 	}
@@ -457,7 +457,7 @@ func removeOwnedContainerStrict(
 	if _, err := engine.ContainerRemove(
 		ctx,
 		current.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	); err != nil && !cerrdefs.IsNotFound(err) {
 		return deploymentError("runtime_error", err)
 	}
@@ -500,7 +500,7 @@ func (e *DockerExecutor) removeRuntime(
 	if _, err := engine.ContainerRemove(
 		ctx,
 		current.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	); err != nil && !cerrdefs.IsNotFound(err) {
 		return deploymentResult(command.ID, "runtime_error"), nil
 	}
@@ -745,7 +745,7 @@ func removeOwnedContainer(
 	_, _ = engine.ContainerRemove(
 		cleanupContext,
 		containerID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	)
 }
 
@@ -765,7 +765,7 @@ func removeManagedContainer(
 	_, _ = engine.ContainerRemove(
 		cleanupContext,
 		current.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	)
 }
 
@@ -787,7 +787,7 @@ func removeManagedContainerStrict(
 	if _, err := engine.ContainerRemove(
 		ctx,
 		current.Container.ID,
-		mobyclient.ContainerRemoveOptions{Force: true},
+		mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 	); err != nil && !cerrdefs.IsNotFound(err) {
 		return deploymentError("runtime_error", err)
 	}

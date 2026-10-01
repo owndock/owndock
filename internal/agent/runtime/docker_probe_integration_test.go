@@ -113,7 +113,7 @@ func TestDockerExecutorIntegration(t *testing.T) {
 			_, _ = inspectionClient.ContainerRemove(
 				cleanupContext,
 				name,
-				mobyclient.ContainerRemoveOptions{Force: true},
+				mobyclient.ContainerRemoveOptions{Force: true, RemoveVolumes: true},
 			)
 		}
 	})

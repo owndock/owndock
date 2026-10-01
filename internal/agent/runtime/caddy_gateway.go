@@ -159,22 +159,32 @@ func (g *CaddyGateway) Probe(ctx context.Context, command agentprotocol.IngressC
 		if route.TLSMode == agentprotocol.IngressTLSAutomatic {
 			scheme, port = "https", caddyPublicHTTPSPort
 		}
-		request, err := http.NewRequestWithContext(probeContext, http.MethodGet,
-			fmt.Sprintf("%s://%s:%d/", scheme, route.Hostname, port), nil)
-		if err != nil {
-			return ErrIngressConfiguration
-		}
 		token := caddyProbeToken(command.ConfigDigest, route.RouteID)
-		request.Header.Set(caddyProbeHeader, token)
-		response, err := g.probeClient.Do(request)
-		if err != nil {
-			return classifyCaddyProbeError(probeContext, route, err)
-		}
-		readBytes, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, maximumCaddyResponse+1))
-		closeErr := response.Body.Close()
-		if readErr != nil || closeErr != nil || readBytes > maximumCaddyResponse ||
-			response.Header.Get(caddyProbeHeader) != token {
-			return ErrIngressBackendUnhealthy
+		for {
+			request, err := http.NewRequestWithContext(probeContext, http.MethodGet,
+				fmt.Sprintf("%s://%s:%d/", scheme, route.Hostname, port), nil)
+			if err != nil {
+				return ErrIngressConfiguration
+			}
+			request.Header.Set(caddyProbeHeader, token)
+			response, err := g.probeClient.Do(request)
+			if err != nil {
+				return classifyCaddyProbeError(probeContext, route, err)
+			}
+			readBytes, readErr := io.Copy(io.Discard,
+				io.LimitReader(response.Body, maximumCaddyResponse+1))
+			closeErr := response.Body.Close()
+			if readErr == nil && closeErr == nil && readBytes <= maximumCaddyResponse &&
+				response.Header.Get(caddyProbeHeader) == token {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ErrIngressGatewayUnavailable
+			case <-probeContext.Done():
+				return ErrIngressBackendUnhealthy
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 	}
 	return nil

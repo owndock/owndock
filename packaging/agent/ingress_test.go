@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestIngressGatewayPackageHasFixedLeastPrivilegeBoundary(t *testing.T) {
@@ -19,7 +22,8 @@ func TestIngressGatewayPackageHasFixedLeastPrivilegeBoundary(t *testing.T) {
 	for _, required := range []string{
 		"caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b",
 		`user: "${OWNDOCK_INGRESS_UID:?required}:${OWNDOCK_INGRESS_GID:?required}"`,
-		"read_only: true", "cap_drop:", "- ALL", "no-new-privileges:true",
+		"read_only: true", "cap_drop:", "- ALL", "cap_add:", "- NET_BIND_SERVICE",
+		"no-new-privileges:true",
 		`- "80:8080/tcp"`, `- "443:8443/tcp"`, "--resume",
 		"source: /run/owndock-ingress", "source: /var/lib/owndock-ingress/data",
 		"name: owndock-ingress", "pids_limit: 256", "mem_limit: 512m",
@@ -32,6 +36,21 @@ func TestIngressGatewayPackageHasFixedLeastPrivilegeBoundary(t *testing.T) {
 		if strings.Contains(strings.ToLower(compose), forbidden) {
 			t.Fatalf("Ingress Compose file contains forbidden %q", forbidden)
 		}
+	}
+	var security struct {
+		Services map[string]struct {
+			CapDrop []string `yaml:"cap_drop"`
+			CapAdd  []string `yaml:"cap_add"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(composeValue, &security); err != nil {
+		t.Fatal(err)
+	}
+	gateway := security.Services["gateway"]
+	if !slices.Equal(gateway.CapDrop, []string{"ALL"}) ||
+		!slices.Equal(gateway.CapAdd, []string{"NET_BIND_SERVICE"}) {
+		t.Fatalf("Ingress Gateway capabilities = drop %v add %v",
+			gateway.CapDrop, gateway.CapAdd)
 	}
 
 	bootstrapValue, err := os.ReadFile(filepath.Join(directory, "owndock-ingress-bootstrap.json"))

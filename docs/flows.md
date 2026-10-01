@@ -544,7 +544,7 @@ sequenceDiagram
 
 下面链路已经具备基础实现：创建前 Runtime Target `ready` 门禁、queued Deployment、Project 范围校验、幂等回放、查询、取消、失败重试、回滚、MongoDB 持久化、Registry Credential、Release 运行规格、Environment 配置绑定、执行期 Secret Resolver、受管 Worker、按连接模式分派的 direct/agent Runtime Gateway、安全失败分类和状态审计。两条 Docker 路径都使用候选容器健康门禁、同 Deployment 的 lease generation fencing，以及跨 Deployment 的 cutover sequence；Agent 路径把远程切换拆为 stage、Server fence 和 activate，并把槽位最高 sequence 独立持久化。本地真实 Docker Engine 已覆盖 direct 健康切换、Agent 两阶段部署/取消，以及 mTLS Docker API 在切换窗口第二次重命名被拒绝或已生效但响应丢失时恢复旧稳定容器、清理候选并重试成功；单元回归已覆盖 Agent 重启、稳定容器缺失和延迟旧命令。物理远程 Engine、实际入口流量、双主机断线/过期 fence 与网络层延迟系统测试仍未完成，因此仍不是生产闭环。
 
-Release 端口仍只表示容器内部端口，不绑定每应用宿主端口。目标边界固定为 Agent managed HTTP/HTTPS 与显式 external 双模式；`ApplicationRoute` desired-state API/MongoDB、`ingress.prepare/commit/abort`、Agent committed/pending fence、固定 Caddy Gateway，以及 Server Host cutover transaction、Deployment `committing`/Route observation 原子提交、30 秒 drain 和精确 retire 已接通。Route 的 `pending` 状态仍不能作为流量门禁；代码闭环也不替代真实 Linux、80/443、自动 HTTPS、长连接和故障注入验收，详见 [Application ingress](application-ingress.md)。
+Release 端口仍只表示容器内部端口，不绑定每应用宿主端口。目标边界固定为 Agent managed HTTP/HTTPS 与显式 external 双模式；`ApplicationRoute` desired-state API/MongoDB、`ingress.prepare/commit/abort`、Agent committed/pending fence、固定 Caddy Gateway，以及 Server Host cutover transaction、Deployment `committing`/Route observation 原子提交、30 秒 drain 和精确 retire 已接通。Linux-kernel 容器门禁已用真实 Caddy/Engine 验证 HTTP/1.1、WebSocket、长响应、切换与回滚；Route 的 `pending` 状态仍不能作为流量门禁，这项证据也不替代原生 systemd、宿主 80/443、自动 HTTPS 和客户故障注入验收，详见 [Application ingress](application-ingress.md)。
 
 ```mermaid
 sequenceDiagram

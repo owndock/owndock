@@ -84,6 +84,19 @@ func TestCaddyGatewayPrivateProbeUsesHostTLSAndExactMarker(t *testing.T) {
 		seen.Host != "route-1.example.com:443" || seen.Header.Get(caddyProbeHeader) != token {
 		t.Fatalf("probe request = %#v", seen)
 	}
+	attempts := 0
+	gateway.probeClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		attempts++
+		header := make(http.Header)
+		if attempts == 3 {
+			header.Set(caddyProbeHeader, token)
+		}
+		return &http.Response{StatusCode: http.StatusBadGateway, Header: header,
+			Body: io.NopCloser(strings.NewReader("starting"))}, nil
+	})}
+	if err := gateway.Probe(t.Context(), command); err != nil || attempts != 3 {
+		t.Fatalf("transient backend probe = attempts %d error %v", attempts, err)
+	}
 	gateway.probeClient = &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
 			Body: io.NopCloser(strings.NewReader("unmarked"))}, nil
