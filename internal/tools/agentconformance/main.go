@@ -1630,7 +1630,8 @@ func (h *conformanceHandler) conformanceCommand(
 				CPUMilli: 100, MemoryBytes: 64 * 1024 * 1024,
 			},
 		}
-	case agentprotocol.AgentCommandDeploymentActivate:
+	case agentprotocol.AgentCommandDeploymentActivate,
+		agentprotocol.AgentCommandDeploymentRetire:
 	default:
 		return agentprotocol.AgentCommand{}, errors.New("deployment conformance kind is invalid")
 	}
@@ -1799,6 +1800,7 @@ func conformanceCapabilities(deployment, inventory, terminal bool) []string {
 			agentprotocol.CapabilityDeploymentPrepare,
 			agentprotocol.CapabilityDeploymentStage,
 			agentprotocol.CapabilityDeploymentActivate,
+			agentprotocol.CapabilityDeploymentRetire,
 			agentprotocol.CapabilityDeploymentCancel,
 		)
 	}
@@ -1821,7 +1823,8 @@ func validConformanceDeploymentCommand(value string) bool {
 	switch agentprotocol.AgentCommandKind(value) {
 	case "", agentprotocol.AgentCommandDeploymentPrepare,
 		agentprotocol.AgentCommandDeploymentStage,
-		agentprotocol.AgentCommandDeploymentActivate:
+		agentprotocol.AgentCommandDeploymentActivate,
+		agentprotocol.AgentCommandDeploymentRetire:
 		return true
 	default:
 		return false

@@ -76,8 +76,16 @@ func TestDeploymentCommandsAreStrictAndFingerprintSecrets(t *testing.T) {
 	if err := stage.Validate(); err != nil {
 		t.Fatalf("stage error = %v", err)
 	}
+	managed := stage
+	managedDeployment := *stage.Deployment
+	managedDeployment.ManagedIngress = true
+	managed.Deployment = &managedDeployment
+	if err := managed.Validate(); err != nil || managed.Equivalent(stage) {
+		t.Fatalf("managed stage validation/equivalence = %v/%t", err, managed.Equivalent(stage))
+	}
 	for _, kind := range []AgentCommandKind{
 		AgentCommandDeploymentActivate,
+		AgentCommandDeploymentRetire,
 		AgentCommandDeploymentCancel,
 	} {
 		command := deploymentCommand(kind)
@@ -91,6 +99,29 @@ func TestDeploymentCommandsAreStrictAndFingerprintSecrets(t *testing.T) {
 		if err := result.Validate(command); err != nil {
 			t.Fatalf("%s result error = %v", kind, err)
 		}
+	}
+	retire := deploymentCommand(AgentCommandDeploymentRetire)
+	retire.Deployment.ManagedIngress = true
+	if !errors.Is(retire.Validate(), ErrCommandInvalid) {
+		t.Fatal("retire accepted a stage-only managed ingress marker")
+	}
+}
+
+func TestDeploymentBackendAliasIsDeterministicAndBounded(t *testing.T) {
+	first, err := DeploymentBackendAlias("deployment-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := DeploymentBackendAlias("deployment-1")
+	if err != nil || first != second || !ingressBackendAlias.MatchString(first) {
+		t.Fatalf("aliases = %q/%q, error = %v", first, second, err)
+	}
+	other, err := DeploymentBackendAlias("deployment-2")
+	if err != nil || other == first {
+		t.Fatalf("other alias = %q, error = %v", other, err)
+	}
+	if _, err := DeploymentBackendAlias("unsafe deployment"); !errors.Is(err, ErrCommandInvalid) {
+		t.Fatalf("unsafe identifier error = %v", err)
 	}
 }
 

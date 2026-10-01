@@ -73,6 +73,24 @@ func (g *AgentDockerGateway) Deploy(
 	plan biz.ExecutionPlan,
 	_ biz.RuntimeCredential,
 ) error {
+	if err := g.Stage(ctx, plan, biz.RuntimeCredential{}); err != nil {
+		return err
+	}
+	if err := g.validateFence(ctx, plan); err != nil {
+		g.cancelStagedCandidate(plan)
+		return staleExecutionError()
+	}
+	if err := g.Activate(ctx, plan); err != nil {
+		return err
+	}
+	return g.Retire(ctx, plan)
+}
+
+func (g *AgentDockerGateway) Stage(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+	_ biz.RuntimeCredential,
+) error {
 	deployment, err := agentDeploymentIdentity(plan)
 	if err != nil {
 		return err
@@ -83,29 +101,45 @@ func (g *AgentDockerGateway) Deploy(
 	deployment.ImageDigest = plan.ImageDigest
 	deployment.RuntimeSpec = plan.RuntimeSpec
 	deployment.Environment = append([]string(nil), plan.Environment...)
+	deployment.ManagedIngress = plan.ManagedIngress
 
-	hostID := plan.TargetConnection.ManagedHostID
-	if err := g.dispatch(
+	return g.dispatch(
 		ctx,
-		hostID,
+		plan.TargetConnection.ManagedHostID,
 		agentprotocol.AgentCommandDeploymentStage,
 		deployment,
-	); err != nil {
-		return err
-	}
-	if err := g.validateFence(ctx, plan); err != nil {
-		g.cancelStagedCandidate(plan)
-		return staleExecutionError()
-	}
+	)
+}
+
+func (g *AgentDockerGateway) Activate(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
 	activation, err := agentDeploymentIdentity(plan)
 	if err != nil {
 		return err
 	}
 	return g.dispatch(
 		ctx,
-		hostID,
+		plan.TargetConnection.ManagedHostID,
 		agentprotocol.AgentCommandDeploymentActivate,
 		activation,
+	)
+}
+
+func (g *AgentDockerGateway) Retire(
+	ctx context.Context,
+	plan biz.ExecutionPlan,
+) error {
+	retirement, err := agentDeploymentIdentity(plan)
+	if err != nil {
+		return err
+	}
+	return g.dispatch(
+		ctx,
+		plan.TargetConnection.ManagedHostID,
+		agentprotocol.AgentCommandDeploymentRetire,
+		retirement,
 	)
 }
 
@@ -313,7 +347,7 @@ func agentDeploymentIdentity(
 
 func agentResultError(code string) error {
 	switch code {
-	case "runtime_configuration":
+	case "runtime_configuration", "ingress_unavailable":
 		return executionError(
 			biz.FailureConfiguration,
 			errors.New(code),
@@ -339,6 +373,8 @@ func agentResultError(code string) error {
 		)
 	}
 }
+
+var _ biz.ManagedIngressRuntimeGateway = (*AgentDockerGateway)(nil)
 
 func executionError(
 	category biz.FailureCategory,

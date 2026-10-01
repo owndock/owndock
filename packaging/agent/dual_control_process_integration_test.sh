@@ -710,6 +710,7 @@ if [ "$runtime_mode" = 1 ]; then
 	run_dual_deployment_phase deployment.prepare
 	run_dual_deployment_phase deployment.stage
 	run_dual_deployment_phase deployment.activate
+	run_dual_deployment_phase deployment.retire
 	state_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}}' \
 		"$deployment_container")
@@ -796,6 +797,7 @@ if [ "$runtime_mode" = 1 ]; then
 	run_host_deployment_phase a deployment.prepare 2 succeeded restart-v2
 	run_host_deployment_phase a deployment.stage 2 succeeded restart-v2
 	run_host_deployment_phase a deployment.activate 2 succeeded restart-v2
+	run_host_deployment_phase a deployment.retire 2 succeeded restart-v2
 	run_host_deployment_phase a deployment.activate 1 stale_execution delayed-v1
 	state_a=$(docker exec "$engine_a_id" docker --host tcp://127.0.0.1:2375 \
 		inspect --format '{{.State.Running}} {{index .Config.Labels "net.owndock.deployment_id"}} {{index .Config.Labels "net.owndock.cutover_sequence"}}' \

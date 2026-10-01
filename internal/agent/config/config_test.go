@@ -30,7 +30,7 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 	}
 	if config.Control.MaxFrameBytes != 65536 ||
 		config.Control.MaxConcurrentCommands != 4 ||
-		len(config.Control.Capabilities) != 13 ||
+		len(config.Control.Capabilities) != 14 ||
 		config.Runtime.ResultCacheSize != 256 ||
 		config.Runtime.CutoverWatermarkSize != 16384 ||
 		config.Ingress.Enabled || config.Ingress.FenceSize != 16384 ||

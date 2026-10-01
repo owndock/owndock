@@ -126,7 +126,7 @@ func TestAgentDockerGatewayRoutesTwoHostsWithoutCrossingTargets(
 		}
 	}
 
-	seen := collectRoutedCommands(t, routed, 4)
+	seen := collectRoutedCommands(t, routed, 6)
 	assertHostDeploymentRoute(
 		t,
 		seen,
@@ -398,7 +398,8 @@ func assertHostDeploymentRoute(
 	}
 	if kinds[agentprotocol.AgentCommandDeploymentStage] != 1 ||
 		kinds[agentprotocol.AgentCommandDeploymentActivate] != 1 ||
-		len(kinds) != 2 {
+		kinds[agentprotocol.AgentCommandDeploymentRetire] != 1 ||
+		len(kinds) != 3 {
 		t.Fatalf("Host %s command kinds = %+v", hostID, kinds)
 	}
 }

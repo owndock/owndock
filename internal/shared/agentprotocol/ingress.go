@@ -11,6 +11,8 @@ import (
 
 const MaxIngressRoutes = 128
 
+const ManagedIngressNetwork = "owndock-ingress"
+
 type IngressTLSMode string
 
 const (
@@ -153,4 +155,16 @@ func writeIngressRouteFingerprint(hasher fingerprintWriter, route IngressRoute) 
 	writeFingerprintString(hasher, route.BackendAlias)
 	writeFingerprintUint64(hasher, uint64(route.BackendPort))
 	writeFingerprintString(hasher, string(route.TLSMode))
+}
+
+// DeploymentBackendAlias returns the only DNS alias that managed ingress may
+// use for a Deployment. It is derived rather than accepted from users or
+// Server configuration so the Agent never joins a container under an
+// arbitrary name.
+func DeploymentBackendAlias(deploymentID string) (string, error) {
+	if !validIdentifier(deploymentID) {
+		return "", ErrCommandInvalid
+	}
+	digest := sha256.Sum256([]byte(deploymentID))
+	return "deployment-" + hex.EncodeToString(digest[:12]), nil
 }

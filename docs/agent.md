@@ -75,6 +75,7 @@ control:
     - deployment.prepare
     - deployment.stage
     - deployment.activate
+    - deployment.retire
     - deployment.cancel
     - deployment.runtime.remove
     - deployment.cutover.release

@@ -102,7 +102,7 @@ func TestAgentDockerGatewayBuildsNarrowPrepareCommand(t *testing.T) {
 }
 
 func TestAgentDockerGatewayStagesFencesThenActivates(t *testing.T) {
-	order := make([]string, 0, 3)
+	order := make([]string, 0, 4)
 	dispatcher := &agentCommandDispatcherStub{
 		onCall: func(command managedhostbiz.AgentCommand) {
 			order = append(order, string(command.Kind))
@@ -126,10 +126,10 @@ func TestAgentDockerGatewayStagesFencesThenActivates(t *testing.T) {
 		t.Fatal(err)
 	}
 	if strings.Join(order, ",") !=
-		"deployment.stage,fence,deployment.activate" {
+		"deployment.stage,fence,deployment.activate,deployment.retire" {
 		t.Fatalf("order = %v", order)
 	}
-	if fence.calls != 1 || len(dispatcher.commands) != 2 {
+	if fence.calls != 1 || len(dispatcher.commands) != 3 {
 		t.Fatalf(
 			"fence calls = %d, commands = %d",
 			fence.calls,
@@ -138,6 +138,7 @@ func TestAgentDockerGatewayStagesFencesThenActivates(t *testing.T) {
 	}
 	stage := dispatcher.commands[0]
 	activate := dispatcher.commands[1]
+	retire := dispatcher.commands[2]
 	if stage.Deployment == nil ||
 		stage.Deployment.ProjectID != plan.ProjectID ||
 		stage.Deployment.Environment[0] != "MODE=production" ||
@@ -149,6 +150,10 @@ func TestAgentDockerGatewayStagesFencesThenActivates(t *testing.T) {
 		activate.Deployment.ImageDigest != "" ||
 		len(activate.Deployment.Environment) != 0 {
 		t.Fatalf("activate = %+v", activate)
+	}
+	if retire.Deployment == nil || retire.Kind != agentprotocol.AgentCommandDeploymentRetire ||
+		retire.Deployment.ProjectID != "" || retire.Deployment.ImageDigest != "" {
+		t.Fatalf("retire = %+v", retire)
 	}
 }
 

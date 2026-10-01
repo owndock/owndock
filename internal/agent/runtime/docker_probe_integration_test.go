@@ -489,6 +489,7 @@ func deployAgentIntegrationFixture(
 		{kind: agentprotocol.AgentCommandDeploymentPrepare, name: "prepare"},
 		{kind: agentprotocol.AgentCommandDeploymentStage, name: "stage"},
 		{kind: agentprotocol.AgentCommandDeploymentActivate, name: "activate"},
+		{kind: agentprotocol.AgentCommandDeploymentRetire, name: "retire"},
 	} {
 		assertAgentCommandSucceeded(t, executor, ctx, agentIntegrationCommand(
 			prefix+"-"+step.name, step.kind, deployment,
@@ -588,6 +589,7 @@ func agentIntegrationCommand(
 		deployment.EnvironmentID = ""
 		deployment.RuntimeSpec = runtimespec.Spec{}
 	case agentprotocol.AgentCommandDeploymentActivate,
+		agentprotocol.AgentCommandDeploymentRetire,
 		agentprotocol.AgentCommandDeploymentCancel:
 		deployment.ProjectID = ""
 		deployment.ApplicationID = ""

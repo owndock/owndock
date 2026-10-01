@@ -13,6 +13,7 @@ import (
 	cerrdefs "github.com/containerd/errdefs"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/jsonstream"
+	"github.com/moby/moby/api/types/network"
 	mobyclient "github.com/moby/moby/client"
 
 	"github.com/owndock/owndock/internal/shared/agentprotocol"
@@ -31,19 +32,22 @@ func (agentImagePullStub) JSONMessages(
 func (agentImagePullStub) Wait(context.Context) error { return nil }
 
 type agentDockerEngineStub struct {
-	containers  map[string]mobyclient.ContainerInspectResult
-	names       map[string]string
-	nextID      int
-	imageExists bool
-	pullAuth    string
-	pullCount   int
-	unhealthy   bool
+	containers        map[string]mobyclient.ContainerInspectResult
+	names             map[string]string
+	nextID            int
+	imageExists       bool
+	pullAuth          string
+	pullCount         int
+	unhealthy         bool
+	ingressNetwork    bool
+	createdNetworking *network.NetworkingConfig
 }
 
 func newAgentDockerEngineStub() *agentDockerEngineStub {
 	return &agentDockerEngineStub{
-		containers: make(map[string]mobyclient.ContainerInspectResult),
-		names:      make(map[string]string),
+		containers:     make(map[string]mobyclient.ContainerInspectResult),
+		names:          make(map[string]string),
+		ingressNetwork: true,
 	}
 }
 
@@ -96,6 +100,7 @@ func (e *agentDockerEngineStub) ContainerCreate(
 	_ context.Context,
 	options mobyclient.ContainerCreateOptions,
 ) (mobyclient.ContainerCreateResult, error) {
+	e.createdNetworking = options.NetworkingConfig
 	e.nextID++
 	id := "container-" + strconv.Itoa(e.nextID)
 	e.containers[id] = mobyclient.ContainerInspectResult{
@@ -109,6 +114,19 @@ func (e *agentDockerEngineStub) ContainerCreate(
 	}
 	e.names[options.Name] = id
 	return mobyclient.ContainerCreateResult{ID: id}, nil
+}
+
+func (e *agentDockerEngineStub) NetworkInspect(
+	_ context.Context,
+	name string,
+	_ mobyclient.NetworkInspectOptions,
+) (mobyclient.NetworkInspectResult, error) {
+	if !e.ingressNetwork || name != agentprotocol.ManagedIngressNetwork {
+		return mobyclient.NetworkInspectResult{}, cerrdefs.ErrNotFound
+	}
+	return mobyclient.NetworkInspectResult{Network: network.Inspect{Network: network.Network{
+		Name: name, Driver: "bridge", Scope: "local",
+	}}}, nil
 }
 
 func (e *agentDockerEngineStub) ContainerStart(
@@ -351,8 +369,47 @@ func TestAgentDockerDeploymentStagesAndActivatesCandidate(t *testing.T) {
 	if err != nil || !ownsExecution(current, *activate.Deployment) {
 		t.Fatalf("current = %+v, error = %v", current, err)
 	}
+	if _, exists := engine.containers["old-container"]; !exists {
+		t.Fatal("previous managed container was removed before drain")
+	}
+	retire := deploymentCommand(
+		"retire-1",
+		agentprotocol.AgentCommandDeploymentRetire,
+	)
+	result, err = executor.Execute(t.Context(), retire)
+	if err != nil || result.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("retire result = %+v, error = %v", result, err)
+	}
 	if _, exists := engine.containers["old-container"]; exists {
-		t.Fatal("previous managed container was not removed")
+		t.Fatal("previous managed container was not retired after drain")
+	}
+}
+
+func TestAgentDockerDeploymentManagedIngressUsesFixedNetworkAndAlias(t *testing.T) {
+	executor, engine := newDeploymentExecutor(t)
+	stage := deploymentCommand("stage-ingress", agentprotocol.AgentCommandDeploymentStage)
+	stage.Deployment.ManagedIngress = true
+	result, err := executor.Execute(t.Context(), stage)
+	if err != nil || result.Status != agentprotocol.AgentCommandSucceeded {
+		t.Fatalf("stage result = %+v, error = %v", result, err)
+	}
+	alias, err := agentprotocol.DeploymentBackendAlias(stage.Deployment.DeploymentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := engine.createdNetworking.EndpointsConfig[agentprotocol.ManagedIngressNetwork]
+	if endpoint == nil || len(endpoint.Aliases) != 1 || endpoint.Aliases[0] != alias {
+		t.Fatalf("managed ingress endpoint = %#v", endpoint)
+	}
+
+	executor, engine = newDeploymentExecutor(t)
+	engine.ingressNetwork = false
+	stage = deploymentCommand("stage-no-ingress", agentprotocol.AgentCommandDeploymentStage)
+	stage.Deployment.ManagedIngress = true
+	result, err = executor.Execute(t.Context(), stage)
+	if err != nil || result.Status != agentprotocol.AgentCommandFailed ||
+		result.ErrorCode != "ingress_unavailable" {
+		t.Fatalf("missing network result = %+v, error = %v", result, err)
 	}
 }
 

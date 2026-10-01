@@ -165,6 +165,7 @@ func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
 		agentprotocol.AgentCommandDeploymentPrepare,
 		agentprotocol.AgentCommandDeploymentStage,
 		agentprotocol.AgentCommandDeploymentActivate,
+		agentprotocol.AgentCommandDeploymentRetire,
 	} {
 		handler.deploymentCommand = string(kind)
 		command, err := handler.conformanceCommand("ready")
@@ -183,9 +184,9 @@ func TestConformanceDeploymentCommandsAreCanonical(t *testing.T) {
 		}
 	}
 	capabilities := conformanceCapabilities(true, false, false)
-	if len(capabilities) != 5 ||
+	if len(capabilities) != 6 ||
 		capabilities[0] != agentprotocol.CapabilityRuntimeProbe ||
-		capabilities[4] != agentprotocol.CapabilityDeploymentCancel {
+		capabilities[5] != agentprotocol.CapabilityDeploymentCancel {
 		t.Fatalf("deployment capabilities = %v", capabilities)
 	}
 }
@@ -253,10 +254,10 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 		}
 	}
 	capabilities := conformanceCapabilities(true, true, true)
-	if len(capabilities) != 10 ||
-		capabilities[5] != agentprotocol.CapabilityInventoryPrepare ||
-		capabilities[8] != agentprotocol.CapabilityInventoryEvents ||
-		capabilities[9] != agentprotocol.CapabilityTerminalContainer {
+	if len(capabilities) != 11 ||
+		capabilities[6] != agentprotocol.CapabilityInventoryPrepare ||
+		capabilities[9] != agentprotocol.CapabilityInventoryEvents ||
+		capabilities[10] != agentprotocol.CapabilityTerminalContainer {
 		t.Fatalf("combined capabilities = %v", capabilities)
 	}
 

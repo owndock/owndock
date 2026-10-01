@@ -8,6 +8,7 @@ func TestEveryCommandKindHasAnAdvertisedCapability(t *testing.T) {
 		AgentCommandDeploymentPrepare,
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
+		AgentCommandDeploymentRetire,
 		AgentCommandDeploymentCancel,
 		AgentCommandRuntimeRemove,
 		AgentCommandCutoverRelease,

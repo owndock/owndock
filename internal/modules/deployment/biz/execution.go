@@ -83,6 +83,7 @@ type ExecutionPlan struct {
 	EnvironmentBindings map[string]string
 	Environment         []string
 	ContainerName       string
+	ManagedIngress      bool
 }
 
 type RuntimeCredential struct {
@@ -136,6 +137,15 @@ type RuntimeGateway interface {
 	Prepare(context.Context, ExecutionPlan, RuntimeCredential) error
 	Deploy(context.Context, ExecutionPlan, RuntimeCredential) error
 	Cancel(context.Context, ExecutionPlan, RuntimeCredential) error
+}
+
+// ManagedIngressRuntimeGateway exposes the recoverable runtime phases needed
+// by managed HTTP ingress. Activate deliberately preserves the previous
+// backend; Retire is called only after the route commit and bounded drain.
+type ManagedIngressRuntimeGateway interface {
+	Stage(context.Context, ExecutionPlan, RuntimeCredential) error
+	Activate(context.Context, ExecutionPlan) error
+	Retire(context.Context, ExecutionPlan) error
 }
 
 // RuntimeLifecycleGateway is intentionally separate from normal deployment

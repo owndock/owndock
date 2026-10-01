@@ -36,6 +36,7 @@ const (
 	AgentCommandDeploymentPrepare  AgentCommandKind = "deployment.prepare"
 	AgentCommandDeploymentStage    AgentCommandKind = "deployment.stage"
 	AgentCommandDeploymentActivate AgentCommandKind = "deployment.activate"
+	AgentCommandDeploymentRetire   AgentCommandKind = "deployment.retire"
 	AgentCommandDeploymentCancel   AgentCommandKind = "deployment.cancel"
 	AgentCommandRuntimeRemove      AgentCommandKind = "deployment.runtime.remove"
 	AgentCommandCutoverRelease     AgentCommandKind = "deployment.cutover.release"
@@ -52,6 +53,7 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandDeploymentPrepare,
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
+		AgentCommandDeploymentRetire,
 		AgentCommandDeploymentCancel,
 		AgentCommandRuntimeRemove,
 		AgentCommandCutoverRelease,
@@ -119,6 +121,7 @@ type DeploymentCommand struct {
 	RegistryAuthorization []byte
 	RuntimeSpec           runtimespec.Spec
 	Environment           []string
+	ManagedIngress        bool
 }
 
 func (c AgentCommand) Validate() error {
@@ -135,6 +138,7 @@ func (c AgentCommand) Validate() error {
 	case AgentCommandDeploymentPrepare,
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
+		AgentCommandDeploymentRetire,
 		AgentCommandDeploymentCancel:
 		if c.RuntimeProbe != nil || c.Cutover != nil || c.Inventory != nil || c.Ingress != nil ||
 			c.Deployment == nil ||
@@ -213,6 +217,7 @@ func (c AgentCommand) Fingerprint() ([sha256.Size]byte, error) {
 		for _, value := range deployment.Environment {
 			writeFingerprintString(hasher, value)
 		}
+		writeFingerprintBool(hasher, deployment.ManagedIngress)
 	}
 	if c.Cutover != nil {
 		writeFingerprintString(hasher, c.Cutover.DeploymentID)
@@ -350,6 +355,7 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 		case AgentCommandDeploymentPrepare,
 			AgentCommandDeploymentStage,
 			AgentCommandDeploymentActivate,
+			AgentCommandDeploymentRetire,
 			AgentCommandDeploymentCancel,
 			AgentCommandRuntimeRemove,
 			AgentCommandCutoverRelease:
@@ -507,7 +513,7 @@ func validDeploymentCommand(
 			command.ApplicationID == "" &&
 			command.EnvironmentID == "" &&
 			zeroRuntimeSpec(command.RuntimeSpec) &&
-			len(command.Environment) == 0
+			len(command.Environment) == 0 && !command.ManagedIngress
 	case AgentCommandDeploymentStage:
 		return validIdentifier(command.ProjectID) &&
 			validIdentifier(command.ApplicationID) &&
@@ -521,6 +527,7 @@ func validDeploymentCommand(
 				command.RuntimeSpec.EnvironmentKeys,
 			)
 	case AgentCommandDeploymentActivate,
+		AgentCommandDeploymentRetire,
 		AgentCommandDeploymentCancel:
 		return command.ProjectID == "" &&
 			command.ApplicationID == "" &&
@@ -528,7 +535,7 @@ func validDeploymentCommand(
 			command.ImageDigest == "" &&
 			len(command.RegistryAuthorization) == 0 &&
 			zeroRuntimeSpec(command.RuntimeSpec) &&
-			len(command.Environment) == 0
+			len(command.Environment) == 0 && !command.ManagedIngress
 	default:
 		return false
 	}
@@ -637,6 +644,14 @@ func writeFingerprintUint64(writer fingerprintWriter, value uint64) {
 	var encoded [8]byte
 	binary.BigEndian.PutUint64(encoded[:], value)
 	_, _ = writer.Write(encoded[:])
+}
+
+func writeFingerprintBool(writer fingerprintWriter, value bool) {
+	if value {
+		writeFingerprintUint64(writer, 1)
+		return
+	}
+	writeFingerprintUint64(writer, 0)
 }
 
 func writeFingerprintInt64(writer fingerprintWriter, value int64) {

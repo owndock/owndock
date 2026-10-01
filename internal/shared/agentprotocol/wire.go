@@ -74,6 +74,7 @@ type DeploymentDocument struct {
 	RegistryAuthorization []byte              `json:"registry_authorization,omitempty"`
 	RuntimeSpec           RuntimeSpecDocument `json:"runtime_spec,omitzero"`
 	Environment           []string            `json:"environment,omitempty"`
+	ManagedIngress        bool                `json:"managed_ingress,omitempty"`
 }
 
 type RuntimeSpecDocument struct {
@@ -220,8 +221,9 @@ func newDeploymentDocument(
 			[]byte(nil),
 			command.RegistryAuthorization...,
 		),
-		RuntimeSpec: newRuntimeSpecDocument(command.RuntimeSpec),
-		Environment: append([]string(nil), command.Environment...),
+		RuntimeSpec:    newRuntimeSpecDocument(command.RuntimeSpec),
+		Environment:    append([]string(nil), command.Environment...),
+		ManagedIngress: command.ManagedIngress,
 	}
 }
 
@@ -241,8 +243,9 @@ func (d DeploymentDocument) domain() *DeploymentCommand {
 			[]byte(nil),
 			d.RegistryAuthorization...,
 		),
-		RuntimeSpec: d.RuntimeSpec.domain(),
-		Environment: append([]string(nil), d.Environment...),
+		RuntimeSpec:    d.RuntimeSpec.domain(),
+		Environment:    append([]string(nil), d.Environment...),
+		ManagedIngress: d.ManagedIngress,
 	}
 }
 

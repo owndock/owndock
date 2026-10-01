@@ -149,6 +149,7 @@ func (e *DockerExecutor) execute(
 	case agentprotocol.AgentCommandDeploymentPrepare,
 		agentprotocol.AgentCommandDeploymentStage,
 		agentprotocol.AgentCommandDeploymentActivate,
+		agentprotocol.AgentCommandDeploymentRetire,
 		agentprotocol.AgentCommandDeploymentCancel:
 		result, executeError = e.executeDeployment(
 			commandContext,

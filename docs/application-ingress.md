@@ -49,7 +49,7 @@ sequenceDiagram
 
 首个 Gateway 锁定为 `caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b`。镜像锁文件同时记录 linux/amd64 和 linux/arm64/v8 子 manifest digest；Compose 不接受 `latest` 或浮动 tag。
 
-Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、只读根文件系统、drop all capabilities、`no-new-privileges`，只映射宿主 80→容器 8080 和 443→8443。它不挂载 Docker Socket；唯一控制入口是共享运行目录中的 `0660` Unix Socket。证书数据 `/data` 与 Caddy autosave `/config` 分别持久化，启动时 `--resume` 先恢复最后成功配置；Agent 再通过 config digest 对应的 Caddy `@id` 检查当前配置，不一致才提交完整 `/load`。开发环境全部为 `tls=disabled` 时不会监听容器 HTTPS 端口。
+Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、只读根文件系统、drop all capabilities、`no-new-privileges`，只映射宿主 80→容器 8080 和 443→8443。它不挂载 Docker Socket；唯一控制入口是共享运行目录中的 `0660` Unix Socket。证书数据 `/data` 与 Caddy autosave `/config` 分别持久化，启动时 `--resume` 先恢复最后成功配置；Agent 再通过 config digest 对应的 Caddy `@id` 检查当前配置，不一致才提交完整 `/load`。应用候选只能由类型化 stage 选择加入同名固定 Docker network，backend alias 由 Deployment ID 派生，Server 和用户不能指定任意网络或 alias。开发环境全部为 `tls=disabled` 时不会监听容器 HTTPS 端口。
 
 代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 

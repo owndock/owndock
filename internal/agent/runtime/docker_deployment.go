@@ -62,6 +62,11 @@ type dockerDeploymentEngine interface {
 		string,
 		mobyclient.ContainerRenameOptions,
 	) (mobyclient.ContainerRenameResult, error)
+	NetworkInspect(
+		context.Context,
+		string,
+		mobyclient.NetworkInspectOptions,
+	) (mobyclient.NetworkInspectResult, error)
 	Close() error
 }
 
@@ -121,6 +126,8 @@ func (e *DockerExecutor) executeDeployment(
 		err = e.stageDeployment(ctx, engine, *command.Deployment)
 	case agentprotocol.AgentCommandDeploymentActivate:
 		err = activateDeployment(ctx, engine, *command.Deployment)
+	case agentprotocol.AgentCommandDeploymentRetire:
+		err = retirePreviousDeployment(ctx, engine, *command.Deployment)
 	case agentprotocol.AgentCommandDeploymentCancel:
 		err = cancelDeployment(ctx, engine, *command.Deployment)
 	default:
@@ -173,6 +180,18 @@ func (e *DockerExecutor) stageDeployment(
 	engine dockerDeploymentEngine,
 	deployment agentprotocol.DeploymentCommand,
 ) error {
+	if deployment.ManagedIngress {
+		managedNetwork, err := engine.NetworkInspect(
+			ctx,
+			agentprotocol.ManagedIngressNetwork,
+			mobyclient.NetworkInspectOptions{},
+		)
+		if err != nil || managedNetwork.Network.Name != agentprotocol.ManagedIngressNetwork ||
+			managedNetwork.Network.Driver != "bridge" || managedNetwork.Network.Scope != "local" ||
+			managedNetwork.Network.Ingress || managedNetwork.Network.ConfigOnly {
+			return deploymentError("ingress_unavailable", err)
+		}
+	}
 	current, err := inspectContainer(ctx, engine, deployment.ContainerName)
 	switch {
 	case err == nil && hasNewerFence(current, deployment):
@@ -251,7 +270,6 @@ func activateDeployment(
 		return deploymentError("stale_execution", nil)
 	case currentError == nil && ownsExecution(current, deployment):
 		removeNamedOwnedCandidate(deployment, engine)
-		removeManagedContainer(previousContainerName(deployment), engine)
 		return nil
 	case currentError != nil && !cerrdefs.IsNotFound(currentError):
 		return deploymentError("runtime_error", currentError)
@@ -319,8 +337,41 @@ func activateDeployment(
 		removeOwnedContainer(candidate.Container.ID, deployment, engine)
 		return deploymentError("runtime_error", err)
 	}
-	if previousID != "" {
-		removeManagedContainer(previousID, engine)
+	return nil
+}
+
+func retirePreviousDeployment(
+	ctx context.Context,
+	engine dockerDeploymentEngine,
+	deployment agentprotocol.DeploymentCommand,
+) error {
+	current, err := inspectContainer(ctx, engine, deployment.ContainerName)
+	switch {
+	case cerrdefs.IsNotFound(err):
+		return deploymentError("candidate_missing", nil)
+	case err != nil:
+		return deploymentError("runtime_error", err)
+	case hasNewerFence(current, deployment):
+		return deploymentError("stale_execution", nil)
+	case !ownsExecution(current, deployment):
+		return deploymentError("runtime_conflict", nil)
+	}
+	previous, err := inspectContainer(ctx, engine, previousContainerName(deployment))
+	if cerrdefs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return deploymentError("runtime_error", err)
+	}
+	if !managedContainer(previous) {
+		return deploymentError("runtime_conflict", nil)
+	}
+	if _, err := engine.ContainerRemove(
+		ctx,
+		previous.Container.ID,
+		mobyclient.ContainerRemoveOptions{Force: true},
+	); err != nil && !cerrdefs.IsNotFound(err) {
+		return deploymentError("runtime_error", err)
 	}
 	return nil
 }
@@ -544,7 +595,7 @@ func dockerCreateOptions(
 			) * time.Second,
 		}
 	}
-	return mobyclient.ContainerCreateOptions{
+	options := mobyclient.ContainerCreateOptions{
 		Name:   name,
 		Image:  deployment.ImageDigest,
 		Config: config,
@@ -556,6 +607,13 @@ func dockerCreateOptions(
 			},
 		},
 	}
+	if deployment.ManagedIngress {
+		alias, _ := agentprotocol.DeploymentBackendAlias(deployment.DeploymentID)
+		options.NetworkingConfig = &network.NetworkingConfig{EndpointsConfig: map[string]*network.EndpointSettings{
+			agentprotocol.ManagedIngressNetwork: {Aliases: []string{alias}},
+		}}
+	}
+	return options
 }
 
 func (e *DockerExecutor) waitUntilReady(
