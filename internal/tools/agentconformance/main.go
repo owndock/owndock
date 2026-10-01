@@ -462,7 +462,7 @@ func runDualServer(arguments []string) error {
 	var hostA, hostB, fixtureIdentityID, fixtureInstanceID, onlyHost, runtimeProbe string
 	var commandSuffix, deploymentCommand, deploymentContainer, deploymentResult, inventoryCommand string
 	var inventoryEventIDA, inventoryEventIDB, inventoryResult string
-	var deploymentCapabilities, inventoryCapabilities bool
+	var deploymentCapabilities, inventoryCapabilities, inventoryEventsTruncated bool
 	var deploymentSequence uint64
 	var timeout time.Duration
 	flags.StringVar(&listen, "listen", "127.0.0.1:0", "loopback listen address")
@@ -486,6 +486,7 @@ func runDualServer(arguments []string) error {
 	flags.StringVar(&inventoryEventIDA, "inventory-event-id-a", "", "expected Host A Docker event runtime ID")
 	flags.StringVar(&inventoryEventIDB, "inventory-event-id-b", "", "expected Host B Docker event runtime ID")
 	flags.StringVar(&inventoryResult, "inventory-result", "succeeded", "expected inventory result: succeeded or unavailable")
+	flags.BoolVar(&inventoryEventsTruncated, "inventory-events-truncated", false, "expect a truncated inventory Event batch")
 	flags.BoolVar(&inventoryCapabilities, "inventory-capabilities", false, "expect runtime inventory capabilities")
 	flags.DurationVar(&timeout, "timeout", 30*time.Second, "conformance timeout")
 	if err := flags.Parse(arguments); err != nil || flags.NArg() != 0 || timeout <= 0 ||
@@ -503,12 +504,13 @@ func runDualServer(arguments []string) error {
 		inventoryResult != "succeeded" && inventoryResult != "unavailable" ||
 		inventoryResult == "unavailable" &&
 			inventoryCommand != string(agentprotocol.AgentCommandInventoryEvents) ||
+		inventoryResult != "succeeded" && inventoryEventsTruncated ||
 		inventoryCommand == string(agentprotocol.AgentCommandInventoryEvents) &&
 			(!validConformanceRuntimeID(inventoryEventIDA) ||
 				!validConformanceRuntimeID(inventoryEventIDB) ||
 				inventoryEventIDA == inventoryEventIDB) ||
 		inventoryCommand != string(agentprotocol.AgentCommandInventoryEvents) &&
-			(inventoryEventIDA != "" || inventoryEventIDB != "") ||
+			(inventoryEventIDA != "" || inventoryEventIDB != "" || inventoryEventsTruncated) ||
 		deploymentCommand != "" && inventoryCommand != "" {
 		return errors.New("serve-dual arguments are invalid")
 	}
@@ -575,16 +577,17 @@ func runDualServer(arguments []string) error {
 		identities: map[string]fixtureIdentity{hostA: identityA, hostB: identityB},
 		results:    map[string]string{hostA: resultA, hostB: resultB},
 		onlyHost:   onlyHost, runtimeProbe: runtimeProbe,
-		commandSuffix:          commandSuffix,
-		runtimeDeadline:        runtimeDeadline,
-		deploymentCommand:      deploymentCommand,
-		deploymentContainer:    deploymentContainer,
-		deploymentResult:       deploymentResult,
-		deploymentSequence:     deploymentSequence,
-		deploymentCapabilities: deploymentCapabilities,
-		inventoryCommand:       inventoryCommand,
-		inventoryCapabilities:  inventoryCapabilities,
-		inventoryResult:        inventoryResult,
+		commandSuffix:            commandSuffix,
+		runtimeDeadline:          runtimeDeadline,
+		deploymentCommand:        deploymentCommand,
+		deploymentContainer:      deploymentContainer,
+		deploymentResult:         deploymentResult,
+		deploymentSequence:       deploymentSequence,
+		deploymentCapabilities:   deploymentCapabilities,
+		inventoryCommand:         inventoryCommand,
+		inventoryCapabilities:    inventoryCapabilities,
+		inventoryResult:          inventoryResult,
+		inventoryEventsTruncated: inventoryEventsTruncated,
 		inventoryEventIDs: map[string]string{
 			hostA: inventoryEventIDA,
 			hostB: inventoryEventIDB,
@@ -619,25 +622,26 @@ func runDualServer(arguments []string) error {
 }
 
 type dualConformanceHandler struct {
-	identities             map[string]fixtureIdentity
-	results                map[string]string
-	onlyHost               string
-	runtimeProbe           string
-	commandSuffix          string
-	runtimeDeadline        time.Time
-	deploymentCommand      string
-	deploymentContainer    string
-	deploymentResult       string
-	deploymentSequence     uint64
-	deploymentCapabilities bool
-	inventoryCommand       string
-	inventoryCapabilities  bool
-	inventoryResult        string
-	inventoryEventIDs      map[string]string
-	states                 map[string]bool
-	completed              chan<- error
-	mu                     sync.Mutex
-	once                   sync.Once
+	identities               map[string]fixtureIdentity
+	results                  map[string]string
+	onlyHost                 string
+	runtimeProbe             string
+	commandSuffix            string
+	runtimeDeadline          time.Time
+	deploymentCommand        string
+	deploymentContainer      string
+	deploymentResult         string
+	deploymentSequence       uint64
+	deploymentCapabilities   bool
+	inventoryCommand         string
+	inventoryCapabilities    bool
+	inventoryResult          string
+	inventoryEventsTruncated bool
+	inventoryEventIDs        map[string]string
+	states                   map[string]bool
+	completed                chan<- error
+	mu                       sync.Mutex
+	once                     sync.Once
 }
 
 func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -656,17 +660,18 @@ func (handler *dualConformanceHandler) ServeHTTP(writer http.ResponseWriter, req
 	child := &conformanceHandler{
 		resultFile: handler.results[host], identity: identity,
 		runtimeProbe: handler.runtimeProbe, commandSuffix: handler.commandSuffix,
-		runtimeDeadline:        handler.runtimeDeadline,
-		deploymentCommand:      handler.deploymentCommand,
-		deploymentContainer:    handler.deploymentContainer,
-		deploymentResult:       handler.deploymentResult,
-		deploymentSequence:     handler.deploymentSequence,
-		deploymentCapabilities: handler.deploymentCapabilities,
-		inventoryCommand:       handler.inventoryCommand,
-		inventoryCapabilities:  handler.inventoryCapabilities,
-		inventoryResult:        handler.inventoryResult,
-		inventoryEventID:       handler.inventoryEventIDs[host],
-		inventoryForbiddenID:   handler.inventoryEventIDs[otherFixtureHost(handler.identities, host)],
+		runtimeDeadline:          handler.runtimeDeadline,
+		deploymentCommand:        handler.deploymentCommand,
+		deploymentContainer:      handler.deploymentContainer,
+		deploymentResult:         handler.deploymentResult,
+		deploymentSequence:       handler.deploymentSequence,
+		deploymentCapabilities:   handler.deploymentCapabilities,
+		inventoryCommand:         handler.inventoryCommand,
+		inventoryCapabilities:    handler.inventoryCapabilities,
+		inventoryResult:          handler.inventoryResult,
+		inventoryEventsTruncated: handler.inventoryEventsTruncated,
+		inventoryEventID:         handler.inventoryEventIDs[host],
+		inventoryForbiddenID:     handler.inventoryEventIDs[otherFixtureHost(handler.identities, host)],
 	}
 	err := child.handle(writer, request)
 	if err != nil {
@@ -1095,24 +1100,25 @@ func issueRotatedCertificate(
 }
 
 type conformanceHandler struct {
-	resultFile             string
-	completed              chan<- error
-	expectedClientSerial   int64
-	identity               fixtureIdentity
-	runtimeProbe           string
-	commandSuffix          string
-	runtimeDeadline        time.Time
-	deploymentCommand      string
-	deploymentContainer    string
-	deploymentResult       string
-	deploymentSequence     uint64
-	deploymentCapabilities bool
-	inventoryCommand       string
-	inventoryCapabilities  bool
-	inventoryResult        string
-	inventoryEventID       string
-	inventoryForbiddenID   string
-	once                   sync.Once
+	resultFile               string
+	completed                chan<- error
+	expectedClientSerial     int64
+	identity                 fixtureIdentity
+	runtimeProbe             string
+	commandSuffix            string
+	runtimeDeadline          time.Time
+	deploymentCommand        string
+	deploymentContainer      string
+	deploymentResult         string
+	deploymentSequence       uint64
+	deploymentCapabilities   bool
+	inventoryCommand         string
+	inventoryCapabilities    bool
+	inventoryResult          string
+	inventoryEventsTruncated bool
+	inventoryEventID         string
+	inventoryForbiddenID     string
+	once                     sync.Once
 }
 
 func (h *conformanceHandler) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
@@ -1504,7 +1510,9 @@ func (h *conformanceHandler) conformanceInventoryDetails(
 		return "", nil
 	case agentprotocol.AgentCommandInventoryEvents:
 		batch := result.Inventory.Events
-		if batch == nil || len(batch.Events) == 0 || h.inventoryEventID == "" ||
+		if batch == nil || len(batch.Events) == 0 ||
+			batch.Truncated != h.inventoryEventsTruncated ||
+			h.inventoryEventID == "" ||
 			h.inventoryForbiddenID == "" {
 			return "", errors.New("Agent conformance inventory Event batch is invalid")
 		}
@@ -1521,8 +1529,9 @@ func (h *conformanceHandler) conformanceInventoryDetails(
 			return "", errors.New("Agent conformance expected Docker Event is absent")
 		}
 		return fmt.Sprintf(
-			"inventory_events=%d\ninventory_event_runtime_id=%s\n",
+			"inventory_events=%d\ninventory_events_truncated=%t\ninventory_event_runtime_id=%s\n",
 			len(batch.Events),
+			batch.Truncated,
 			h.inventoryEventID,
 		), nil
 	default:

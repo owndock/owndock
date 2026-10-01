@@ -222,7 +222,7 @@ sequenceDiagram
 
 Agent 只理解版本化的类型化命令。当前没有“执行任意 Shell”或“传入任意 Docker 地址”的通用 RPC。完整帧格式见 [Agent Control Protocol v1](../api/agent-control.md)，产品版本、控制协议和相邻版本升级规则见[Agent 与 Server 版本兼容策略](agent-compatibility.md)。
 
-双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。门禁还会在两个 Engine 各自创建唯一容器，执行 `runtime.inventory.events` 有界持续读取，要求每个 Agent 只能返回本机 Docker Event 的 Runtime ID；读取期间切断 A 的本地 Docker 通道必须稳定归类 `inventory_unavailable`，B 在 A 故障时继续成功，重建同一路径代理后 A 无需重启即可读取新事件。最后以 `SIGKILL` 中断 Agent A，再从原状态目录启动同一真实二进制：A 必须以更高 cutover sequence 完成新部署，并在重启后拒绝延迟的旧 activate；B 的稳定容器身份保持不变。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误、Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待，以及流式 HTTP 请求在响应头前连接失效时 `net/http` 等待请求体而不再重连的问题。Agent 现在用握手超时同时关闭请求管道与请求上下文，保证该阶段有界返回并由 Runner 重连。独立执行器门禁继续验证 activate 中断恢复；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
+双 Agent 进程的轻量门禁会让两个不同 Managed Host 使用同一 CA 和 HTTPS 控制入口并发连接。每条连接除 hello/heartbeat 外，还必须接收只属于本 Host 的确定性 `runtime.probe` 命令、返回严格匹配的结果并收到 acknowledgement；该模式使用固定的过期 deadline，不依赖测试机 Docker Engine，同时验证重连时“同 ID、同完整命令”可安全重放。`make test-runtime-integration` 会用相同的真实进程夹具启动两个固定 digest 的隔离 Docker Engine，通过仅绑定回环地址的 TCP 和每 Host 独立 Unix Socket 接入 Agent；每个阶段使用唯一命令 ID，实际验证双 Host `ready`、控制面只服务 Host B、Host A Engine 停止后 `unreachable`，以及 Engine 重启并重建本地代理后 Agent A 不重启恢复 `ready`。恢复后，两个 Agent 分别执行真实 `prepare → stage → activate`，在各自 Engine 内生成相同稳定容器名但不同 Deployment 身份的运行容器；随后各自执行 Runtime Inventory `prepare → chunk → release`，验证一块有界快照只能返回对应 Host 的 Deployment 归属。门禁还会在两个 Engine 各自创建唯一容器，执行 `runtime.inventory.events` 有界持续读取，要求每个 Agent 只能返回本机 Docker Event 的 Runtime ID；读取期间切断 A 的本地 Docker 通道必须稳定归类 `inventory_unavailable`，B 在 A 故障时继续成功，重建同一路径代理后 A 无需重启即可读取新事件。恢复后每个 Engine 再制造 70 条真实 create Event，两端都必须只返回前 64 条并显式设置 `truncated`，避免事件洪峰突破协议和内存边界。最后以 `SIGKILL` 中断 Agent A，再从原状态目录启动同一真实二进制：A 必须以更高 cutover sequence 完成新部署，并在重启后拒绝延迟的旧 activate；B 的稳定容器身份保持不变。这组端到端门禁同时补出了无端口 Runtime Spec canonical wire 往返错误、Moby Event 流收到 EOF 后消息通道保持打开导致 snapshot window 永久等待，以及流式 HTTP 请求在响应头前连接失效时 `net/http` 等待请求体而不再重连的问题。Agent 现在用握手超时同时关闭请求管道与请求上下文，保证该阶段有界返回并由 Runner 重连。独立执行器门禁继续验证 activate 中断恢复；这些仓内虚拟主机证据仍不替代两台客户等价 Linux 主机上的安装、网络、升级与回滚验收。
 
 ```mermaid
 sequenceDiagram
@@ -290,6 +290,13 @@ sequenceDiagram
     Note over A,DA: rebuild same Unix Socket proxy; Agent process stays alive
     C->>A: runtime.inventory.events recovery
     A-->>C: new Host A Runtime ID
+    par Event flood Host A
+        DA->>DA: create 70 containers
+        A-->>C: exactly 64 Events + truncated
+    and Event flood Host B
+        DB->>DB: create 70 containers
+        B-->>C: exactly 64 Events + truncated
+    end
     C--xA: SIGKILL Agent A
     A->>C: restart with existing state directory
     C->>A: prepare → stage → activate (cutover 2)

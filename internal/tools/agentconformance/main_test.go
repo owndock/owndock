@@ -309,10 +309,17 @@ func TestConformanceInventoryCommandsAndOwnershipAreCanonical(t *testing.T) {
 		},
 	}
 	details, err = handler.conformanceInventoryDetails(eventResult)
-	if err != nil || details != "inventory_events=1\ninventory_event_runtime_id="+
+	if err != nil || details != "inventory_events=1\ninventory_events_truncated=false\ninventory_event_runtime_id="+
 		handler.inventoryEventID+"\n" {
 		t.Fatalf("inventory Event details = %q, %v", details, err)
 	}
+	handler.inventoryEventsTruncated = true
+	eventResult.Inventory.Events.Truncated = true
+	if _, err := handler.conformanceInventoryDetails(eventResult); err != nil {
+		t.Fatalf("truncated inventory Event details: %v", err)
+	}
+	handler.inventoryEventsTruncated = false
+	eventResult.Inventory.Events.Truncated = false
 	eventResult.Inventory.Events.Events[0].RuntimeID = handler.inventoryForbiddenID
 	if _, err := handler.conformanceInventoryDetails(eventResult); err == nil {
 		t.Fatal("cross-Host inventory Event unexpectedly passed")
