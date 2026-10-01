@@ -59,6 +59,8 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 
 代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 
+仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy 与三个真实后端，通过实际 Unix admin socket 和 HTTP 流量验证双 Host 隔离、prepare 切流、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。该门禁需要可用的 Linux Docker Host；在非 Linux 开发机上编译通过不等于门禁通过。
+
 ## 资源边界
 
 `ApplicationRoute` 属于 Project，固定 Application、Environment、Runtime Target、规范化 hostname、Release 命名 HTTP 端口和 TLS 模式。同一 Organization 中活动 hostname 唯一。API 只允许 Agent Runtime Target；`disabled` TLS 只允许 development Environment，staging/production 强制 `automatic`。一个 Project 最多保留 128 条活动 Route。

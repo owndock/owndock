@@ -1,4 +1,4 @@
-.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-isolated-egress test-terminal-security test-terminal-process test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process test-agent-dual-runtime-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
+.PHONY: fmt fmt-check mod-verify vet test workflow-validate test-integration test-changed-coverage test-runtime-integration test-ingress-integration test-build-integration test-git-compatibility test-supply-chain-integration test-vulnerability-integration test-vulnerability-db-updater-image test-private-sigstore-integration test-build-security test-isolated-egress test-terminal-security test-terminal-process test-community-deployment test-community-integration test-release-candidate test-agent-package test-agent-release test-agent-systemd test-agent-enrollment-process test-agent-control-process test-agent-rotation-process test-agent-dual-process test-agent-dual-runtime-process build build-server build-agent build-build-worker build-egress-gateway build-evidence-worker build-vulnerability-db-updater package-agent package-agent-release docker-build-worker docker-egress-gateway docker-evidence-worker docker-vulnerability-db-updater api-validate api-breaking check vuln run run-agent run-build-worker run-egress-gateway run-evidence-worker run-vulnerability-db-updater
 
 VERSION ?= dev
 COMMIT ?= $(shell git rev-parse HEAD 2>/dev/null || echo unknown)
@@ -67,6 +67,11 @@ test-runtime-integration:
 	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/modules/deployment/data -run 'TestDockerGateway(Engine|MTLSEnginePartitionAndRecovery|MTLSCutoverRenameFailureAndRecovery)Integration' -count=1 -timeout=5m
 	OWNDOCK_RUN_DOCKER_INTEGRATION=1 go test ./internal/agent/runtime -run 'TestDockerExecutor(Integration|TwoIsolatedEnginesIntegration)' -count=1 -timeout=10m
 	$(MAKE) test-agent-dual-runtime-process
+
+test-ingress-integration:
+	@test "$$(uname -s)" = "Linux" || (echo "test-ingress-integration requires a Linux Docker host" && exit 2)
+	OWNDOCK_RUN_INGRESS_INTEGRATION=1 go test ./internal/agent/runtime \
+		-run TestCaddyGatewayRealTrafficCutoverRollbackAndResumeIntegration -count=1 -timeout=5m
 
 test-build-integration:
 	OWNDOCK_RUN_BUILDKIT_INTEGRATION=1 go test ./internal/modules/build/data \
