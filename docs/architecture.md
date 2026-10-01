@@ -114,7 +114,7 @@ Telemetry provider 由 `cmd/server` 创建并显式注入 transport，不在领�
 
 指标标签和 Span 名称不得包含原始 URL、资源 ID、租户 ID 等无界值。业务模块需要增加手工 Span 时，应通过明确依赖获得 tracer，不能让 `biz` 依赖 exporter 或 SDK 实现。
 
-Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一的固定名称/结果轮询指标，记录次数、耗时与最近成功/错误时间；资源 ID 不进入 Prometheus 标签。只有领取任务后才创建固定名称的操作 Span，空轮询不制造 Trace。Terminal WSS 另记录固定 kind/mode/reason 维度的活动数、累计数、关闭次数和连接时长，不记录资源 ID、终端字节或底层错误。独立 Build Worker 另提供 `/livez`、MongoDB `/readyz` 和 `/metrics`，嵌入式 Worker 与 Terminal 复用 Server 运维端点。指标语义、Span 安全属性和告警示例见 [Worker 可观测性与告警](worker-observability.md)，终端专项边界见[终端安全验收](terminal-security-acceptance.md)。
+Build、Deployment、Runtime Inventory 和 Inventory Event Worker 使用统一的固定名称/结果轮询指标，记录次数、耗时与最近成功/错误时间；managed ingress 另按固定切换阶段和 `success/error` 记录次数与耗时。两类指标都不接受资源 ID、错误文本或客户配置作为标签，direct Runtime Target 不进入 managed ingress 指标路径。只有领取任务后才创建固定名称的操作 Span，空轮询不制造 Trace。Terminal WSS 另记录固定 kind/mode/reason 维度的活动数、累计数、关闭次数和连接时长，不记录资源 ID、终端字节或底层错误。独立 Build Worker 另提供 `/livez`、MongoDB `/readyz` 和 `/metrics`，嵌入式 Worker 与 Terminal 复用 Server 运维端点。指标语义、Span 安全属性和告警示例见 [Worker 可观测性与告警](worker-observability.md)，终端专项边界见[终端安全验收](terminal-security-acceptance.md)。
 
 ## API 契约
 

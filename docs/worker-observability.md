@@ -44,6 +44,10 @@ flowchart LR
 | `owndock_build_worker_operation_duration_seconds{result}` | 已领取 Build 的完整执行耗时 |
 | `owndock_build_worker_log_writes_total{stage,result}` | 脱敏 Build 日志持久化结果 |
 | `owndock_build_worker_log_bytes_total{stage}` | 提交持久化的脱敏日志字节数 |
+| `owndock_managed_ingress_operations_total{phase,result}` | managed ingress 各有界切换阶段的执行次数 |
+| `owndock_managed_ingress_operation_duration_seconds{phase,result}` | managed ingress 各有界切换阶段的执行耗时 |
+
+managed ingress 的 `phase` 只允许代码中固定的阶段名，`result` 只有 `success` 或 `error`。未知输入统一归入安全标签，不会把 Deployment、Route、Host、错误文本或 Secret 带入指标。direct Runtime Target 不进入 managed ingress 提交路径，也不会产生这些切换指标。
 
 可从以下告警思路开始，再按实际 `poll_interval` 和 `operation_timeout` 调整窗口：
 
@@ -59,6 +63,14 @@ time() - owndock_worker_last_success_unixtime > 900
 # 最近错误晚于最近成功，说明错误后尚未观察到恢复
 owndock_worker_last_error_unixtime
   > on (worker) owndock_worker_last_success_unixtime
+
+# managed ingress 的关键阶段在最近 10 分钟出现失败
+sum by (phase) (
+  increase(owndock_managed_ingress_operations_total{
+    phase=~"route_prepare|runtime_activate|route_commit|runtime_retire",
+    result="error"
+  }[10m])
+) > 0
 ```
 
 第二条不能对未启用的 Worker 强行告警：未启用时不会产生该 Worker 的时间序列。对于可能持续数小时的 Build，应按 Build `operation_timeout` 设置阈值，不能直接套用 Inventory 的分钟级阈值。

@@ -23,13 +23,14 @@ var (
 // each idempotent gateway operation. Secrets are kept in memory only for the
 // duration of that call and are never added to Deployment or audit records.
 type RuntimeExecutor struct {
-	executions    biz.ExecutionResolver
-	credentials   biz.CredentialResolver
-	registries    biz.RegistryCredentialResolver
-	configuration biz.ConfigurationResolver
-	gateway       biz.RuntimeGateway
-	ingress       *applicationroutebiz.CutoverCoordinator
-	ingressDrain  time.Duration
+	executions     biz.ExecutionResolver
+	credentials    biz.CredentialResolver
+	registries     biz.RegistryCredentialResolver
+	configuration  biz.ConfigurationResolver
+	gateway        biz.RuntimeGateway
+	ingress        *applicationroutebiz.CutoverCoordinator
+	ingressDrain   time.Duration
+	ingressObserve func(string, string, time.Duration)
 }
 
 func (e *RuntimeExecutor) WithManagedIngress(
@@ -41,6 +42,15 @@ func (e *RuntimeExecutor) WithManagedIngress(
 	}
 	e.ingress, e.ingressDrain = coordinator, drain
 	return e, nil
+}
+
+// WithManagedIngressObservability records only bounded phase and result
+// dimensions. Product identifiers and raw errors must never cross this port.
+func (e *RuntimeExecutor) WithManagedIngressObservability(
+	observer func(phase, result string, duration time.Duration),
+) *RuntimeExecutor {
+	e.ingressObserve = observer
+	return e
 }
 
 func (e *RuntimeExecutor) WithConfiguration(
@@ -93,7 +103,9 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 		if err != nil {
 			return err
 		}
+		started := time.Now()
 		required, err := e.ingress.Required(ctx, request)
+		e.observeManagedIngress("required", started, err)
 		if err != nil {
 			return err
 		}
@@ -104,7 +116,9 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 		if !ok {
 			return ErrManagedIngressUnavailable
 		}
+		started = time.Now()
 		original, err := e.ingress.Begin(ctx, request)
+		e.observeManagedIngress("begin", started, err)
 		if err != nil {
 			return err
 		}
@@ -112,24 +126,33 @@ func (e *RuntimeExecutor) Deploy(ctx context.Context, deployment biz.Deployment)
 		executionPlan.WorkerID = original.WorkerID
 		executionPlan.FencingToken = original.FencingToken
 		executionPlan.ManagedIngress = true
+		started = time.Now()
 		if err := managed.Stage(ctx, executionPlan, credential); err != nil {
+			e.observeManagedIngress("runtime_stage", started, err)
 			if biz.CategorizeExecutionError(err, biz.FailureUnknown) == biz.FailureTargetUnreachable {
 				return errors.Join(biz.ErrExecutionRetryable, err)
 			}
 			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
 		}
+		e.observeManagedIngress("runtime_stage", started, nil)
+		started = time.Now()
 		if err := e.ingress.Prepare(ctx, deployment.ID); err != nil {
+			e.observeManagedIngress("route_prepare", started, err)
 			if errors.Is(err, applicationroutebiz.ErrCutoverAmbiguous) {
 				return errors.Join(biz.ErrExecutionRetryable, err)
 			}
 			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
 		}
+		e.observeManagedIngress("route_prepare", started, nil)
+		started = time.Now()
 		if err := managed.ActivatePrepared(ctx, plan, executionPlan); err != nil {
+			e.observeManagedIngress("runtime_activate", started, err)
 			if biz.CategorizeExecutionError(err, biz.FailureUnknown) == biz.FailureTargetUnreachable {
 				return errors.Join(biz.ErrExecutionRetryable, err)
 			}
 			return e.abortManagedCutover(ctx, deployment.ID, managed, plan, executionPlan, err)
 		}
+		e.observeManagedIngress("runtime_activate", started, nil)
 		return nil
 	})
 }
@@ -142,15 +165,24 @@ func (e *RuntimeExecutor) abortManagedCutover(
 	execution biz.ExecutionPlan,
 	cause error,
 ) error {
+	started := time.Now()
 	if err := e.ingress.Restore(ctx, deploymentID); err != nil {
+		e.observeManagedIngress("route_restore", started, err)
 		return errors.Join(biz.ErrExecutionRetryable, cause, err)
 	}
+	e.observeManagedIngress("route_restore", started, nil)
+	started = time.Now()
 	if err := managed.CancelPrepared(ctx, authorization, execution); err != nil {
+		e.observeManagedIngress("runtime_cancel", started, err)
 		return errors.Join(biz.ErrExecutionRetryable, cause, err)
 	}
+	e.observeManagedIngress("runtime_cancel", started, nil)
+	started = time.Now()
 	if err := e.ingress.FinalizeAbort(ctx, deploymentID); err != nil {
+		e.observeManagedIngress("cutover_abort", started, err)
 		return errors.Join(biz.ErrExecutionRetryable, cause, err)
 	}
+	e.observeManagedIngress("cutover_abort", started, nil)
 	return cause
 }
 
@@ -165,21 +197,33 @@ func (e *RuntimeExecutor) MarkControlPlaneCommitted(ctx context.Context, deploym
 	if err != nil {
 		return err
 	}
+	if plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
+		return nil
+	}
 	request, err := managedIngressCutoverRequest(deployment, plan)
 	if err != nil {
 		return err
 	}
-	return e.ingress.MarkControlPlaneCommitted(ctx, request)
+	started := time.Now()
+	err = e.ingress.MarkControlPlaneCommitted(ctx, request)
+	e.observeManagedIngress("control_commit", started, err)
+	return err
 }
 
 func (e *RuntimeExecutor) Commit(ctx context.Context, deployment biz.Deployment) error {
 	if e.ingress == nil {
 		return nil
 	}
+	started := time.Now()
 	request, exists, err := e.ingress.Commit(ctx, deployment.ID)
-	if err != nil || !exists {
+	if err != nil {
+		e.observeManagedIngress("route_commit", started, err)
 		return err
 	}
+	if !exists {
+		return nil
+	}
+	e.observeManagedIngress("route_commit", started, nil)
 	if e.ingressDrain > 0 {
 		timer := time.NewTimer(e.ingressDrain)
 		defer timer.Stop()
@@ -199,10 +243,16 @@ func (e *RuntimeExecutor) Commit(ctx context.Context, deployment biz.Deployment)
 	if !ok {
 		return ErrManagedIngressUnavailable
 	}
+	started = time.Now()
 	if err := managed.Retire(ctx, plan); err != nil {
+		e.observeManagedIngress("runtime_retire", started, err)
 		return err
 	}
-	return e.ingress.Finish(ctx, deployment.ID)
+	e.observeManagedIngress("runtime_retire", started, nil)
+	started = time.Now()
+	err = e.ingress.Finish(ctx, deployment.ID)
+	e.observeManagedIngress("cutover_finish", started, err)
+	return err
 }
 
 func managedIngressCutoverRequest(
@@ -244,13 +294,16 @@ func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment)
 		if e.ingress == nil || plan.TargetConnection.Mode != runtimeaccess.ModeAgent {
 			return e.gateway.Cancel(ctx, plan, credential)
 		}
+		started := time.Now()
 		original, exists, err := e.ingress.Pending(ctx, deployment.ID)
 		if err != nil {
+			e.observeManagedIngress("pending", started, err)
 			return err
 		}
 		if !exists {
 			return e.gateway.Cancel(ctx, plan, credential)
 		}
+		e.observeManagedIngress("pending", started, nil)
 		managed, ok := e.gateway.(biz.ManagedIngressRuntimeGateway)
 		if !ok {
 			return ErrManagedIngressUnavailable
@@ -259,17 +312,41 @@ func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment)
 		executionPlan.WorkerID = original.WorkerID
 		executionPlan.FencingToken = original.FencingToken
 		executionPlan.ManagedIngress = true
+		started = time.Now()
 		if err := e.ingress.Restore(ctx, deployment.ID); err != nil {
+			e.observeManagedIngress("route_restore", started, err)
 			return errors.Join(biz.ErrExecutionRetryable, err)
 		}
+		e.observeManagedIngress("route_restore", started, nil)
+		started = time.Now()
 		if err := managed.CancelPrepared(ctx, plan, executionPlan); err != nil {
+			e.observeManagedIngress("runtime_cancel", started, err)
 			return errors.Join(biz.ErrExecutionRetryable, err)
 		}
+		e.observeManagedIngress("runtime_cancel", started, nil)
+		started = time.Now()
 		if err := e.ingress.FinalizeAbort(ctx, deployment.ID); err != nil {
+			e.observeManagedIngress("cutover_abort", started, err)
 			return errors.Join(biz.ErrExecutionRetryable, err)
 		}
+		e.observeManagedIngress("cutover_abort", started, nil)
 		return nil
 	})
+}
+
+func (e *RuntimeExecutor) observeManagedIngress(
+	phase string,
+	started time.Time,
+	err error,
+) {
+	if e.ingressObserve == nil {
+		return
+	}
+	result := "success"
+	if err != nil {
+		result = "error"
+	}
+	e.ingressObserve(phase, result, time.Since(started))
 }
 
 func (e *RuntimeExecutor) execute(

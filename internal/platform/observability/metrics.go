@@ -10,22 +10,24 @@ import (
 )
 
 type Metrics struct {
-	registry         *prometheus.Registry
-	requests         *prometheus.CounterVec
-	duration         *prometheus.HistogramVec
-	inFlight         prometheus.Gauge
-	buildOperations  *prometheus.CounterVec
-	buildDuration    *prometheus.HistogramVec
-	buildLogWrites   *prometheus.CounterVec
-	buildLogBytes    *prometheus.CounterVec
-	workerPolls      *prometheus.CounterVec
-	workerPollTime   *prometheus.HistogramVec
-	workerLastOK     *prometheus.GaugeVec
-	workerLastError  *prometheus.GaugeVec
-	terminalActive   *prometheus.GaugeVec
-	terminalOpened   *prometheus.CounterVec
-	terminalClosed   *prometheus.CounterVec
-	terminalDuration *prometheus.HistogramVec
+	registry          *prometheus.Registry
+	requests          *prometheus.CounterVec
+	duration          *prometheus.HistogramVec
+	inFlight          prometheus.Gauge
+	buildOperations   *prometheus.CounterVec
+	buildDuration     *prometheus.HistogramVec
+	buildLogWrites    *prometheus.CounterVec
+	buildLogBytes     *prometheus.CounterVec
+	workerPolls       *prometheus.CounterVec
+	workerPollTime    *prometheus.HistogramVec
+	workerLastOK      *prometheus.GaugeVec
+	workerLastError   *prometheus.GaugeVec
+	ingressOperations *prometheus.CounterVec
+	ingressDuration   *prometheus.HistogramVec
+	terminalActive    *prometheus.GaugeVec
+	terminalOpened    *prometheus.CounterVec
+	terminalClosed    *prometheus.CounterVec
+	terminalDuration  *prometheus.HistogramVec
 }
 
 func NewMetrics() *Metrics {
@@ -84,6 +86,15 @@ func NewMetrics() *Metrics {
 			Namespace: "owndock", Subsystem: "worker", Name: "last_error_unixtime",
 			Help: "Unix timestamp of the most recent failed or timed-out worker polling iteration.",
 		}, []string{"worker"}),
+		ingressOperations: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: "owndock", Subsystem: "managed_ingress", Name: "operations_total",
+			Help: "Managed ingress cutover operations by bounded phase and safe result.",
+		}, []string{"phase", "result"}),
+		ingressDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Namespace: "owndock", Subsystem: "managed_ingress", Name: "operation_duration_seconds",
+			Help:    "Managed ingress cutover operation duration by bounded phase and safe result.",
+			Buckets: prometheus.DefBuckets,
+		}, []string{"phase", "result"}),
 		terminalActive: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: "owndock", Subsystem: "terminal", Name: "connections_active",
 			Help: "Current terminal connections by bounded kind and connection mode.",
@@ -114,6 +125,8 @@ func NewMetrics() *Metrics {
 		metrics.workerPollTime,
 		metrics.workerLastOK,
 		metrics.workerLastError,
+		metrics.ingressOperations,
+		metrics.ingressDuration,
 		metrics.terminalActive,
 		metrics.terminalOpened,
 		metrics.terminalClosed,
@@ -122,6 +135,36 @@ func NewMetrics() *Metrics {
 		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}),
 	)
 	return metrics
+}
+
+func (m *Metrics) RecordManagedIngressOperation(
+	phase, result string,
+	duration time.Duration,
+) {
+	phase = safeManagedIngressPhase(phase)
+	result = safeManagedIngressResult(result)
+	m.ingressOperations.WithLabelValues(phase, result).Inc()
+	m.ingressDuration.WithLabelValues(phase, result).
+		Observe(max(duration.Seconds(), 0))
+}
+
+func safeManagedIngressPhase(value string) string {
+	switch value {
+	case "required", "begin", "runtime_stage", "route_prepare",
+		"runtime_activate", "control_commit", "route_commit", "pending",
+		"route_restore", "runtime_cancel", "cutover_abort", "runtime_retire",
+		"cutover_finish":
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func safeManagedIngressResult(value string) string {
+	if value == "success" {
+		return value
+	}
+	return "error"
 }
 
 func (m *Metrics) TerminalConnectionOpened(kind, connectionMode string) {

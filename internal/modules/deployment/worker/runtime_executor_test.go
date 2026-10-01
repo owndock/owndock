@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
 	"github.com/owndock/owndock/internal/modules/deployment/biz"
@@ -248,6 +250,13 @@ func TestRuntimeExecutorCoordinatesManagedIngressPhases(t *testing.T) {
 	if _, err := executor.WithManagedIngress(coordinator, 0); err != nil {
 		t.Fatal(err)
 	}
+	observed := make([]string, 0, 9)
+	executor.WithManagedIngressObservability(func(phase, result string, duration time.Duration) {
+		if duration < 0 {
+			t.Fatalf("managed ingress duration = %v", duration)
+		}
+		observed = append(observed, phase+"/"+result)
+	})
 	deployment := biz.Deployment{ID: "deployment-1", OrganizationID: "organization-1"}
 	if err := executor.Deploy(t.Context(), deployment); err != nil {
 		t.Fatal(err)
@@ -265,6 +274,43 @@ func TestRuntimeExecutorCoordinatesManagedIngressPhases(t *testing.T) {
 	if !runtimeGateway.retired || routeGateway.commitCalls != 1 || !store.finished ||
 		runtimeGateway.plan.FencingToken != 2 {
 		t.Fatalf("commit phases = runtime %+v route %+v store %+v", runtimeGateway, routeGateway, store)
+	}
+	wantObservations := "required/success,begin/success,runtime_stage/success," +
+		"route_prepare/success,runtime_activate/success,control_commit/success," +
+		"route_commit/success,runtime_retire/success,cutover_finish/success"
+	if strings.Join(observed, ",") != wantObservations {
+		t.Fatalf("managed ingress observations = %v", observed)
+	}
+}
+
+func TestRuntimeExecutorSkipsManagedIngressCommitMarkForDirectTarget(t *testing.T) {
+	store := &workerCutoverStore{}
+	coordinator, err := applicationroutebiz.NewCutoverCoordinator(
+		store, &workerRouteGateway{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewRuntimeExecutor(
+		executionResolverStub{plan: biz.ExecutionPlan{
+			TargetConnection: testDirectConnection(t),
+		}},
+		credentialResolverStub{credential: testDirectCredential()},
+		&runtimeGatewayProbe{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := executor.WithManagedIngress(coordinator, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := executor.MarkControlPlaneCommitted(
+		t.Context(), biz.Deployment{ID: "direct-deployment"},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if store.transaction.ControlPlaneCommitted {
+		t.Fatal("direct target was marked as a managed ingress transaction")
 	}
 }
 

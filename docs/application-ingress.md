@@ -11,6 +11,8 @@ OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environm
 
 managed ingress 首期只支持 Agent Runtime Target。网关不会挂载 Docker Socket、MongoDB、Agent 身份或应用 Secret；管理接口只通过 Agent 可访问的权限受限 Unix Socket。浏览器和 Server 都不能提交任意代理配置。
 
+direct Runtime Target 始终跳过 managed ingress 的 Host transaction、Route commit 和恢复路径。全局启用 managed ingress 不会改变 direct Deployment 的提交语义；两种连接模式不会共享入口状态。
+
 ## Agent desired config 与 fence
 
 Server 每次发送同一 Host 的完整期望配置，而不是增量补丁或任意 Caddy JSON。三个 Ingress 事务命令最多携带 128 条按 Route ID 排序的类型化 Route；每条只包含 Route revision、Deployment ID、cutover sequence、Runtime Target ID、规范 hostname、受限 backend alias/port 和 TLS 模式。prepare 另列出需要私有探测的已有 Route ID。命令不携带用户 Header、插件、文件路径、证书、ACME 凭据、Docker Socket 或应用 Secret。
@@ -115,6 +117,12 @@ sequenceDiagram
 自动 HTTPS 要求 hostname DNS 指向目标主机或前置四层 LB，公网 80/443 可达，端口未被其他进程占用，网关能访问配置的 ACME CA，并且证书数据目录持久可写。OwnDock 不会在首期持有 DNS Provider 凭据或自动修改 DNS。
 
 首次上线没有旧 route 可回退。证书或私有探测失败时，Route 保持 provisioning/degraded，不能展示为入口 ready。单主机 managed ingress 也不等于高可用。
+
+## 监控与告警
+
+Server 从 `/metrics` 暴露 `owndock_managed_ingress_operations_total{phase,result}` 和 `owndock_managed_ingress_operation_duration_seconds{phase,result}`。阶段覆盖事务建立、运行时 stage/activate/cancel/retire、route prepare/commit/restore、控制面提交和事务结束；标签仅使用代码固定阶段与 `success/error`，不包含 Host、Route、Deployment、错误文本或应用配置。
+
+生产告警应优先关注 `route_prepare`、`runtime_activate`、`route_commit` 和 `runtime_retire` 的错误增量，并结合阶段耗时分位数与 Deployment Worker 最近成功时间判断卡住或外部依赖退化。指标用于发现切换阶段，不替代 Route observation、审计和受控 Trace 排障。
 
 ## 验收门槛
 

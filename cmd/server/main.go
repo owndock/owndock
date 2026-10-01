@@ -751,7 +751,8 @@ func run() error {
 				return fmt.Errorf("create deployment executor: %w", err)
 			}
 			executor.WithRegistryCredentials(secretResolver).
-				WithConfiguration(secretResolver)
+				WithConfiguration(secretResolver).
+				WithManagedIngressObservability(metrics.RecordManagedIngressOperation)
 			managedIngressEnabled := false
 			if agentCommandDispatcher != nil {
 				routeGateway, gatewayErr := applicationroutedata.NewAgentGateway(
