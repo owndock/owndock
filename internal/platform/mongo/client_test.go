@@ -68,6 +68,45 @@ type readyRuntimeTargetProber struct{}
 
 type completedRuntimeTargetRetirer struct{}
 
+type replayableIngressGateway struct {
+	prepareCalls int
+	commitCalls  int
+	abortCalls   int
+}
+
+func (g *replayableIngressGateway) Prepare(
+	_ context.Context,
+	desired applicationroutebiz.HostDesiredConfig,
+) (applicationroutebiz.GatewayObservation, error) {
+	g.prepareCalls++
+	return integrationGatewayObservation(desired), nil
+}
+
+func (g *replayableIngressGateway) Commit(
+	_ context.Context,
+	desired applicationroutebiz.HostDesiredConfig,
+) (applicationroutebiz.GatewayObservation, error) {
+	g.commitCalls++
+	return integrationGatewayObservation(desired), nil
+}
+
+func (g *replayableIngressGateway) Abort(
+	_ context.Context,
+	desired applicationroutebiz.HostDesiredConfig,
+) (applicationroutebiz.GatewayObservation, error) {
+	g.abortCalls++
+	return integrationGatewayObservation(desired), nil
+}
+
+func integrationGatewayObservation(
+	desired applicationroutebiz.HostDesiredConfig,
+) applicationroutebiz.GatewayObservation {
+	return applicationroutebiz.GatewayObservation{
+		HostRevision: desired.HostRevision,
+		ConfigDigest: "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+	}
+}
+
 func (completedRuntimeTargetRetirer) RetireRuntimeTarget(
 	context.Context,
 	controlplanebiz.RuntimeTarget,
@@ -2973,6 +3012,120 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 	if err != nil || readyRoute.Status != applicationroutebiz.StatusReady || readyRoute.Observation == nil ||
 		readyRoute.Observation.DeploymentID != request.DeploymentID {
 		t.Fatalf("ready cutover route = %+v, %v", readyRoute, err)
+	}
+
+	// Treat each successful call below as if its response was lost. A new
+	// store/coordinator instance represents a replacement Server process and a
+	// replacement Worker lease. Replays must retain the original runtime
+	// execution identity while allowing the new lease to authorize progress.
+	replayedRequest := request
+	replayedRequest.DeploymentID = "route-integration-replayed-deployment"
+	replayedRequest.CutoverSequence = 4
+	replayedRequest.WorkerID = "route-integration-original-worker"
+	replayedRequest.FencingToken = 11
+	replayGateway := &replayableIngressGateway{}
+	originalCoordinator, err := applicationroutebiz.NewCutoverCoordinator(cutoverStore, replayGateway)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if original, err := originalCoordinator.Begin(ctx, replayedRequest); err != nil ||
+		original.WorkerID != replayedRequest.WorkerID ||
+		original.FencingToken != replayedRequest.FencingToken {
+		t.Fatalf("original replayable Begin() = %+v, %v", original, err)
+	}
+	replacementStore, err := applicationroutedata.NewMongoCutoverStore(database, client,
+		func() time.Time { return now.Add(3 * time.Second) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementCoordinator, err := applicationroutebiz.NewCutoverCoordinator(
+		replacementStore, replayGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacementRequest := replayedRequest
+	replacementRequest.WorkerID = "route-integration-replacement-worker"
+	replacementRequest.FencingToken = 12
+	original, err := replacementCoordinator.Begin(ctx, replacementRequest)
+	if err != nil || original.WorkerID != replayedRequest.WorkerID ||
+		original.FencingToken != replayedRequest.FencingToken {
+		t.Fatalf("replacement Begin() = %+v, %v", original, err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := replacementCoordinator.Prepare(ctx, replayedRequest.DeploymentID); err != nil {
+			t.Fatalf("replayed Prepare() attempt %d: %v", attempt+1, err)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := replacementCoordinator.MarkControlPlaneCommitted(ctx, replacementRequest); err != nil {
+			t.Fatalf("replayed control-plane commit attempt %d: %v", attempt+1, err)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		committed, exists, commitErr := replacementCoordinator.Commit(ctx, replayedRequest.DeploymentID)
+		if commitErr != nil || !exists || committed.WorkerID != replayedRequest.WorkerID ||
+			committed.FencingToken != replayedRequest.FencingToken {
+			t.Fatalf("replayed gateway commit attempt %d = %+v, %t, %v",
+				attempt+1, committed, exists, commitErr)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := replacementCoordinator.Finish(ctx, replayedRequest.DeploymentID); err != nil {
+			t.Fatalf("replayed Finish() attempt %d: %v", attempt+1, err)
+		}
+	}
+	if replayGateway.prepareCalls != 2 || replayGateway.commitCalls != 2 {
+		t.Fatalf("replayed gateway calls = prepare %d commit %d",
+			replayGateway.prepareCalls, replayGateway.commitCalls)
+	}
+	readyRoute, err = repository.Get(ctx, cutoverRoute.OrganizationID,
+		cutoverRoute.ProjectID, cutoverRoute.ID)
+	if err != nil || readyRoute.Observation == nil ||
+		readyRoute.Observation.DeploymentID != replayedRequest.DeploymentID ||
+		readyRoute.Observation.CutoverSequence != replayedRequest.CutoverSequence {
+		t.Fatalf("replayed ready route = %+v, %v", readyRoute, err)
+	}
+
+	abortRequest := replayedRequest
+	abortRequest.DeploymentID = "route-integration-aborted-deployment"
+	abortRequest.CutoverSequence = 5
+	abortRequest.WorkerID = "route-integration-abort-original-worker"
+	abortRequest.FencingToken = 20
+	if _, err := originalCoordinator.Begin(ctx, abortRequest); err != nil {
+		t.Fatalf("abort Begin(): %v", err)
+	}
+	abortReplacement := abortRequest
+	abortReplacement.WorkerID = "route-integration-abort-replacement-worker"
+	abortReplacement.FencingToken = 21
+	original, err = replacementCoordinator.Begin(ctx, abortReplacement)
+	if err != nil || original.WorkerID != abortRequest.WorkerID ||
+		original.FencingToken != abortRequest.FencingToken {
+		t.Fatalf("abort replacement Begin() = %+v, %v", original, err)
+	}
+	if err := replacementCoordinator.Prepare(ctx, abortRequest.DeploymentID); err != nil {
+		t.Fatalf("abort Prepare(): %v", err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := replacementCoordinator.Restore(ctx, abortRequest.DeploymentID); err != nil {
+			t.Fatalf("replayed Restore() attempt %d: %v", attempt+1, err)
+		}
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		if err := replacementCoordinator.FinalizeAbort(ctx, abortRequest.DeploymentID); err != nil {
+			t.Fatalf("replayed FinalizeAbort() attempt %d: %v", attempt+1, err)
+		}
+	}
+	if replayGateway.abortCalls != 2 {
+		t.Fatalf("replayed gateway abort calls = %d", replayGateway.abortCalls)
+	}
+	if pending, exists, err := replacementStore.Get(ctx, abortRequest.DeploymentID); err != nil || exists {
+		t.Fatalf("aborted cutover remains pending = %+v, %t, %v", pending, exists, err)
+	}
+	degradedRoute, err := repository.Get(ctx, cutoverRoute.OrganizationID,
+		cutoverRoute.ProjectID, cutoverRoute.ID)
+	if err != nil || degradedRoute.Status != applicationroutebiz.StatusDegraded {
+		t.Fatalf("aborted route = %+v, %v", degradedRoute, err)
 	}
 }
 

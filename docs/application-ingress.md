@@ -126,7 +126,7 @@ Server 从 `/metrics` 暴露 `owndock_managed_ingress_operations_total{phase,res
 
 ## 验收门槛
 
-已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非开发环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，Server Host revision/pending transaction/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像。
+已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非 development 环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，Server Host revision/pending transaction/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Replica Set 用例还会把成功响应视为丢失，以新的 Store/Coordinator 和 Worker 租约重复 prepare、控制面提交、Gateway commit、finish、restore 与 abort，验证接管仍使用原始运行身份。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像；测试代码编译通过不等于已获得 Replica Set 实跑证据。
 
 以下仍是执行面与联合验收门槛：
 
