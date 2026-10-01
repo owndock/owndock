@@ -45,3 +45,25 @@ type Gateway interface {
 	Commit(context.Context, HostDesiredConfig) (GatewayObservation, error)
 	Abort(context.Context, HostDesiredConfig) (GatewayObservation, error)
 }
+
+func FailureCodeFromError(err error) FailureCode {
+	switch {
+	case errors.Is(err, ErrGatewayPortConflict):
+		return FailurePortConflict
+	case errors.Is(err, ErrGatewayCertificateUnavailable):
+		return FailureCertificateUnavailable
+	case errors.Is(err, ErrGatewayBackendUnhealthy):
+		return FailureBackendUnhealthy
+	case errors.Is(err, ErrGatewayFenceStale), errors.Is(err, ErrGatewayFenceConflict),
+		errors.Is(err, ErrCutoverConflict):
+		return FailureFenceConflict
+	case errors.Is(err, ErrGatewayStateFull):
+		return FailureStateFull
+	case errors.Is(err, ErrGatewayConfiguration), errors.Is(err, ErrCutoverUnavailable):
+		return FailureConfiguration
+	case errors.Is(err, ErrGatewayUnavailable), errors.Is(err, ErrCutoverAmbiguous):
+		return FailureGatewayUnavailable
+	default:
+		return FailureUnknown
+	}
+}

@@ -69,6 +69,35 @@ func TestHTTPApplicationRouteLifecycle(t *testing.T) {
 	}
 }
 
+func TestApplicationRouteResponseExposesOnlyStableFailureCode(t *testing.T) {
+	input := biz.Input{ID: "route-1", OrganizationID: "organization-1", ProjectID: "project-1",
+		ApplicationID: "app-1", EnvironmentID: "env-1", RuntimeTargetID: "target-1",
+		Hostname: "api.example.com", PortName: "http", TLSMode: biz.TLSModeDisabled,
+		Status: biz.StatusPending, Revision: 1, Version: 1,
+		CreatedBy: "user-1", UpdatedBy: "user-1", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	route, err := biz.NewApplicationRoute(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err = route.Transition(biz.StatusProvisioning, "controller", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err = route.Degrade(biz.FailureCertificateUnavailable, "controller", time.Now().UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := responseFromDomain(route)
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.FailureCode != biz.FailureCertificateUnavailable ||
+		strings.Contains(string(encoded), "private") {
+		t.Fatalf("route response = %s", encoded)
+	}
+}
+
 type routeReferencesStub struct{}
 
 func (routeReferencesStub) Resolve(context.Context, string, string, string, string, string) (biz.References, error) {

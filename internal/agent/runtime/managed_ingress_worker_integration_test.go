@@ -377,6 +377,7 @@ func (s *managedIngressIntegrationCutoverStore) Finish(
 func (s *managedIngressIntegrationCutoverStore) Abort(
 	context.Context,
 	applicationroutebiz.CutoverTransaction,
+	applicationroutebiz.FailureCode,
 ) error {
 	s.exists, s.aborted = false, true
 	return nil

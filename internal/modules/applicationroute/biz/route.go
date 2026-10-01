@@ -72,6 +72,32 @@ func (s CertificateStatus) Valid() bool {
 	}
 }
 
+type FailureCode string
+
+const (
+	FailureGatewayUnavailable     FailureCode = "gateway_unavailable"
+	FailurePortConflict           FailureCode = "port_conflict"
+	FailureCertificateUnavailable FailureCode = "certificate_unavailable"
+	FailureBackendUnhealthy       FailureCode = "backend_unhealthy"
+	FailureFenceConflict          FailureCode = "fence_conflict"
+	FailureStateFull              FailureCode = "state_full"
+	FailureConfiguration          FailureCode = "configuration"
+	FailureCanceled               FailureCode = "canceled"
+	FailureUnknown                FailureCode = "unknown"
+)
+
+func (c FailureCode) Valid() bool {
+	switch c {
+	case FailureGatewayUnavailable, FailurePortConflict,
+		FailureCertificateUnavailable, FailureBackendUnhealthy,
+		FailureFenceConflict, FailureStateFull, FailureConfiguration,
+		FailureCanceled, FailureUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 type Observation struct {
 	Revision          uint64
 	DeploymentID      string
@@ -95,6 +121,7 @@ type ApplicationRoute struct {
 	Revision        uint64
 	Version         uint64
 	Observation     *Observation
+	FailureCode     FailureCode
 	CreatedBy       string
 	UpdatedBy       string
 	CreatedAt       time.Time
@@ -115,6 +142,7 @@ type Input struct {
 	Revision        uint64
 	Version         uint64
 	Observation     *Observation
+	FailureCode     FailureCode
 	CreatedBy       string
 	UpdatedBy       string
 	CreatedAt       time.Time
@@ -135,8 +163,8 @@ func NewApplicationRoute(input Input) (ApplicationRoute, error) {
 		EnvironmentID: strings.TrimSpace(input.EnvironmentID), RuntimeTargetID: strings.TrimSpace(input.RuntimeTargetID),
 		Hostname: normalizeHostname(input.Hostname), PortName: strings.TrimSpace(input.PortName),
 		TLSMode: input.TLSMode, Status: input.Status, Revision: input.Revision, Version: input.Version,
-		Observation: cloneObservation(input.Observation),
-		CreatedBy:   strings.TrimSpace(input.CreatedBy), UpdatedBy: strings.TrimSpace(input.UpdatedBy),
+		Observation: cloneObservation(input.Observation), FailureCode: input.FailureCode,
+		CreatedBy: strings.TrimSpace(input.CreatedBy), UpdatedBy: strings.TrimSpace(input.UpdatedBy),
 		CreatedAt: input.CreatedAt.UTC(), UpdatedAt: input.UpdatedAt.UTC(),
 	}
 	if !validID(route.ID) || !validID(route.OrganizationID) || !validID(route.ProjectID) ||
@@ -149,6 +177,10 @@ func NewApplicationRoute(input Input) (ApplicationRoute, error) {
 		return ApplicationRoute{}, ErrInvalidRoute
 	}
 	if !validObservation(route) {
+		return ApplicationRoute{}, ErrInvalidRoute
+	}
+	if route.Status == StatusDegraded && !route.FailureCode.Valid() ||
+		route.Status != StatusDegraded && route.FailureCode != "" {
 		return ApplicationRoute{}, ErrInvalidRoute
 	}
 	return route, nil
@@ -219,11 +251,35 @@ func (r ApplicationRoute) Transition(next Status, actorID string, now time.Time)
 	if !validID(actorID) || now.IsZero() || !validTransition(r.Status, next) {
 		return ApplicationRoute{}, ErrRouteConflict
 	}
+	if next == StatusDegraded {
+		return r.Degrade(FailureUnknown, actorID, now)
+	}
 	r.Status, r.Version, r.UpdatedBy, r.UpdatedAt = next, r.Version+1, actorID, now.UTC()
+	r.FailureCode = ""
 	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
 		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
 		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
-		Revision: r.Revision, Version: r.Version, Observation: r.Observation,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
+		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
+}
+
+func (r ApplicationRoute) Degrade(
+	failure FailureCode,
+	actorID string,
+	now time.Time,
+) (ApplicationRoute, error) {
+	actorID = strings.TrimSpace(actorID)
+	if !failure.Valid() || !validID(actorID) || now.IsZero() ||
+		!validTransition(r.Status, StatusDegraded) {
+		return ApplicationRoute{}, ErrRouteConflict
+	}
+	r.Status, r.Version, r.UpdatedBy, r.UpdatedAt =
+		StatusDegraded, r.Version+1, actorID, now.UTC()
+	r.FailureCode = failure
+	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
+		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
+		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 }
 
@@ -254,10 +310,11 @@ func (r ApplicationRoute) ObserveReady(observation Observation, actorID string, 
 	}
 	r.Status, r.Version, r.UpdatedBy, r.UpdatedAt = StatusReady, r.Version+1, actorID, now.UTC()
 	r.Observation = cloneObservation(&observation)
+	r.FailureCode = ""
 	return NewApplicationRoute(Input{ID: r.ID, OrganizationID: r.OrganizationID, ProjectID: r.ProjectID,
 		ApplicationID: r.ApplicationID, EnvironmentID: r.EnvironmentID, RuntimeTargetID: r.RuntimeTargetID,
 		Hostname: r.Hostname, PortName: r.PortName, TLSMode: r.TLSMode, Status: r.Status,
-		Revision: r.Revision, Version: r.Version, Observation: r.Observation,
+		Revision: r.Revision, Version: r.Version, Observation: r.Observation, FailureCode: r.FailureCode,
 		CreatedBy: r.CreatedBy, UpdatedBy: r.UpdatedBy, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt})
 }
 
@@ -317,7 +374,7 @@ func (u *UseCase) Create(ctx context.Context, principal security.Principal, proj
 	now := u.now().UTC()
 	input.ID, input.OrganizationID, input.ProjectID = routeID, principal.OrganizationID, projectID
 	input.Status, input.Revision, input.Version = StatusPending, 1, 1
-	input.Observation = nil
+	input.Observation, input.FailureCode = nil, ""
 	input.CreatedBy, input.UpdatedBy, input.CreatedAt, input.UpdatedAt = principal.UserID, principal.UserID, now, now
 	item, err := NewApplicationRoute(input)
 	if err != nil {
@@ -372,7 +429,7 @@ func (u *UseCase) Update(ctx context.Context, principal security.Principal, proj
 	}
 	input.ID, input.OrganizationID, input.ProjectID = current.ID, current.OrganizationID, current.ProjectID
 	input.Status, input.Revision, input.Version = StatusPending, current.Revision+1, current.Version+1
-	input.Observation = current.Observation
+	input.Observation, input.FailureCode = current.Observation, ""
 	input.CreatedBy, input.UpdatedBy = current.CreatedBy, principal.UserID
 	input.CreatedAt, input.UpdatedAt = current.CreatedAt, u.now().UTC()
 	updated, err := NewApplicationRoute(input)

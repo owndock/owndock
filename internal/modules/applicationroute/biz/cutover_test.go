@@ -140,7 +140,7 @@ func (s *cutoverStoreStub) Complete(context.Context, CutoverTransaction, Gateway
 	return nil
 }
 func (*cutoverStoreStub) Finish(context.Context, CutoverTransaction) error { return nil }
-func (s *cutoverStoreStub) Abort(context.Context, CutoverTransaction) error {
+func (s *cutoverStoreStub) Abort(context.Context, CutoverTransaction, FailureCode) error {
 	s.abortCalls++
 	return nil
 }

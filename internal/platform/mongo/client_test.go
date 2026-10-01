@@ -3112,7 +3112,9 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 		}
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		if err := replacementCoordinator.FinalizeAbort(ctx, abortRequest.DeploymentID); err != nil {
+		if err := replacementCoordinator.FinalizeAbort(
+			ctx, abortRequest.DeploymentID, applicationroutebiz.FailureCanceled,
+		); err != nil {
 			t.Fatalf("replayed FinalizeAbort() attempt %d: %v", attempt+1, err)
 		}
 	}
@@ -3124,7 +3126,8 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 	}
 	degradedRoute, err := repository.Get(ctx, cutoverRoute.OrganizationID,
 		cutoverRoute.ProjectID, cutoverRoute.ID)
-	if err != nil || degradedRoute.Status != applicationroutebiz.StatusDegraded {
+	if err != nil || degradedRoute.Status != applicationroutebiz.StatusDegraded ||
+		degradedRoute.FailureCode != applicationroutebiz.FailureCanceled {
 		t.Fatalf("aborted route = %+v, %v", degradedRoute, err)
 	}
 }

@@ -4551,6 +4551,11 @@ components:
         version: { type: integer, format: int64, minimum: 1, readOnly: true }
         observation:
           $ref: "#/components/schemas/ApplicationRouteObservation"
+        failure_code:
+          type: string
+          enum: [gateway_unavailable, port_conflict, certificate_unavailable, backend_unhealthy, fence_conflict, state_full, configuration, canceled, unknown]
+          readOnly: true
+          description: Stable safe reason present only while status is degraded. Raw gateway, TLS, ACME, and application errors are never returned.
         created_by: { type: string, minLength: 1, maxLength: 128, readOnly: true }
         updated_by: { type: string, minLength: 1, maxLength: 128, readOnly: true }
         created_at: { type: string, format: date-time, readOnly: true }

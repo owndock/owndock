@@ -328,7 +328,11 @@ func (s *MongoCutoverStore) Finish(
 func (s *MongoCutoverStore) Abort(
 	ctx context.Context,
 	transactionValue applicationroutebiz.CutoverTransaction,
+	failure applicationroutebiz.FailureCode,
 ) error {
+	if !failure.Valid() {
+		return applicationroutebiz.ErrCutoverUnavailable
+	}
 	return s.transaction.WithinTransaction(ctx, func(tx context.Context) error {
 		var document hostConfigDocument
 		err := s.hostConfigs.FindOne(tx, pendingFilter(transactionValue,
@@ -348,7 +352,7 @@ func (s *MongoCutoverStore) Abort(
 			if route.Status != applicationroutebiz.StatusProvisioning {
 				continue
 			}
-			degraded, transitionErr := route.Transition(applicationroutebiz.StatusDegraded,
+			degraded, transitionErr := route.Degrade(failure,
 				"system:deployment-worker", s.now().UTC())
 			if transitionErr != nil {
 				return transitionErr

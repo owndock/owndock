@@ -85,7 +85,7 @@ type CutoverStore interface {
 	Get(context.Context, string) (CutoverTransaction, bool, error)
 	Complete(context.Context, CutoverTransaction, GatewayObservation) error
 	Finish(context.Context, CutoverTransaction) error
-	Abort(context.Context, CutoverTransaction) error
+	Abort(context.Context, CutoverTransaction, FailureCode) error
 }
 
 type CutoverCoordinator struct {
@@ -198,7 +198,7 @@ func (c *CutoverCoordinator) Abort(ctx context.Context, deploymentID string) err
 	if err := c.Restore(ctx, deploymentID); err != nil {
 		return err
 	}
-	return c.FinalizeAbort(ctx, deploymentID)
+	return c.FinalizeAbort(ctx, deploymentID, FailureCanceled)
 }
 
 // Restore switches the Gateway back to its committed config but deliberately
@@ -220,12 +220,19 @@ func (c *CutoverCoordinator) Restore(ctx context.Context, deploymentID string) e
 
 // FinalizeAbort clears Server state only after both Gateway and runtime have
 // been restored. It is independently replayable after a MongoDB response loss.
-func (c *CutoverCoordinator) FinalizeAbort(ctx context.Context, deploymentID string) error {
+func (c *CutoverCoordinator) FinalizeAbort(
+	ctx context.Context,
+	deploymentID string,
+	failure FailureCode,
+) error {
+	if !failure.Valid() {
+		return ErrCutoverUnavailable
+	}
 	transaction, exists, err := c.store.Get(ctx, strings.TrimSpace(deploymentID))
 	if err != nil || !exists {
 		return err
 	}
-	return c.store.Abort(ctx, transaction)
+	return c.store.Abort(ctx, transaction, failure)
 }
 
 // Finish removes the durable Server transaction only after the old runtime

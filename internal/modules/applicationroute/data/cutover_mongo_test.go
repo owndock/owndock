@@ -65,6 +65,30 @@ func TestCutoverDocumentRoundTripRetainsExactRuntimeFence(t *testing.T) {
 	}
 }
 
+func TestRouteDocumentRoundTripRetainsStableFailureCode(t *testing.T) {
+	route := cutoverTestRoute(t, "route-degraded", "degraded.example.com")
+	var err error
+	route, err = route.Transition(
+		applicationroutebiz.StatusProvisioning, "controller", route.UpdatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	route, err = route.Degrade(
+		applicationroutebiz.FailureCertificateUnavailable,
+		"controller",
+		route.UpdatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document := documentFromDomain(route)
+	decoded, err := document.domain()
+	if err != nil || decoded.FailureCode != applicationroutebiz.FailureCertificateUnavailable {
+		t.Fatalf("decoded route = %+v, %v", decoded, err)
+	}
+}
+
 func cutoverTestRoute(t *testing.T, id, hostname string) applicationroutebiz.ApplicationRoute {
 	t.Helper()
 	input := applicationroutebiz.Input{ID: id, OrganizationID: "organization-1", ProjectID: "project-1",

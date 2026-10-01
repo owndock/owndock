@@ -41,6 +41,7 @@ type routeResponse struct {
 	Revision        uint64               `json:"revision"`
 	Version         uint64               `json:"version"`
 	Observation     *observationResponse `json:"observation,omitempty"`
+	FailureCode     biz.FailureCode      `json:"failure_code,omitempty"`
 	CreatedBy       string               `json:"created_by"`
 	UpdatedBy       string               `json:"updated_by"`
 	CreatedAt       time.Time            `json:"created_at"`
@@ -70,8 +71,8 @@ func responseFromDomain(item biz.ApplicationRoute) routeResponse {
 		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
 		RuntimeTargetID: item.RuntimeTargetID, Hostname: item.Hostname, PortName: item.PortName,
 		TLSMode: item.TLSMode, Status: item.Status, Revision: item.Revision, Version: item.Version,
-		Observation: observationResponseFromDomain(item.Observation),
-		CreatedBy:   item.CreatedBy, UpdatedBy: item.UpdatedBy,
+		Observation: observationResponseFromDomain(item.Observation), FailureCode: item.FailureCode,
+		CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
 		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
 

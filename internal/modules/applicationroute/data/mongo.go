@@ -37,6 +37,7 @@ type routeDocument struct {
 	Revision        uint64               `bson:"revision"`
 	Version         uint64               `bson:"version"`
 	Observation     *observationDocument `bson:"observation,omitempty"`
+	FailureCode     biz.FailureCode      `bson:"failure_code,omitempty"`
 	CreatedBy       string               `bson:"created_by"`
 	UpdatedBy       string               `bson:"updated_by"`
 	CreatedAt       time.Time            `bson:"created_at"`
@@ -75,8 +76,8 @@ func documentFromDomain(item biz.ApplicationRoute) routeDocument {
 		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
 		RuntimeTargetID: item.RuntimeTargetID, Hostname: item.Hostname, PortName: item.PortName,
 		TLSMode: item.TLSMode, Status: item.Status, Revision: item.Revision, Version: item.Version,
-		Observation: observationDocumentFromDomain(item.Observation),
-		CreatedBy:   item.CreatedBy, UpdatedBy: item.UpdatedBy,
+		Observation: observationDocumentFromDomain(item.Observation), FailureCode: item.FailureCode,
+		CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
 		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
 
@@ -85,8 +86,8 @@ func inputFromDomain(item biz.ApplicationRoute) biz.Input {
 		ApplicationID: item.ApplicationID, EnvironmentID: item.EnvironmentID,
 		RuntimeTargetID: item.RuntimeTargetID, Hostname: item.Hostname, PortName: item.PortName,
 		TLSMode: item.TLSMode, Status: item.Status, Revision: item.Revision, Version: item.Version,
-		Observation: item.Observation,
-		CreatedBy:   item.CreatedBy, UpdatedBy: item.UpdatedBy,
+		Observation: item.Observation, FailureCode: item.FailureCode,
+		CreatedBy: item.CreatedBy, UpdatedBy: item.UpdatedBy,
 		CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt}
 }
 
@@ -94,7 +95,7 @@ func (d routeDocument) domain() (biz.ApplicationRoute, error) {
 	item, err := biz.NewApplicationRoute(biz.Input{ID: d.ID, OrganizationID: d.OrganizationID, ProjectID: d.ProjectID,
 		ApplicationID: d.ApplicationID, EnvironmentID: d.EnvironmentID, RuntimeTargetID: d.RuntimeTargetID,
 		Hostname: d.Hostname, PortName: d.PortName, TLSMode: d.TLSMode, Status: d.Status,
-		Revision: d.Revision, Version: d.Version, Observation: d.Observation.domain(),
+		Revision: d.Revision, Version: d.Version, Observation: d.Observation.domain(), FailureCode: d.FailureCode,
 		CreatedBy: d.CreatedBy, UpdatedBy: d.UpdatedBy, CreatedAt: d.CreatedAt, UpdatedAt: d.UpdatedAt})
 	if err != nil {
 		return biz.ApplicationRoute{}, fmt.Errorf("decode invalid application route: %w", err)
@@ -201,12 +202,21 @@ func routeUpdate(item biz.ApplicationRoute) bson.D {
 		{Key: "tls_mode", Value: item.TLSMode}, {Key: "status", Value: item.Status},
 		{Key: "revision", Value: item.Revision}, {Key: "version", Value: item.Version},
 		{Key: "updated_by", Value: item.UpdatedBy}, {Key: "updated_at", Value: item.UpdatedAt}}
-	update := bson.D{{Key: "$set", Value: set}}
+	unset := bson.D{}
 	if item.Observation == nil {
-		return append(update, bson.E{Key: "$unset", Value: bson.D{{Key: "observation", Value: ""}}})
+		unset = append(unset, bson.E{Key: "observation", Value: ""})
+	} else {
+		set = append(set, bson.E{Key: "observation", Value: observationDocumentFromDomain(item.Observation)})
 	}
-	set = append(set, bson.E{Key: "observation", Value: observationDocumentFromDomain(item.Observation)})
-	update[0].Value = set
+	if item.FailureCode == "" {
+		unset = append(unset, bson.E{Key: "failure_code", Value: ""})
+	} else {
+		set = append(set, bson.E{Key: "failure_code", Value: item.FailureCode})
+	}
+	update := bson.D{{Key: "$set", Value: set}}
+	if len(unset) > 0 {
+		update = append(update, bson.E{Key: "$unset", Value: unset})
+	}
 	return update
 }
 

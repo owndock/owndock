@@ -495,7 +495,8 @@ func TestRuntimeExecutorCleansCandidateAfterDeterministicRouteFailure(t *testing
 	})
 	if !errors.Is(err, applicationroutebiz.ErrGatewayBackendUnhealthy) ||
 		errors.Is(err, biz.ErrExecutionRetryable) || !gateway.canceledPrepared ||
-		!store.aborted || routes.abortCalls != 2 {
+		!store.aborted || store.failure != applicationroutebiz.FailureBackendUnhealthy ||
+		routes.abortCalls != 2 {
 		t.Fatalf("error = %v, store = %+v, runtime = %+v, routes = %+v",
 			err, store, gateway, routes)
 	}
@@ -505,6 +506,7 @@ type workerCutoverStore struct {
 	transaction applicationroutebiz.CutoverTransaction
 	finished    bool
 	aborted     bool
+	failure     applicationroutebiz.FailureCode
 	onAbort     func()
 }
 
@@ -532,8 +534,13 @@ func (s *workerCutoverStore) Finish(context.Context, applicationroutebiz.Cutover
 	s.finished = true
 	return nil
 }
-func (s *workerCutoverStore) Abort(context.Context, applicationroutebiz.CutoverTransaction) error {
+func (s *workerCutoverStore) Abort(
+	_ context.Context,
+	_ applicationroutebiz.CutoverTransaction,
+	failure applicationroutebiz.FailureCode,
+) error {
 	s.aborted = true
+	s.failure = failure
 	if s.onAbort != nil {
 		s.onAbort()
 	}

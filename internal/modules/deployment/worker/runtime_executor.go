@@ -178,7 +178,9 @@ func (e *RuntimeExecutor) abortManagedCutover(
 	}
 	e.observeManagedIngress("runtime_cancel", started, nil)
 	started = time.Now()
-	if err := e.ingress.FinalizeAbort(ctx, deploymentID); err != nil {
+	if err := e.ingress.FinalizeAbort(
+		ctx, deploymentID, applicationroutebiz.FailureCodeFromError(cause),
+	); err != nil {
 		e.observeManagedIngress("cutover_abort", started, err)
 		return errors.Join(biz.ErrExecutionRetryable, cause, err)
 	}
@@ -325,7 +327,9 @@ func (e *RuntimeExecutor) Cancel(ctx context.Context, deployment biz.Deployment)
 		}
 		e.observeManagedIngress("runtime_cancel", started, nil)
 		started = time.Now()
-		if err := e.ingress.FinalizeAbort(ctx, deployment.ID); err != nil {
+		if err := e.ingress.FinalizeAbort(
+			ctx, deployment.ID, applicationroutebiz.FailureCanceled,
+		); err != nil {
 			e.observeManagedIngress("cutover_abort", started, err)
 			return errors.Join(biz.ErrExecutionRetryable, err)
 		}

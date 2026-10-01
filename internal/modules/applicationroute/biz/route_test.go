@@ -68,6 +68,33 @@ func TestApplicationRouteTransitionEnforcesLifecycle(t *testing.T) {
 	}
 }
 
+func TestApplicationRouteDegradedFailureCodeIsBoundedAndCleared(t *testing.T) {
+	item, err := NewApplicationRoute(validInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = item.Transition(StatusProvisioning, "controller", fixedTime.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = item.Degrade(
+		FailureCertificateUnavailable, "controller", fixedTime.Add(2*time.Minute),
+	)
+	if err != nil || item.Status != StatusDegraded ||
+		item.FailureCode != FailureCertificateUnavailable {
+		t.Fatalf("Degrade() = %#v, %v", item, err)
+	}
+	item, err = item.Transition(StatusProvisioning, "controller", fixedTime.Add(3*time.Minute))
+	if err != nil || item.FailureCode != "" {
+		t.Fatalf("reprovision route = %#v, %v", item, err)
+	}
+	invalid := validInput()
+	invalid.FailureCode = FailureBackendUnhealthy
+	if _, err := NewApplicationRoute(invalid); !errors.Is(err, ErrInvalidRoute) {
+		t.Fatalf("non-degraded failure code error = %v", err)
+	}
+}
+
 func TestUseCaseCreateAppliesSecurityAndEnvironmentRules(t *testing.T) {
 	repository := &fakeRepository{}
 	references := &fakeReferences{result: References{EnvironmentStage: "production", AgentTarget: true}}
