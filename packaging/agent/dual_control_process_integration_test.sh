@@ -844,6 +844,22 @@ if [ "$runtime_mode" = 1 ]; then
 	proxy_a_pid=$!
 	wait_for_file "$proxy_a_ready"
 	run_host_a_probe_after_terminal runtime-disconnect
+	wait_for_terminal_records_empty
+	attempt=0
+	while [ "$attempt" -lt 100 ]; do
+		terminal_processes=$(docker exec "$engine_a_id" \
+			docker --host tcp://127.0.0.1:2375 top \
+			"$terminal_container" -eo pid,args)
+		case "$terminal_processes" in
+			*'/bin/sh'*) ;;
+			*) break ;;
+		esac
+		attempt=$((attempt + 1))
+		sleep 0.1
+	done
+	case "$terminal_processes" in
+		*'/bin/sh'*) fail "Host A runtime recovery left its terminal shell running" ;;
+	esac
 	run_host_container_terminal_fault_phase target-replacement
 	terminal_replacement_running=$(docker exec "$engine_a_id" \
 		docker --host tcp://127.0.0.1:2375 inspect \

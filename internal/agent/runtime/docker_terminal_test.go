@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,6 +164,111 @@ func TestDockerExecutorRejectsServerContainerNameMismatch(t *testing.T) {
 	}
 	if len(engine.creates) != 0 {
 		t.Fatal("exec was created for a non-derived container name")
+	}
+}
+
+func TestDockerExecutorRecoveryFencesActiveTerminal(t *testing.T) {
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewFileTerminalExecutionStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	containerID := strings.Repeat("c", 64)
+	active := terminalExecution{
+		execID: strings.Repeat("a", 64), containerID: containerID,
+		marker: "/tmp/.owndock-terminal-" + strings.Repeat("d", 32),
+		shell:  "/bin/sh",
+	}
+	inactive := terminalExecution{
+		execID: strings.Repeat("b", 64), containerID: containerID,
+		marker: "/tmp/.owndock-terminal-" + strings.Repeat("e", 32),
+		shell:  "/bin/sh",
+	}
+	if err := store.Add(active); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(inactive); err != nil {
+		t.Fatal(err)
+	}
+	engine := newDockerTerminalEngineStub(mobyclient.ContainerInspectResult{
+		Container: container.InspectResponse{ID: containerID},
+	})
+	defer func() {
+		_ = engine.client.Close()
+		_ = engine.server.Close()
+	}()
+	executor := &DockerExecutor{
+		newTerminalEngine: func(string) (dockerTerminalEngine, error) {
+			return engine, nil
+		},
+		terminalExecutions: store,
+	}
+	executor.markTerminalActive(active.execID)
+	if err := executor.RecoverContainerTerminals(t.Context()); err != nil {
+		t.Fatalf("RecoverContainerTerminals() error = %v", err)
+	}
+	entries, err := store.List()
+	if err != nil || len(entries) != 1 || entries[0] != active {
+		t.Fatalf("entries after fenced recovery = %#v, %v", entries, err)
+	}
+	executor.markTerminalInactive(active.execID)
+	if err := executor.RecoverContainerTerminals(t.Context()); err != nil {
+		t.Fatalf("second RecoverContainerTerminals() error = %v", err)
+	}
+	entries, err = store.List()
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("entries after inactive recovery = %#v, %v", entries, err)
+	}
+}
+
+func TestDockerTerminalClosingReleasesRecoveryFenceBeforeCleanup(t *testing.T) {
+	engine := newDockerTerminalEngineStub(mobyclient.ContainerInspectResult{})
+	defer func() { _ = engine.server.Close() }()
+	executor := &DockerExecutor{}
+	executor.markTerminalActive("exec-1")
+	closing := make(chan struct{})
+	stream := &dockerTerminalStream{
+		engine: engine,
+		attachment: mobyclient.ExecAttachResult{
+			HijackedResponse: mobyclient.NewHijackedResponse(
+				engine.client,
+				"application/vnd.docker.raw-stream",
+			),
+		},
+		execID: "exec-1",
+		onClosing: func() {
+			executor.markTerminalInactive("exec-1")
+			close(closing)
+		},
+		cancel: func() {},
+		closed: make(chan struct{}),
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = stream.Close()
+		close(done)
+	}()
+	select {
+	case <-closing:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("terminal recovery fence was not released before cleanup")
+	}
+	if executor.terminalIsActive("exec-1") {
+		t.Fatal("closing terminal remained fenced as active")
+	}
+	select {
+	case <-done:
+		t.Fatal("terminal cleanup unexpectedly completed before blocked write")
+	default:
+	}
+	_ = engine.server.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("terminal cleanup did not finish")
 	}
 }
 

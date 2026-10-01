@@ -83,9 +83,9 @@ WSS 固定使用 `owndock.terminal.v1` 子协议。文本控制消息承载 `OPE
 
 direct Docker exec 只连接 Server 根据当前成功 Deployment 推导出的稳定容器名，并在 exec 前后核对 Deployment、Project、Application、Environment 和 cutover sequence 标签。固定 shell 顺序为 `/bin/sh`、`/bin/bash`、`/bin/ash`；不接受浏览器传入的 command、user、env、workdir、detach 或 privileged。连接期间容器被替换、停止或 generation 改变会主动关闭底层流。
 
-Agent 模式复用同一授权和目标解析结果，但 Server 不连接远端 Docker 地址。它通过现有 mTLS Agent 控制连接发送 `terminal.container` 有界帧；`OPEN` 只包含已解析的 Deployment、Project、Application、Environment、Runtime Target、稳定容器名、cutover sequence 和窗口尺寸。Agent 再次推导容器名、核对运行状态与标签后，才在本机 Unix Socket 上启动同一组固定 shell。stdin、TTY stdout 和 resize 使用每会话连续序号传输；每台 Agent 的容器与主机终端合计最多 16 个，连接和发送队列都有上限，断线不会自动恢复旧 PTY。活动 exec 另以 `0600`、fsync 和原子替换持久化 Docker 对象 ID、固定 Shell 与本地随机撤销标记；Agent 重启时先用固定清理 exec 触发容器内 watchdog，确认遗留 Shell 退出并清除记录后才连接控制面。该通道和记录都不会携带 Docker endpoint、socket、任意命令、用户、用户环境变量、工作目录、输入输出或特权开关。
+Agent 模式复用同一授权和目标解析结果，但 Server 不连接远端 Docker 地址。它通过现有 mTLS Agent 控制连接发送 `terminal.container` 有界帧；`OPEN` 只包含已解析的 Deployment、Project、Application、Environment、Runtime Target、稳定容器名、cutover sequence 和窗口尺寸。Agent 再次推导容器名、核对运行状态与标签后，才在本机 Unix Socket 上启动同一组固定 shell。stdin、TTY stdout 和 resize 使用每会话连续序号传输；每台 Agent 的容器与主机终端合计最多 16 个，连接和发送队列都有上限，断线不会自动恢复旧 PTY。活动 exec 另以 `0600`、fsync 和原子替换持久化 Docker 对象 ID、固定 Shell 与本地随机撤销标记；Agent 启动时回收全部遗留记录，本地 Docker 通道恢复后则只回收本进程已关闭会话的记录，并用活跃 exec 栅栏保护并发终端。固定清理 exec 会触发容器内 watchdog，只有确认遗留 Shell 退出并清除记录后，运行时探测才会返回 `ready`。该通道和记录都不会携带 Docker endpoint、socket、任意命令、用户、用户环境变量、工作目录、输入输出或特权开关。
 
-进程级门禁会把两个真实 Agent 分别连接到两个隔离 Engine，只在 Host A 创建符合稳定身份契约的 canonical 容器并打开固定 Shell。六个阶段分别从 Engine 侧停止目标、保持容器运行但切断并恢复 Agent 本地 Docker 通道、以相同名称和标签创建不同容器 ID 的替换实例、在 Shell 活动时 `SIGKILL` Agent 并从原状态目录重启、产生 16 MiB Shell 输出但让控制端停止消费，以及在 Shell 停止读取时发送 8 MiB 有界 stdin。每次故障后 Host A 都必须释放旧会话并重新连接控制流，随后 `runtime.probe` 仍为 `ready`；进程重启和双向背压还要求遗留 Shell 与持久撤销记录都被回收，输入方向另验证 Agent 主动关闭请求体。替换实例保持运行，Host B 的稳定部署身份保持不变，目标容器中的私密环境哨兵不得进入任何进程日志。
+进程级门禁会把两个真实 Agent 分别连接到两个隔离 Engine，只在 Host A 创建符合稳定身份契约的 canonical 容器并打开固定 Shell。六个阶段分别从 Engine 侧停止目标、保持容器运行但切断并恢复 Agent 本地 Docker 通道、以相同名称和标签创建不同容器 ID 的替换实例、在 Shell 活动时 `SIGKILL` Agent 并从原状态目录重启、产生 16 MiB Shell 输出但让控制端停止消费，以及在 Shell 停止读取时发送 8 MiB 有界 stdin。每次故障后 Host A 都必须释放旧会话并重新连接控制流，随后 `runtime.probe` 仍为 `ready`；本地 Docker 通道恢复、进程重启和双向背压还要求遗留 Shell 与持久撤销记录都被回收，输入方向另验证 Agent 主动关闭请求体。替换实例保持运行，Host B 的稳定部署身份保持不变，目标容器中的私密环境哨兵不得进入任何进程日志。
 
 ## 主机终端如何限制权限
 

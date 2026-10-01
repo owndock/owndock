@@ -124,8 +124,10 @@ func (e *DockerExecutor) OpenContainerTerminal(
 			execID: created.ID, containerID: initial.Container.ID,
 			marker: marker, shell: shell,
 		}
+		e.markTerminalActive(created.ID)
 		if e.terminalExecutions != nil {
 			if storeErr := e.terminalExecutions.Add(execution); storeErr != nil {
+				e.markTerminalInactive(created.ID)
 				return nil, ErrTerminalStreamUnavailable
 			}
 		}
@@ -143,6 +145,7 @@ func (e *DockerExecutor) OpenContainerTerminal(
 			if e.terminalExecutions != nil {
 				_ = e.terminalExecutions.Remove(created.ID)
 			}
+			e.markTerminalInactive(created.ID)
 			continue
 		}
 		attachment, execID = attached, created.ID
@@ -162,6 +165,7 @@ func (e *DockerExecutor) OpenContainerTerminal(
 			}
 			cancel()
 		}
+		e.markTerminalInactive(execID)
 		return nil, ErrTerminalTargetUnavailable
 	}
 	streamContext, cancel := context.WithCancel(ctx)
@@ -170,7 +174,10 @@ func (e *DockerExecutor) OpenContainerTerminal(
 		containerID: initial.Container.ID, open: open, cancel: cancel,
 		terminalExecutions: e.terminalExecutions,
 		execution:          execution,
-		closed:             make(chan struct{}),
+		onClosing: func() {
+			e.markTerminalInactive(execID)
+		},
+		closed: make(chan struct{}),
 	}
 	closeEngine = false
 	go stream.watchContainer(streamContext, e.pollInterval)
@@ -198,9 +205,11 @@ func newTerminalMarker() (string, error) {
 	return "/tmp/.owndock-terminal-" + hex.EncodeToString(token[:]), nil
 }
 
-// RecoverContainerTerminals closes every fixed-shell exec left in the durable
-// registry by an abruptly terminated Agent. A terminal stays fail-closed until
-// the old process has stopped and its record is durably removed.
+// RecoverContainerTerminals closes fixed-shell execs left in the durable
+// registry by an interrupted stream or Agent process. Execs that are active in
+// this process are fenced so a runtime probe cannot interrupt a live terminal.
+// A runtime stays fail-closed until every inactive shell has stopped and its
+// record is durably removed.
 func (e *DockerExecutor) RecoverContainerTerminals(ctx context.Context) error {
 	if e.terminalExecutions == nil {
 		return nil
@@ -212,12 +221,21 @@ func (e *DockerExecutor) RecoverContainerTerminals(ctx context.Context) error {
 	if len(entries) == 0 {
 		return nil
 	}
+	inactive := make([]terminalExecution, 0, len(entries))
+	for _, entry := range entries {
+		if !e.terminalIsActive(entry.execID) {
+			inactive = append(inactive, entry)
+		}
+	}
+	if len(inactive) == 0 {
+		return nil
+	}
 	engine, err := e.newTerminalEngine(e.socketPath)
 	if err != nil {
 		return fmt.Errorf("open terminal recovery engine: %w", ErrTerminalStreamUnavailable)
 	}
 	defer func() { _ = engine.Close() }()
-	for _, entry := range entries {
+	for _, entry := range inactive {
 		if err := recoverTerminalExecution(ctx, engine, entry); err != nil {
 			return err
 		}
@@ -226,6 +244,28 @@ func (e *DockerExecutor) RecoverContainerTerminals(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (e *DockerExecutor) markTerminalActive(execID string) {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	if e.activeTerminals == nil {
+		e.activeTerminals = make(map[string]struct{})
+	}
+	e.activeTerminals[execID] = struct{}{}
+}
+
+func (e *DockerExecutor) markTerminalInactive(execID string) {
+	e.terminalMu.Lock()
+	delete(e.activeTerminals, execID)
+	e.terminalMu.Unlock()
+}
+
+func (e *DockerExecutor) terminalIsActive(execID string) bool {
+	e.terminalMu.Lock()
+	defer e.terminalMu.Unlock()
+	_, active := e.activeTerminals[execID]
+	return active
 }
 
 func recoverTerminalExecution(
@@ -360,6 +400,7 @@ type dockerTerminalStream struct {
 	open               agentprotocol.TerminalOpen
 	terminalExecutions terminalExecutionStore
 	execution          terminalExecution
+	onClosing          func()
 	cancel             context.CancelFunc
 	closeOnce          sync.Once
 	closed             chan struct{}
@@ -397,6 +438,9 @@ func (s *dockerTerminalStream) Resize(
 
 func (s *dockerTerminalStream) Close() error {
 	s.closeOnce.Do(func() {
+		if s.onClosing != nil {
+			s.onClosing()
+		}
 		s.cancel()
 		requestTerminalExit(&s.attachment)
 		if s.terminalExecutions != nil {

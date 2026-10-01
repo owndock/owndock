@@ -29,7 +29,8 @@ type dockerProbeEngine interface {
 type dockerProbeEngineFactory func(string) (dockerProbeEngine, error)
 
 type DockerExecutor struct {
-	mu sync.Mutex
+	mu         sync.Mutex
+	terminalMu sync.Mutex
 
 	socketPath          string
 	newEngine           dockerProbeEngineFactory
@@ -43,6 +44,7 @@ type DockerExecutor struct {
 	pollInterval        time.Duration
 	pending             map[string]*pendingProbeExecution
 	inventorySnapshots  map[string]*inventorySnapshot
+	activeTerminals     map[string]struct{}
 }
 
 // WithTerminalExecutionStore enables crash recovery for fixed-shell Docker
@@ -88,6 +90,7 @@ func NewDockerExecutor(
 		pollInterval:        500 * time.Millisecond,
 		pending:             make(map[string]*pendingProbeExecution),
 		inventorySnapshots:  make(map[string]*inventorySnapshot),
+		activeTerminals:     make(map[string]struct{}),
 	}, nil
 }
 
@@ -265,6 +268,12 @@ func (e *DockerExecutor) probeRuntime(
 	}
 	defer func() { _ = engine.Close() }()
 	if _, err := engine.Ping(ctx, client.PingOptions{}); err != nil {
+		if contextError := ctx.Err(); contextError != nil {
+			return agentprotocol.AgentCommandResult{}, contextError
+		}
+		return result, nil
+	}
+	if err := e.RecoverContainerTerminals(ctx); err != nil {
 		if contextError := ctx.Err(); contextError != nil {
 			return agentprotocol.AgentCommandResult{}, contextError
 		}

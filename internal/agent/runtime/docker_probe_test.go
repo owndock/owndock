@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -192,6 +193,52 @@ func TestDockerExecutorClassifiesRuntimeSafely(t *testing.T) {
 				t.Fatalf("runtime result = %+v", result.RuntimeProbe)
 			}
 		})
+	}
+}
+
+func TestDockerExecutorKeepsRuntimeUnreachableUntilTerminalRecovery(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "state")
+	cache, err := NewFileResultCache(directory, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewFileTerminalExecutionStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(terminalExecution{
+		execID: strings.Repeat("a", 64), containerID: strings.Repeat("b", 64),
+		marker: "/tmp/.owndock-terminal-" + strings.Repeat("c", 32),
+		shell:  "/bin/sh",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewDockerExecutor(
+		"/var/run/docker.sock",
+		cache,
+		noopCutoverStore{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor.terminalExecutions = store
+	executor.newEngine = func(string) (dockerProbeEngine, error) {
+		return dockerProbeEngineStub{}, nil
+	}
+	executor.newTerminalEngine = func(string) (dockerTerminalEngine, error) {
+		return nil, errors.New("runtime unavailable")
+	}
+	result, err := executor.Execute(
+		t.Context(),
+		runtimeProbeCommand("terminal-recovery", "target-1"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != agentprotocol.AgentCommandSucceeded ||
+		result.RuntimeProbe == nil ||
+		result.RuntimeProbe.Status != agentprotocol.RuntimeProbeUnreachable {
+		t.Fatalf("runtime result = %+v", result)
 	}
 }
 
