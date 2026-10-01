@@ -116,7 +116,7 @@ sequenceDiagram
 
 自动 HTTPS 要求 hostname DNS 指向目标主机或前置四层 LB，公网 80/443 可达，端口未被其他进程占用，网关能访问配置的 ACME CA，并且证书数据目录持久可写。OwnDock 不会在首期持有 DNS Provider 凭据或自动修改 DNS。
 
-首次上线没有旧 route 可回退。自动 TLS 私有探测会验证精确 hostname/SNI 和系统信任链：证书校验失败或本机 TLS listener 返回握手告警时使用稳定 `ingress_certificate_unavailable`，listener 无法连接使用 `ingress_gateway_unavailable`，TLS 已建立但精确 marker 缺失才是 `ingress_backend_unhealthy`。原始 TLS、ACME、网关和应用错误不会进入 Agent wire 或持久结果。切换最终回滚时，Route 的只读 `failure_code` 仅保存对应的安全产品枚举（另含 port/fence/state/configuration/canceled/unknown），并在重新 provisioning 或 ready 时清除；API 不返回底层错误正文。证书或私有探测失败时，Route 保持 degraded，不能展示为入口 ready。单主机 managed ingress 也不等于高可用。
+首次上线没有旧 route 可回退。自动 TLS 私有探测会验证精确 hostname/SNI 和系统信任链：证书校验失败或本机 TLS listener 返回握手告警时使用稳定 `ingress_certificate_unavailable`，listener 无法连接使用 `ingress_gateway_unavailable`，TLS 已建立但精确 marker 缺失才是 `ingress_backend_unhealthy`。原始 TLS、ACME、网关和应用错误不会进入 Agent wire 或持久结果。切换最终回滚时，如果旧 observation 仍匹配当前 Route revision，控制面恢复 `ready` 并继续展示已证明可用的旧 Deployment；首次发布或 hostname/port/TLS desired revision 已变化时才进入 `degraded`，其只读 `failure_code` 仅保存安全产品枚举（另含 port/fence/state/configuration/canceled/unknown）。重新 provisioning 或 ready 会清除该字段，API 不返回底层错误正文。单主机 managed ingress 也不等于高可用。
 
 ## 监控与告警
 

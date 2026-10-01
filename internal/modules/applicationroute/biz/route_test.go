@@ -95,6 +95,34 @@ func TestApplicationRouteDegradedFailureCodeIsBoundedAndCleared(t *testing.T) {
 	}
 }
 
+func TestApplicationRouteCanRestoreMatchingObservationAfterProvisioning(t *testing.T) {
+	item, err := NewApplicationRoute(validInput())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = item.Transition(StatusProvisioning, "controller", fixedTime.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := Observation{Revision: item.Revision, DeploymentID: "deployment-old",
+		CutoverSequence:   1,
+		ConfigDigest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CertificateStatus: CertificateStatusNotApplicable, ObservedAt: fixedTime.Add(time.Minute)}
+	item, err = item.ObserveReady(observation, "controller", fixedTime.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = item.Transition(StatusProvisioning, "controller", fixedTime.Add(3*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, err := item.ObserveReady(*item.Observation, "controller", fixedTime.Add(4*time.Minute))
+	if err != nil || restored.Status != StatusReady || restored.FailureCode != "" ||
+		restored.Observation.DeploymentID != "deployment-old" {
+		t.Fatalf("restored route = %#v, %v", restored, err)
+	}
+}
+
 func TestUseCaseCreateAppliesSecurityAndEnvironmentRules(t *testing.T) {
 	repository := &fakeRepository{}
 	references := &fakeReferences{result: References{EnvironmentStage: "production", AgentTarget: true}}

@@ -3086,6 +3086,23 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 		readyRoute.Observation.CutoverSequence != replayedRequest.CutoverSequence {
 		t.Fatalf("replayed ready route = %+v, %v", readyRoute, err)
 	}
+	changedRoute, err := applicationroutebiz.NewApplicationRoute(applicationroutebiz.Input{
+		ID: readyRoute.ID, OrganizationID: readyRoute.OrganizationID, ProjectID: readyRoute.ProjectID,
+		ApplicationID: readyRoute.ApplicationID, EnvironmentID: readyRoute.EnvironmentID,
+		RuntimeTargetID: readyRoute.RuntimeTargetID,
+		Hostname:        "cutover-updated.integration.example.com",
+		PortName:        readyRoute.PortName, TLSMode: readyRoute.TLSMode,
+		Status: applicationroutebiz.StatusPending, Revision: readyRoute.Revision + 1,
+		Version: readyRoute.Version + 1, Observation: readyRoute.Observation,
+		CreatedBy: readyRoute.CreatedBy, UpdatedBy: "route-integration-maintainer",
+		CreatedAt: readyRoute.CreatedAt, UpdatedAt: now.Add(2500 * time.Millisecond),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.Save(ctx, changedRoute, readyRoute.Version); err != nil {
+		t.Fatalf("change route desired revision before abort: %v", err)
+	}
 
 	abortRequest := replayedRequest
 	abortRequest.DeploymentID = "route-integration-aborted-deployment"
@@ -3129,6 +3146,12 @@ func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, client
 	if err != nil || degradedRoute.Status != applicationroutebiz.StatusDegraded ||
 		degradedRoute.FailureCode != applicationroutebiz.FailureCanceled {
 		t.Fatalf("aborted route = %+v, %v", degradedRoute, err)
+	}
+	restoredRoute, err := repository.Get(ctx, route.OrganizationID, route.ProjectID, route.ID)
+	if err != nil || restoredRoute.Status != applicationroutebiz.StatusReady ||
+		restoredRoute.FailureCode != "" || restoredRoute.Observation == nil ||
+		restoredRoute.Observation.DeploymentID != replayedRequest.DeploymentID {
+		t.Fatalf("restored previous route = %+v, %v", restoredRoute, err)
 	}
 }
 

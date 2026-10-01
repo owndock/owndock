@@ -352,15 +352,14 @@ func (s *MongoCutoverStore) Abort(
 			if route.Status != applicationroutebiz.StatusProvisioning {
 				continue
 			}
-			degraded, transitionErr := route.Degrade(failure,
-				"system:deployment-worker", s.now().UTC())
+			next, action, transitionErr := abortRoute(route, failure, s.now().UTC())
 			if transitionErr != nil {
 				return transitionErr
 			}
-			if _, saveErr := s.routes.Save(tx, degraded, route.Version); saveErr != nil {
+			if _, saveErr := s.routes.Save(tx, next, route.Version); saveErr != nil {
 				return saveErr
 			}
-			if auditErr := s.recordRouteAudit(tx, degraded, "application_route.degraded"); auditErr != nil {
+			if auditErr := s.recordRouteAudit(tx, next, action); auditErr != nil {
 				return auditErr
 			}
 		}
@@ -375,6 +374,21 @@ func (s *MongoCutoverStore) Abort(
 		}
 		return nil
 	})
+}
+
+func abortRoute(
+	route applicationroutebiz.ApplicationRoute,
+	failure applicationroutebiz.FailureCode,
+	now time.Time,
+) (applicationroutebiz.ApplicationRoute, string, error) {
+	if route.Observation != nil && route.Observation.Revision == route.Revision {
+		restored, err := route.ObserveReady(
+			*route.Observation, "system:deployment-worker", now,
+		)
+		return restored, "application_route.ready_restored", err
+	}
+	degraded, err := route.Degrade(failure, "system:deployment-worker", now)
+	return degraded, "application_route.degraded", err
 }
 
 func (s *MongoCutoverStore) recordRouteAudit(

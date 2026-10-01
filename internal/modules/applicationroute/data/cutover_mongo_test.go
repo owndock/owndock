@@ -89,6 +89,53 @@ func TestRouteDocumentRoundTripRetainsStableFailureCode(t *testing.T) {
 	}
 }
 
+func TestAbortRouteRestoresOnlyCurrentDesiredObservation(t *testing.T) {
+	route := cutoverTestRoute(t, "route-restored", "restored.example.com")
+	provisioning, err := route.Transition(
+		applicationroutebiz.StatusProvisioning, "controller", route.UpdatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observation := applicationroutebiz.Observation{Revision: provisioning.Revision,
+		DeploymentID: "deployment-old", CutoverSequence: 1,
+		ConfigDigest:      "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CertificateStatus: applicationroutebiz.CertificateStatusReady,
+		ObservedAt:        provisioning.UpdatedAt}
+	ready, err := provisioning.ObserveReady(
+		observation, "controller", provisioning.UpdatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provisioning, err = ready.Transition(
+		applicationroutebiz.StatusProvisioning, "controller", ready.UpdatedAt.Add(time.Second),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restored, action, err := abortRoute(
+		provisioning, applicationroutebiz.FailureBackendUnhealthy,
+		provisioning.UpdatedAt.Add(time.Second),
+	)
+	if err != nil || restored.Status != applicationroutebiz.StatusReady ||
+		restored.FailureCode != "" || action != "application_route.ready_restored" {
+		t.Fatalf("restored route/action = %+v/%q, %v", restored, action, err)
+	}
+
+	provisioning.Revision++
+	provisioning.Version++
+	degraded, action, err := abortRoute(
+		provisioning, applicationroutebiz.FailureBackendUnhealthy,
+		provisioning.UpdatedAt.Add(2*time.Second),
+	)
+	if err != nil || degraded.Status != applicationroutebiz.StatusDegraded ||
+		degraded.FailureCode != applicationroutebiz.FailureBackendUnhealthy ||
+		action != "application_route.degraded" {
+		t.Fatalf("degraded route/action = %+v/%q, %v", degraded, action, err)
+	}
+}
+
 func cutoverTestRoute(t *testing.T, id, hostname string) applicationroutebiz.ApplicationRoute {
 	t.Helper()
 	input := applicationroutebiz.Input{ID: id, OrganizationID: "organization-1", ProjectID: "project-1",
