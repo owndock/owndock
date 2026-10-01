@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY，并支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY；Agent Ingress 的类型化协议与跨重启 fence 也已实现，但 capability 默认关闭，固定 Gateway 与生产 wiring 尚未完成。Agent 支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、Ingress、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -115,9 +115,10 @@ runtime:
 - Runtime Inventory manifest/chunk/release/events 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 和 Event poll 每批最多携带 64 条规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
 - 部署切换水位只保存稳定容器槽位、最高 cutover sequence 和对应 Deployment ID，不保存完整命令或秘密；它独立于可淘汰的结果缓存，因此 Agent 重启或容器缺失后仍能拒绝旧命令；
 - `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Runtime Target `DELETE` 已接入 `retiring → canceling/drain → deployment.runtime.remove → deployment.cutover.release → 删除元数据` 的持久后台链路；
+- Ingress fence 独立保存 Host revision/config digest，以及所有见过的 Route revision、Deployment/cutover 水位和 active tombstone；完整配置移除 Route 后仍不淘汰该高水位。当前生产配置没有 `ingress.reconcile`，固定 Gateway 与显式容量配置接入前不要手工启用；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
-- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线，升级 Agent 不会因为二进制新增能力而自动扩大机器身份权限。
+- Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线；`ingress.reconcile` 也不会因二进制升级自动加入，避免在本机 Gateway 尚未配置时扩大机器身份权限。
 - 启用 `certificate_rotation` 时，`client_certificate_file` 与 `client_private_key_file` 必须指向同一个 `0600` PEM identity bundle。Agent 默认在到期前 7 天生成新密钥和 CSR；失败按 `retry_delay` 重试，单次请求受 `request_timeout` 限制。轮换写入器会在同目录创建受限临时文件，验证本机 CA、固定 SPIFFE Agent 身份、clientAuth、有效期和密钥配对后，以一次 rename 替换整个 bundle，并 fsync 文件与目录；无效或属于其他 Host/instance 的证书不会覆盖现有身份。每次新的 TLS 握手都会重新打开 bundle 并重复普通文件、禁止 symlink 和权限检查，因此替换后可以主动重连而不必重启 Agent。
 - 新 CSR、私钥和 rotation ID 会先保存到 bundle 旁的 `0600` pending 文件。请求成功但响应丢失或 Agent 重启时会复用同一请求；新证书安装成功后才删除 pending 文件。Server 最多允许旧证书继续建立普通连接 10 分钟，并在新证书首次完成 hello 后立即撤销旧证书的过渡资格。超过 10 分钟后，仍有效的旧证书只能凭原 rotation ID/CSR hash 取回已保存响应，不能建立控制流或发起新轮换。
 - 外部进程门禁会让第一次轮换响应在 Server 收到请求后丢失，停止并重启真实 Agent，再验证完全相同的 rotation ID/CSR、原子替换后的新证书以及后续 hello 的新证书序列号。启动恢复发生在控制流启动之前，因此轮换完成时会立即清理空闲 TLS 连接，避免后续 hello 复用仍携带旧证书的轮换连接；已有控制流场景仍会取消当前流，并在结束后再次清理连接。

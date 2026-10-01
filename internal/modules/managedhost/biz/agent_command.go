@@ -33,6 +33,9 @@ type AgentCommandResult = agentprotocol.AgentCommandResult
 type RuntimeProbeResult = agentprotocol.RuntimeProbeResult
 type RuntimeInventoryResult = agentprotocol.RuntimeInventoryResult
 type RuntimeInventoryManifest = agentprotocol.RuntimeInventoryManifest
+type IngressCommand = agentprotocol.IngressCommand
+type IngressRoute = agentprotocol.IngressRoute
+type IngressResult = agentprotocol.IngressResult
 
 const (
 	AgentCommandRuntimeProbe       = agentprotocol.AgentCommandRuntimeProbe
@@ -46,6 +49,7 @@ const (
 	AgentCommandInventoryChunk     = agentprotocol.AgentCommandInventoryChunk
 	AgentCommandInventoryRelease   = agentprotocol.AgentCommandInventoryRelease
 	AgentCommandInventoryEvents    = agentprotocol.AgentCommandInventoryEvents
+	AgentCommandIngressReconcile   = agentprotocol.AgentCommandIngressReconcile
 	AgentCommandSucceeded          = agentprotocol.AgentCommandSucceeded
 	AgentCommandFailed             = agentprotocol.AgentCommandFailed
 	RuntimeProbeReady              = agentprotocol.RuntimeProbeReady

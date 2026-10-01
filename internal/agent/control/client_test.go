@@ -61,6 +61,27 @@ type closeIdleTransport struct {
 	closed atomic.Int32
 }
 
+func TestDefaultCapabilitiesDoNotEnableUnwiredIngress(t *testing.T) {
+	client, err := NewClient(
+		&http.Client{},
+		&probeExecutorStub{},
+		ClientConfig{
+			Endpoint: "https://control.example.com/api/v1/agent/connect",
+			Identity: testIdentity(), HandshakeTimeout: time.Second,
+			ServerSilenceTimeout: 2 * time.Second, MaxFrameBytes: 64 * 1024,
+			MaxConcurrentCommands: 1,
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, capability := range client.config.Capabilities {
+		if capability == agentprotocol.CapabilityIngressReconcile {
+			t.Fatal("unconfigured client must not advertise ingress.reconcile")
+		}
+	}
+}
+
 func (transport *closeIdleTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	return nil, errors.New("unexpected request")
 }

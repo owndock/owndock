@@ -8,6 +8,8 @@
 - 控制协议当前只有 `v1`，负责 hello、心跳、类型化命令、结果和临时 Terminal frame；
 - capability 表示一张 Agent 身份在 `v1` 内被授权的功能上限，不等同于协议版本。
 
+新 capability 必须显式写入 enrollment 授权与 Agent 本机配置；二进制升级不能自动宣告它。当前 `ingress.reconcile` 遵循这一规则，并在固定 Gateway 与 production wiring 完成前保持默认关闭，因此升级现有 Agent 不会把入口管理权限带到旧身份或旧 Server。
+
 两个产品版本都声明 `v1`，只说明它们使用同一套 wire contract；只有混合版本测试通过，才能说明它们可以安全滚动升级。
 
 ## 当前强制边界

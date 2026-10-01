@@ -17,10 +17,29 @@ type CommandDocument struct {
 	Deployment   *DeploymentDocument       `json:"deployment,omitempty"`
 	Cutover      *CutoverDocument          `json:"cutover,omitempty"`
 	Inventory    *RuntimeInventoryDocument `json:"runtime_inventory,omitempty"`
+	Ingress      *IngressDocument          `json:"ingress,omitempty"`
 }
 
 type RuntimeProbeDocument struct {
 	RuntimeTargetID string `json:"runtime_target_id"`
+}
+
+type IngressDocument struct {
+	HostRevision uint64                 `json:"host_revision"`
+	ConfigDigest string                 `json:"config_digest"`
+	Routes       []IngressRouteDocument `json:"routes"`
+}
+
+type IngressRouteDocument struct {
+	RouteID         string         `json:"route_id"`
+	Revision        uint64         `json:"revision"`
+	DeploymentID    string         `json:"deployment_id"`
+	CutoverSequence uint64         `json:"cutover_sequence"`
+	RuntimeTargetID string         `json:"runtime_target_id"`
+	Hostname        string         `json:"hostname"`
+	BackendAlias    string         `json:"backend_alias"`
+	BackendPort     uint16         `json:"backend_port"`
+	TLSMode         IngressTLSMode `json:"tls_mode"`
 }
 
 type CutoverDocument struct {
@@ -115,6 +134,14 @@ func NewCommandDocument(command AgentCommand) *CommandDocument {
 			EventWaitSeconds: command.Inventory.EventWaitSeconds,
 		}
 	}
+	if command.Ingress != nil {
+		document.Ingress = &IngressDocument{HostRevision: command.Ingress.HostRevision,
+			ConfigDigest: command.Ingress.ConfigDigest,
+			Routes:       make([]IngressRouteDocument, len(command.Ingress.Routes))}
+		for index, route := range command.Ingress.Routes {
+			document.Ingress.Routes[index] = ingressRouteDocumentFromDomain(route)
+		}
+	}
 	return document
 }
 
@@ -150,7 +177,29 @@ func (d CommandDocument) Domain() AgentCommand {
 			EventWaitSeconds: d.Inventory.EventWaitSeconds,
 		}
 	}
+	if d.Ingress != nil {
+		command.Ingress = &IngressCommand{HostRevision: d.Ingress.HostRevision,
+			ConfigDigest: d.Ingress.ConfigDigest,
+			Routes:       make([]IngressRoute, len(d.Ingress.Routes))}
+		for index, route := range d.Ingress.Routes {
+			command.Ingress.Routes[index] = route.domain()
+		}
+	}
 	return command
+}
+
+func ingressRouteDocumentFromDomain(route IngressRoute) IngressRouteDocument {
+	return IngressRouteDocument{RouteID: route.RouteID, Revision: route.Revision,
+		DeploymentID: route.DeploymentID, CutoverSequence: route.CutoverSequence,
+		RuntimeTargetID: route.RuntimeTargetID, Hostname: route.Hostname,
+		BackendAlias: route.BackendAlias, BackendPort: route.BackendPort, TLSMode: route.TLSMode}
+}
+
+func (d IngressRouteDocument) domain() IngressRoute {
+	return IngressRoute{RouteID: d.RouteID, Revision: d.Revision,
+		DeploymentID: d.DeploymentID, CutoverSequence: d.CutoverSequence,
+		RuntimeTargetID: d.RuntimeTargetID, Hostname: d.Hostname,
+		BackendAlias: d.BackendAlias, BackendPort: d.BackendPort, TLSMode: d.TLSMode}
 }
 
 func newDeploymentDocument(

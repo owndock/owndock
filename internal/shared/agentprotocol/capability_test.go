@@ -15,6 +15,7 @@ func TestEveryCommandKindHasAnAdvertisedCapability(t *testing.T) {
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
 		AgentCommandInventoryEvents,
+		AgentCommandIngressReconcile,
 	}
 	advertised := make(map[string]struct{})
 	for _, capability := range SupportedCapabilities() {

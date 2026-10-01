@@ -124,7 +124,8 @@ func NewClient(
 	if len(config.Capabilities) == 0 {
 		for _, capability := range agentprotocol.SupportedCapabilities() {
 			if capability != agentprotocol.CapabilityTerminalContainer &&
-				capability != agentprotocol.CapabilityTerminalHost {
+				capability != agentprotocol.CapabilityTerminalHost &&
+				capability != agentprotocol.CapabilityIngressReconcile {
 				config.Capabilities = append(config.Capabilities, capability)
 			}
 		}

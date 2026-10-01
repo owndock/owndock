@@ -167,6 +167,58 @@ func TestCutoverReleaseCommandIsNarrowAndRoundTrips(t *testing.T) {
 	}
 }
 
+func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
+	routes := []IngressRoute{{RouteID: "route-1", Revision: 2,
+		DeploymentID: "deployment-2", CutoverSequence: 7, RuntimeTargetID: "target-1",
+		Hostname: "api.example.com", BackendAlias: "deployment-2", BackendPort: 8080,
+		TLSMode: IngressTLSAutomatic}}
+	digest, err := IngressConfigDigest(9, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := AgentCommand{ID: "ingress-command-1", Kind: AgentCommandIngressReconcile,
+		Deadline: time.Unix(1000, 0).UTC(), Ingress: &IngressCommand{
+			HostRevision: 9, ConfigDigest: digest, Routes: routes}}
+	if err := command.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	roundTrip := NewCommandDocument(command).Domain()
+	if !command.Equivalent(roundTrip) {
+		t.Fatalf("round trip = %+v", roundTrip)
+	}
+	result := AgentCommandResult{CommandID: command.ID, Status: AgentCommandSucceeded,
+		Ingress: &IngressResult{HostRevision: 9, ConfigDigest: digest}}
+	if err := result.Validate(command); err != nil {
+		t.Fatal(err)
+	}
+	wrong := result
+	wrong.Ingress = &IngressResult{HostRevision: 8, ConfigDigest: digest}
+	if !errors.Is(wrong.Validate(command), ErrResultInvalid) {
+		t.Fatal("result accepted a different Host revision")
+	}
+
+	unsafe := command
+	ingress := *command.Ingress
+	ingress.Routes = append([]IngressRoute(nil), routes...)
+	ingress.Routes[0].BackendAlias = "http://arbitrary-upstream"
+	unsafe.Ingress = &ingress
+	if !errors.Is(unsafe.Validate(), ErrCommandInvalid) {
+		t.Fatal("ingress accepted an arbitrary upstream")
+	}
+	duplicate := append([]IngressRoute(nil), routes...)
+	second := duplicate[0]
+	second.RouteID, second.DeploymentID, second.BackendAlias = "route-2", "deployment-3", "deployment-3"
+	duplicate = append(duplicate, second)
+	digest, err = IngressConfigDigest(10, duplicate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ingress = IngressCommand{HostRevision: 10, ConfigDigest: digest, Routes: duplicate}
+	if !errors.Is(ingress.Validate(), ErrCommandInvalid) {
+		t.Fatal("ingress accepted duplicate hostname")
+	}
+}
+
 func TestCommandDocumentRoundTripsDeploymentWithoutAliasingSecrets(t *testing.T) {
 	command := deploymentCommand(AgentCommandDeploymentPrepare)
 	command.Deployment.ImageDigest =

@@ -43,6 +43,7 @@ const (
 	AgentCommandInventoryChunk     AgentCommandKind = "runtime.inventory.chunk"
 	AgentCommandInventoryRelease   AgentCommandKind = "runtime.inventory.release"
 	AgentCommandInventoryEvents    AgentCommandKind = "runtime.inventory.events"
+	AgentCommandIngressReconcile   AgentCommandKind = "ingress.reconcile"
 )
 
 func (k AgentCommandKind) Valid() bool {
@@ -57,7 +58,8 @@ func (k AgentCommandKind) Valid() bool {
 		AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
-		AgentCommandInventoryEvents:
+		AgentCommandInventoryEvents,
+		AgentCommandIngressReconcile:
 		return true
 	default:
 		return false
@@ -72,6 +74,7 @@ type AgentCommand struct {
 	Deployment   *DeploymentCommand
 	Cutover      *CutoverCommand
 	Inventory    *RuntimeInventoryCommand
+	Ingress      *IngressCommand
 }
 
 type RuntimeProbeCommand struct {
@@ -124,7 +127,7 @@ func (c AgentCommand) Validate() error {
 	}
 	switch c.Kind {
 	case AgentCommandRuntimeProbe:
-		if c.Deployment != nil || c.Cutover != nil || c.Inventory != nil ||
+		if c.Deployment != nil || c.Cutover != nil || c.Inventory != nil || c.Ingress != nil ||
 			c.RuntimeProbe == nil ||
 			!validIdentifier(c.RuntimeProbe.RuntimeTargetID) {
 			return ErrCommandInvalid
@@ -133,13 +136,13 @@ func (c AgentCommand) Validate() error {
 		AgentCommandDeploymentStage,
 		AgentCommandDeploymentActivate,
 		AgentCommandDeploymentCancel:
-		if c.RuntimeProbe != nil || c.Cutover != nil || c.Inventory != nil ||
+		if c.RuntimeProbe != nil || c.Cutover != nil || c.Inventory != nil || c.Ingress != nil ||
 			c.Deployment == nil ||
 			!validDeploymentCommand(c.Kind, *c.Deployment) {
 			return ErrCommandInvalid
 		}
 	case AgentCommandRuntimeRemove, AgentCommandCutoverRelease:
-		if c.RuntimeProbe != nil || c.Deployment != nil || c.Inventory != nil ||
+		if c.RuntimeProbe != nil || c.Deployment != nil || c.Inventory != nil || c.Ingress != nil ||
 			c.Cutover == nil || !validCutoverCommand(*c.Cutover) {
 			return ErrCommandInvalid
 		}
@@ -147,9 +150,14 @@ func (c AgentCommand) Validate() error {
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
 		AgentCommandInventoryEvents:
-		if c.RuntimeProbe != nil || c.Deployment != nil || c.Cutover != nil ||
+		if c.RuntimeProbe != nil || c.Deployment != nil || c.Cutover != nil || c.Ingress != nil ||
 			c.Inventory == nil ||
 			!validInventoryCommand(c.Kind, *c.Inventory) {
+			return ErrCommandInvalid
+		}
+	case AgentCommandIngressReconcile:
+		if c.RuntimeProbe != nil || c.Deployment != nil || c.Cutover != nil || c.Inventory != nil ||
+			c.Ingress == nil || !validIngressCommand(*c.Ingress) {
 			return ErrCommandInvalid
 		}
 	default:
@@ -220,6 +228,14 @@ func (c AgentCommand) Fingerprint() ([sha256.Size]byte, error) {
 		writeFingerprintInt64(hasher, c.Inventory.EventSince.UTC().UnixNano())
 		writeFingerprintInt64(hasher, int64(c.Inventory.EventWaitSeconds))
 	}
+	if c.Ingress != nil {
+		writeFingerprintUint64(hasher, c.Ingress.HostRevision)
+		writeFingerprintString(hasher, c.Ingress.ConfigDigest)
+		writeFingerprintUint64(hasher, uint64(len(c.Ingress.Routes)))
+		for _, route := range c.Ingress.Routes {
+			writeIngressRouteFingerprint(hasher, route)
+		}
+	}
 	var fingerprint [sha256.Size]byte
 	copy(fingerprint[:], hasher.Sum(nil))
 	return fingerprint, nil
@@ -255,6 +271,7 @@ type AgentCommandResult struct {
 	ErrorCode    string
 	RuntimeProbe *RuntimeProbeResult
 	Inventory    *RuntimeInventoryResult
+	Ingress      *IngressResult
 }
 
 type RuntimeProbeResult struct {
@@ -284,7 +301,15 @@ func (r AgentCommandResult) Validate(command AgentCommand) error {
 	if err := r.ValidateShape(command.Kind); err != nil {
 		return err
 	}
-	if command.Inventory == nil || r.Status != AgentCommandSucceeded {
+	if r.Status != AgentCommandSucceeded {
+		return nil
+	}
+	if command.Ingress != nil && (r.Ingress == nil ||
+		r.Ingress.HostRevision != command.Ingress.HostRevision ||
+		r.Ingress.ConfigDigest != command.Ingress.ConfigDigest) {
+		return ErrResultInvalid
+	}
+	if command.Inventory == nil {
 		return nil
 	}
 	switch command.Kind {
@@ -318,7 +343,7 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 		}
 		switch kind {
 		case AgentCommandRuntimeProbe:
-			if r.RuntimeProbe == nil || r.Inventory != nil ||
+			if r.RuntimeProbe == nil || r.Inventory != nil || r.Ingress != nil ||
 				!r.RuntimeProbe.Status.Valid() {
 				return ErrResultInvalid
 			}
@@ -328,17 +353,17 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 			AgentCommandDeploymentCancel,
 			AgentCommandRuntimeRemove,
 			AgentCommandCutoverRelease:
-			if r.RuntimeProbe != nil || r.Inventory != nil {
+			if r.RuntimeProbe != nil || r.Inventory != nil || r.Ingress != nil {
 				return ErrResultInvalid
 			}
 		case AgentCommandInventoryPrepare:
-			if r.RuntimeProbe != nil || r.Inventory == nil ||
+			if r.RuntimeProbe != nil || r.Inventory == nil || r.Ingress != nil ||
 				!validInventoryManifest(r.Inventory.Manifest) ||
 				r.Inventory.Chunk != nil || r.Inventory.Events != nil {
 				return ErrResultInvalid
 			}
 		case AgentCommandInventoryChunk:
-			if r.RuntimeProbe != nil || r.Inventory == nil ||
+			if r.RuntimeProbe != nil || r.Inventory == nil || r.Ingress != nil ||
 				r.Inventory.Manifest != nil || r.Inventory.Chunk == nil ||
 				r.Inventory.Events != nil ||
 				r.Inventory.Chunk.Validate(
@@ -347,13 +372,18 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 				return ErrResultInvalid
 			}
 		case AgentCommandInventoryRelease:
-			if r.RuntimeProbe != nil || r.Inventory != nil {
+			if r.RuntimeProbe != nil || r.Inventory != nil || r.Ingress != nil {
 				return ErrResultInvalid
 			}
 		case AgentCommandInventoryEvents:
-			if r.RuntimeProbe != nil || r.Inventory == nil ||
+			if r.RuntimeProbe != nil || r.Inventory == nil || r.Ingress != nil ||
 				r.Inventory.Manifest != nil || r.Inventory.Chunk != nil ||
 				r.Inventory.Events == nil || r.Inventory.Events.Validate() != nil {
+				return ErrResultInvalid
+			}
+		case AgentCommandIngressReconcile:
+			if r.RuntimeProbe != nil || r.Inventory != nil || r.Ingress == nil ||
+				r.Ingress.HostRevision == 0 || !ingressDigest.MatchString(r.Ingress.ConfigDigest) {
 				return ErrResultInvalid
 			}
 		default:
@@ -361,7 +391,7 @@ func (r AgentCommandResult) ValidateShape(kind AgentCommandKind) error {
 		}
 	case AgentCommandFailed:
 		if !validErrorCode(r.ErrorCode) || r.RuntimeProbe != nil ||
-			r.Inventory != nil {
+			r.Inventory != nil || r.Ingress != nil {
 			return ErrResultInvalid
 		}
 	default:
@@ -377,7 +407,7 @@ func (r AgentCommandResult) Equivalent(other AgentCommandResult) bool {
 	}
 	switch {
 	case r.RuntimeProbe == nil && other.RuntimeProbe == nil:
-		return reflect.DeepEqual(r.Inventory, other.Inventory)
+		return reflect.DeepEqual(r.Inventory, other.Inventory) && reflect.DeepEqual(r.Ingress, other.Ingress)
 	case r.RuntimeProbe == nil || other.RuntimeProbe == nil:
 		return false
 	default:

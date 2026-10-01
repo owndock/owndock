@@ -361,6 +361,12 @@ type agentCommandResult struct {
 	ErrorCode    string                       `json:"error_code,omitempty"`
 	RuntimeProbe *agentRuntimeProbeResult     `json:"runtime_probe,omitempty"`
 	Inventory    *agentRuntimeInventoryResult `json:"runtime_inventory,omitempty"`
+	Ingress      *agentIngressResult          `json:"ingress,omitempty"`
+}
+
+type agentIngressResult struct {
+	HostRevision uint64 `json:"host_revision"`
+	ConfigDigest string `json:"config_digest"`
 }
 
 type agentRuntimeProbeResult struct {
@@ -410,6 +416,10 @@ func (r agentCommandResult) domain() biz.AgentCommandResult {
 				EventsTruncated:   manifest.EventsTruncated,
 			}
 		}
+	}
+	if r.Ingress != nil {
+		result.Ingress = &biz.IngressResult{HostRevision: r.Ingress.HostRevision,
+			ConfigDigest: r.Ingress.ConfigDigest}
 	}
 	return result
 }

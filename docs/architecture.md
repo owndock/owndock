@@ -82,7 +82,7 @@ Managed Host 是 Organization 资源；Runtime Target 是 Project 对该 Host �
 
 目标切换顺序是 candidate health、Mongo lease/Route revision/cutover fence、原子 route load、Host-header 私有探测、成功提交、有界 drain、旧 backend 回收。配置拒绝保留旧 route；加载成功后的探测失败必须在旧容器停止前回滚。Agent 为 Host 配置和 Route 保存不可淘汰水位，迟到命令不能覆盖较新 route。自动 HTTPS 还要求客户 DNS、80/443、公网/ACME 可达和持久证书卷；这些条件未满足时 Route 不能为 ready。
 
-该边界的控制面已实现：独立 `applicationroute` 模块不依赖其他模块的领域类型，data adapter 解析正式 Project/Application/Environment/Runtime Target 引用；MongoDB 以 Organization hostname 唯一索引和 version 条件替换提供并发 fence；正式 API 使用 Project 授权、Viewer 读取、Maintainer/Owner 写入和事务审计。代码仍只创建无宿主端口绑定的容器；Agent capability、固定 digest Gateway、切流编排和真实流量门禁完成前，不得宣称应用入口已交付。详细契约见 [Application ingress](application-ingress.md)。
+该边界的控制面已实现：独立 `applicationroute` 模块不依赖其他模块的领域类型，data adapter 解析正式 Project/Application/Environment/Runtime Target 引用；MongoDB 以 Organization hostname 唯一索引和 version 条件替换提供并发 fence；正式 API 使用 Project 授权、Viewer 读取、Maintainer/Owner 写入和事务审计。Agent 协议已增加类型化完整 desired config、canonical digest、Server dispatcher adapter 与默认关闭的独立 capability；本机受限原子状态保留 Host revision 和不可淘汰的 Route/Deployment/cutover 高水位，Gateway 只有返回预期 digest 才能提交 fence。代码仍只创建无宿主端口绑定的容器；固定 Caddy Gateway、生产 wiring、切流编排和真实流量门禁完成前，不得宣称应用入口已交付。详细契约见 [Application ingress](application-ingress.md)。
 
 ## Terminal Boundary
 

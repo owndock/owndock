@@ -81,6 +81,35 @@ func TestDockerExecutorReturnsAndCachesReady(t *testing.T) {
 	}
 }
 
+func TestDockerExecutorFailsClosedWithoutIngressGateway(t *testing.T) {
+	cache, err := NewFileResultCache(filepath.Join(t.TempDir(), "state"), 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor, err := NewDockerExecutor("/var/run/docker.sock", cache, noopCutoverStore{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes := []agentprotocol.IngressRoute{{RouteID: "route-1", Revision: 1,
+		DeploymentID: "deployment-1", CutoverSequence: 1, RuntimeTargetID: "target-1",
+		Hostname: "app.example.com", BackendAlias: "deployment-1", BackendPort: 8080,
+		TLSMode: agentprotocol.IngressTLSAutomatic}}
+	digest, err := agentprotocol.IngressConfigDigest(1, routes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := agentprotocol.AgentCommand{ID: "ingress-command-1",
+		Kind: agentprotocol.AgentCommandIngressReconcile, Deadline: time.Now().Add(time.Minute),
+		Ingress: &agentprotocol.IngressCommand{HostRevision: 1, ConfigDigest: digest, Routes: routes}}
+	result, err := executor.Execute(t.Context(), command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != agentprotocol.AgentCommandFailed || result.ErrorCode != "ingress_unavailable" {
+		t.Fatalf("Execute() = %#v, want ingress_unavailable", result)
+	}
+}
+
 func TestDockerExecutorSharesConcurrentCommandExecution(t *testing.T) {
 	cache, err := NewFileResultCache(
 		filepath.Join(t.TempDir(), "state"),

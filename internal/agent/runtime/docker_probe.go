@@ -45,6 +45,7 @@ type DockerExecutor struct {
 	pending             map[string]*pendingProbeExecution
 	inventorySnapshots  map[string]*inventorySnapshot
 	activeTerminals     map[string]struct{}
+	ingress             *IngressExecutor
 }
 
 // WithTerminalExecutionStore enables crash recovery for fixed-shell Docker
@@ -56,6 +57,14 @@ func (e *DockerExecutor) WithTerminalExecutionStore(
 		return ErrRuntimeExecutorMissing
 	}
 	e.terminalExecutions = store
+	return nil
+}
+
+func (e *DockerExecutor) WithIngress(executor *IngressExecutor) error {
+	if executor == nil {
+		return ErrRuntimeExecutorMissing
+	}
+	e.ingress = executor
 	return nil
 }
 
@@ -154,6 +163,8 @@ func (e *DockerExecutor) execute(
 		agentprotocol.AgentCommandInventoryRelease,
 		agentprotocol.AgentCommandInventoryEvents:
 		result, executeError = e.executeInventory(commandContext, command)
+	case agentprotocol.AgentCommandIngressReconcile:
+		result, executeError = e.reconcileIngress(commandContext, command)
 	default:
 		return agentprotocol.AgentCommandResult{},
 			agentprotocol.ErrCommandInvalid
@@ -176,6 +187,31 @@ func (e *DockerExecutor) execute(
 		return agentprotocol.AgentCommandResult{}, err
 	}
 	return result, e.store(command, result)
+}
+
+func (e *DockerExecutor) reconcileIngress(ctx context.Context, command agentprotocol.AgentCommand) (agentprotocol.AgentCommandResult, error) {
+	if e.ingress == nil {
+		return agentprotocol.AgentCommandResult{CommandID: command.ID,
+			Status: agentprotocol.AgentCommandFailed, ErrorCode: "ingress_unavailable"}, nil
+	}
+	observation, err := e.ingress.Reconcile(ctx, *command.Ingress)
+	if err == nil {
+		return agentprotocol.AgentCommandResult{CommandID: command.ID,
+			Status: agentprotocol.AgentCommandSucceeded, Ingress: &observation}, nil
+	}
+	code := "ingress_gateway_unavailable"
+	switch {
+	case errors.Is(err, ErrIngressFenceStale):
+		code = "ingress_fence_stale"
+	case errors.Is(err, ErrIngressFenceConflict):
+		code = "ingress_fence_conflict"
+	case errors.Is(err, ErrIngressStoreFull):
+		code = "ingress_state_full"
+	case errors.Is(err, ErrInvalidIngressStore), errors.Is(err, ErrIngressConfiguration):
+		code = "ingress_configuration"
+	}
+	return agentprotocol.AgentCommandResult{CommandID: command.ID,
+		Status: agentprotocol.AgentCommandFailed, ErrorCode: code}, nil
 }
 
 func (e *DockerExecutor) releaseCutover(
