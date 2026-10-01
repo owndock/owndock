@@ -83,6 +83,15 @@ func TestAgentManagerRejectsTamperingAndVersionReplacement(t *testing.T) {
 	conflict := createPackage(t, repository, "2.0.0", "different")
 	runManager(t, root, conflict, false, "install")
 	assertCurrent(t, root, "2.0.0")
+	packageConflict := createPackage(t, repository, "2.0.0", "original")
+	if err := os.WriteFile(
+		filepath.Join(packageConflict, "owndock-ingress-bootstrap.json"),
+		[]byte("{}\n"), 0o640,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runManager(t, root, packageConflict, false, "install")
+	assertCurrent(t, root, "2.0.0")
 	value, err := os.ReadFile(filepath.Join(root, "opt/owndock-agent/releases/2.0.0/owndock-agent"))
 	if err != nil {
 		t.Fatal(err)
@@ -121,7 +130,11 @@ func TestSystemdUnitKeepsConfigurationReadOnlyAndIdentityWritable(t *testing.T) 
 func createPackage(t *testing.T, repository, version, marker string) string {
 	t.Helper()
 	directory := t.TempDir()
-	for _, name := range []string{"owndock-agentctl", "owndock-agent.service"} {
+	for _, name := range []string{
+		"owndock-agentctl", "owndock-agent.service", "owndock-ingress.service",
+		"owndock-ingress.compose.yaml", "owndock-ingress-bootstrap.json",
+		"owndock-ingress-image.json",
+	} {
 		value, err := os.ReadFile(filepath.Join(repository, "packaging/agent", name))
 		if err != nil {
 			t.Fatal(err)
@@ -129,6 +142,8 @@ func createPackage(t *testing.T, repository, version, marker string) string {
 		mode := os.FileMode(0o644)
 		if name == "owndock-agentctl" {
 			mode = 0o755
+		} else if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".json") {
+			mode = 0o640
 		}
 		if err := os.WriteFile(filepath.Join(directory, name), value, mode); err != nil {
 			t.Fatal(err)

@@ -65,6 +65,7 @@ type Options struct {
 	AgentVersion       string
 	Capabilities       []string
 	HostTerminal       bool
+	Ingress            bool
 	RequestTimeout     time.Duration
 	Paths              Paths
 	Now                func() time.Time
@@ -105,6 +106,7 @@ type pendingEnrollment struct {
 	AgentVersion       string             `json:"agent_version"`
 	Capabilities       []string           `json:"capabilities"`
 	HostTerminal       bool               `json:"host_terminal"`
+	Ingress            bool               `json:"ingress"`
 	CSRPEM             []byte             `json:"csr_pem,omitempty"`
 	PrivateKeyPEM      []byte             `json:"private_key_pem"`
 	Config             agentconfig.Config `json:"config,omitzero"`
@@ -114,8 +116,8 @@ type pendingEnrollment struct {
 }
 
 // StandardCapabilities enables deployment, inventory and container terminal
-// support. Host terminal access remains an explicit enrollment decision.
-func StandardCapabilities(hostTerminal bool) []string {
+// support. Host terminal and ingress access remain explicit enrollment decisions.
+func StandardCapabilities(hostTerminal, ingress bool) []string {
 	values := []string{
 		agentprotocol.CapabilityRuntimeProbe,
 		agentprotocol.CapabilityDeploymentPrepare,
@@ -132,6 +134,9 @@ func StandardCapabilities(hostTerminal bool) []string {
 	}
 	if hostTerminal {
 		values = append(values, agentprotocol.CapabilityTerminalHost)
+	}
+	if ingress {
+		values = append(values, agentprotocol.CapabilityIngressReconcile)
 	}
 	return values
 }
@@ -178,6 +183,7 @@ func Provision(ctx context.Context, options Options, token []byte) (Result, erro
 			InstanceID: instanceID, AgentVersion: options.AgentVersion,
 			Capabilities: append([]string(nil), options.Capabilities...),
 			HostTerminal: options.HostTerminal,
+			Ingress:      options.Ingress,
 			CSRPEM:       csrPEM, PrivateKeyPEM: privateKeyPEM,
 		}
 		if err := persistPending(pendingPath, pending); err != nil {
@@ -292,6 +298,7 @@ func (pending pendingEnrollment) matches(options Options, instanceID string) boo
 		pending.ControlEndpoint == options.ControlEndpoint && pending.ServerCAFile == options.ServerCAFile &&
 		pending.InstanceID == instanceID && pending.AgentVersion == options.AgentVersion &&
 		pending.HostTerminal == options.HostTerminal &&
+		pending.Ingress == options.Ingress &&
 		equalStrings(pending.Capabilities, options.Capabilities) &&
 		len(pending.CSRPEM) > 0 && len(pending.CSRPEM) <= 16*1024 &&
 		len(pending.PrivateKeyPEM) <= maximumMaterialBytes
@@ -310,6 +317,7 @@ func normalizeOptions(options Options) (Options, *url.URL, error) {
 	if !validVersion.MatchString(options.AgentVersion) || len(options.AgentVersion) > 64 ||
 		agentconfig.ValidateCapabilities(options.Capabilities) != nil ||
 		hasCapability(options.Capabilities, agentprotocol.CapabilityTerminalHost) != options.HostTerminal ||
+		hasCapability(options.Capabilities, agentprotocol.CapabilityIngressReconcile) != options.Ingress ||
 		validatePaths(options.Paths) != nil {
 		return Options{}, nil, ErrInvalidEnrollment
 	}
@@ -574,6 +582,7 @@ func provisionedConfig(options Options, identity agentcontrol.Identity) agentcon
 	config.Runtime.StateDirectory = options.Paths.StateDirectory
 	config.HostTerminal.Enabled = options.HostTerminal
 	config.HostTerminal.User = "owndock-agent"
+	config.Ingress.Enabled = options.Ingress
 	config.CertificateRotation.Enabled = true
 	return config
 }

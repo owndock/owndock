@@ -22,7 +22,21 @@ import (
 	"time"
 
 	agentconfig "github.com/owndock/owndock/internal/agent/config"
+	"github.com/owndock/owndock/internal/shared/agentprotocol"
 )
+
+func TestStandardCapabilitiesRequireExplicitIngress(t *testing.T) {
+	without := StandardCapabilities(false, false)
+	with := StandardCapabilities(false, true)
+	for _, capability := range without {
+		if capability == agentprotocol.CapabilityIngressReconcile {
+			t.Fatal("standard capabilities enabled ingress without an explicit decision")
+		}
+	}
+	if with[len(with)-1] != agentprotocol.CapabilityIngressReconcile {
+		t.Fatalf("explicit ingress capabilities = %#v", with)
+	}
+}
 
 func TestProvisionExchangesTokenAndCommitsValidatedFiles(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
@@ -149,7 +163,7 @@ func TestProvisionRejectsUnsafeTokenAndEndpoint(t *testing.T) {
 		EnrollmentEndpoint: "http://server.example/api/v1/agent/enrollments:exchange",
 		ControlEndpoint:    "https://control.example/api/v1/agent/connect",
 		AgentVersion:       "1.0.0",
-		Capabilities:       StandardCapabilities(false),
+		Capabilities:       StandardCapabilities(false, false),
 		Paths:              paths,
 	}
 	if _, err := Provision(context.Background(), options, []byte("short")); !errors.Is(err, ErrInvalidEnrollment) {
@@ -312,7 +326,7 @@ func testOptions(server *enrollmentServer, paths Paths, now time.Time) Options {
 		ControlEndpoint:    "https://control.example:8443/api/v1/agent/connect",
 		ServerCAFile:       server.caFile,
 		AgentVersion:       "1.2.3",
-		Capabilities:       StandardCapabilities(false),
+		Capabilities:       StandardCapabilities(false, false),
 		RequestTimeout:     5 * time.Second,
 		Paths:              paths,
 		Now:                func() time.Time { return now },

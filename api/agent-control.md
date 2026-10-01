@@ -1,6 +1,6 @@
 # Agent Control Protocol v1
 
-> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory/Ingress command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、部署与 Ingress 持久 fence、受限容器终端和固定身份主机 PTY 也已实现。Ingress capability 默认关闭，固定 Gateway 和生产 wiring 尚未完成。首次 enrollment 已支持本地生成密钥、严格 HTTPS/证书身份校验、完全相同请求的短时响应恢复和原子落盘；Agent 证书也支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。版本化安装包、Sigstore keyless 发布签名/离线验签、systemd unit、原子升级和本机回滚已经具备；首个受保护正式 Tag、跨控制面实例断流与多主机故障系统验收仍未完成。
+> 状态：Server 端连接、认证、版本协商、心跳，以及类型化 probe/部署/Runtime Inventory/Ingress command/result 和容器/主机终端会话复用已实现；`owndock-agent` 控制客户端、抖动退避重连、本机 Docker 执行、跨重启小结果缓存、Inventory 内存快照、部署与 Ingress 持久 fence、固定 Caddy JSON/Unix Socket Gateway adapter、受限容器终端和固定身份主机 PTY 也已实现。Ingress capability 默认关闭，安装包可显式启用固定 digest Gateway；Server Deployment 编排和真实主机验收尚未完成。首次 enrollment 已支持本地生成密钥、严格 HTTPS/证书身份校验、完全相同请求的短时响应恢复和原子落盘；Agent 证书也支持到期前自动轮换、响应丢失恢复、短时双证书过渡和新连接确认。版本化安装包、Sigstore keyless 发布签名/离线验签、systemd unit、原子升级和本机回滚已经具备；首个受保护正式 Tag、跨控制面实例断流与多主机故障系统验收仍未完成。
 
 Agent 控制协议运行在独立的 mTLS 监听端口，不与浏览器 Bearer API 共用认证边界。Agent 主动发起：
 
@@ -209,6 +209,7 @@ Server 接受并缓存结果后给出确认，Agent 之后才能安全清理自�
 - 每条新命令下发前都会检查当前已认证 hello 是否声明该 command capability；未声明时命令不会入队，Deployment Gateway 返回 `unsupported_target`；
 - 已完成结果保存在 Server 进程内的全局有界缓存中，默认最多 256 条；缓存只保留 command kind、SHA-256 指纹和安全结果，不保留完整命令或秘密；同一进程内重连后可重放结果，Server 重启或缓存淘汰后不能把它当作持久化事实；
 - Runtime Inventory 四类命令是例外：chunk 可能接近 frame 上限，prepare 对应 Agent 内存快照，events 是短时实时结果，都不能作为跨重启事实，因此 Agent 磁盘缓存和 Server 已完成结果缓存都明确跳过它们；快照重试会重新下发同一 observation/index，Agent 进程仍在时从同一内存快照返回，Agent 重启后返回 snapshot missing 并重新开始 observation；
+- `ingress.reconcile` 也不进入通用结果缓存。每次重放都必须到达 Agent 的持久 fence，并通过 Caddy config digest metadata ID 核对当前或 resume 后的实际配置；否则 Gateway 丢失 autosave 后可能回放旧“成功”而没有恢复 route；
 - command deadline 到期、Agent 断线、Host 被禁用或新 session 替换旧 session 时，所有仍在等待的调用都会得到明确失败；
 - 重复且完全相同的结果可安全确认；未知、冲突或结构不匹配的结果会关闭当前协议连接；
 - Project Runtime Target 已有受 RBAC 保护的 probe API，Server 侧会从数据库 Target/Host 映射到 `runtime.probe` command；Agent 控制客户端通过受信任的本机 Unix Socket Ping Docker，并把安全结果写入 `0600`、原子替换、有界的磁盘缓存。缓存 v2 只保存 command kind、SHA-256 指纹和安全结果，不保存 Runtime Target ID、Registry authorization、Environment 值或原始错误；旧版只含 probe 标识的缓存可以读取，并在后续写入时升级。Agent Control Server 启用后，composition root 会把 Agent prober 与已实现的 Deployment Gateway 配套注册；离线或未启用仍安全返回不可达/不可用，不会回退 direct。
@@ -257,7 +258,7 @@ Agent 只在网关返回完全相同的 digest 后，原子提交 Host 和 Route
 }
 ```
 
-稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关错误不进入 wire 或持久结果。当前 capability 与 fence 已实现，但默认配置不会宣告该能力；固定 Gateway 和本机生产 wiring 完成前不能据此报告公网入口 ready。
+稳定错误为 `ingress_unavailable`、`ingress_gateway_unavailable`、`ingress_port_conflict`、`ingress_fence_stale`、`ingress_fence_conflict`、`ingress_state_full` 和 `ingress_configuration`；原始网关错误不进入 wire 或持久结果。当前 capability、fence、固定 Gateway adapter 与显式本机 wiring 已实现，但默认配置不会宣告该能力；Server 切流编排和真实流量验收完成前不能据此报告公网入口 ready。
 
 ## 终端会话复用
 

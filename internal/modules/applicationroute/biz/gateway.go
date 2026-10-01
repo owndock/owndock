@@ -11,6 +11,7 @@ var (
 	ErrGatewayFenceConflict = errors.New("application ingress gateway fence conflicts")
 	ErrGatewayConfiguration = errors.New("application ingress gateway configuration is invalid")
 	ErrGatewayStateFull     = errors.New("application ingress gateway state is full")
+	ErrGatewayPortConflict  = errors.New("application ingress public ports are unavailable")
 )
 
 type GatewayRoute struct {

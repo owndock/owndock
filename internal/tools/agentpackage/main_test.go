@@ -19,10 +19,14 @@ func TestBuildPackageIsDeterministicAndSelfVerifying(t *testing.T) {
 		value string
 		mode  os.FileMode
 	}{
-		"owndock-agent":         {value: "agent-binary", mode: 0o755},
-		"owndock-agentctl":      {value: "manager", mode: 0o755},
-		"owndock-agent.service": {value: "unit", mode: 0o644},
-		"agent.yaml":            {value: "control: {}", mode: 0o640},
+		"owndock-agent":                  {value: "agent-binary", mode: 0o755},
+		"owndock-agentctl":               {value: "manager", mode: 0o755},
+		"owndock-agent.service":          {value: "unit", mode: 0o644},
+		"owndock-ingress.service":        {value: "ingress-unit", mode: 0o644},
+		"owndock-ingress.compose.yaml":   {value: "services: {}", mode: 0o640},
+		"owndock-ingress-bootstrap.json": {value: "{}", mode: 0o640},
+		"owndock-ingress-image.json":     {value: "{}", mode: 0o644},
+		"agent.yaml":                     {value: "control: {}", mode: 0o640},
 	}
 	for name, file := range files {
 		if err := os.WriteFile(filepath.Join(directory, name), []byte(file.value), file.mode); err != nil {
@@ -30,11 +34,15 @@ func TestBuildPackageIsDeterministicAndSelfVerifying(t *testing.T) {
 		}
 	}
 	base := packageConfig{
-		Binary:        filepath.Join(directory, "owndock-agent"),
-		Manager:       filepath.Join(directory, "owndock-agentctl"),
-		ServiceUnit:   filepath.Join(directory, "owndock-agent.service"),
-		ConfigExample: filepath.Join(directory, "agent.yaml"),
-		Version:       "1.2.3", GOOS: "linux", GOARCH: "amd64",
+		Binary:           filepath.Join(directory, "owndock-agent"),
+		Manager:          filepath.Join(directory, "owndock-agentctl"),
+		ServiceUnit:      filepath.Join(directory, "owndock-agent.service"),
+		IngressUnit:      filepath.Join(directory, "owndock-ingress.service"),
+		IngressCompose:   filepath.Join(directory, "owndock-ingress.compose.yaml"),
+		IngressBootstrap: filepath.Join(directory, "owndock-ingress-bootstrap.json"),
+		IngressImageLock: filepath.Join(directory, "owndock-ingress-image.json"),
+		ConfigExample:    filepath.Join(directory, "agent.yaml"),
+		Version:          "1.2.3", GOOS: "linux", GOARCH: "amd64",
 	}
 	first := base
 	first.OutputDir = filepath.Join(directory, "first")
@@ -78,6 +86,10 @@ func TestBuildPackageIsDeterministicAndSelfVerifying(t *testing.T) {
 		"owndock-agent_1.2.3_linux_amd64/owndock-agent.service",
 		"owndock-agent_1.2.3_linux_amd64/owndock-agent.sha256",
 		"owndock-agent_1.2.3_linux_amd64/owndock-agentctl",
+		"owndock-agent_1.2.3_linux_amd64/owndock-ingress-bootstrap.json",
+		"owndock-agent_1.2.3_linux_amd64/owndock-ingress-image.json",
+		"owndock-agent_1.2.3_linux_amd64/owndock-ingress.compose.yaml",
+		"owndock-agent_1.2.3_linux_amd64/owndock-ingress.service",
 	}
 	if !reflect.DeepEqual(entries.names, expectedNames) {
 		t.Fatalf("archive entries = %#v", entries.names)

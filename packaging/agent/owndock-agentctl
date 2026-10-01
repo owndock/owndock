@@ -4,8 +4,10 @@ set -eu
 
 PROGRAM=owndock-agentctl
 SERVICE=owndock-agent.service
+INGRESS_SERVICE=owndock-ingress.service
 AGENT_USER=owndock-agent
 AGENT_GROUP=owndock-agent
+INGRESS_USER=owndock-ingress
 SCRIPT_DIR=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
 INSTALL_ROOT=${OWNDOCK_AGENT_INSTALL_ROOT:-/}
 OFFLINE=${OWNDOCK_AGENT_OFFLINE:-0}
@@ -77,7 +79,12 @@ CURRENT_LINK=$OPT_DIR/current
 CONFIG_DIR=$(root_path /etc/owndock)
 STATE_DIR=$(root_path /var/lib/owndock-agent)
 IDENTITY_DIR=$STATE_DIR/identity
+INGRESS_STATE_DIR=$(root_path /var/lib/owndock-ingress)
+INGRESS_DATA_DIR=$INGRESS_STATE_DIR/data
+INGRESS_CONFIG_DIR=$INGRESS_STATE_DIR/config
 UNIT_PATH=$(root_path /etc/systemd/system/$SERVICE)
+INGRESS_UNIT_PATH=$(root_path /etc/systemd/system/$INGRESS_SERVICE)
+INGRESS_ENV=$(root_path /etc/owndock/ingress.env)
 MANAGER_PATH=$(root_path /usr/local/sbin/$PROGRAM)
 
 require_production_host() {
@@ -118,6 +125,23 @@ create_account() {
         *) fail "existing Agent account must use a non-login shell" ;;
     esac
     usermod -a -G docker "$AGENT_USER"
+    if ! id "$INGRESS_USER" >/dev/null 2>&1; then
+        nologin=/usr/sbin/nologin
+        [ -x "$nologin" ] || nologin=/sbin/nologin
+        [ -x "$nologin" ] || fail "nologin shell is unavailable"
+        useradd --system --gid "$AGENT_GROUP" --home-dir /var/lib/owndock-ingress \
+            --shell "$nologin" "$INGRESS_USER"
+    fi
+    ingress_account=$(getent passwd "$INGRESS_USER") || fail "Ingress account is unavailable"
+    ingress_shell=$(printf '%s\n' "$ingress_account" | awk -F: '{print $7}')
+    [ "$(printf '%s\n' "$ingress_account" | awk -F: '{print $6}')" = /var/lib/owndock-ingress ] &&
+        [ "$(id -gn "$INGRESS_USER")" = "$AGENT_GROUP" ] ||
+        fail "existing Ingress account has an unsafe identity or home"
+    case "$ingress_shell" in
+        */nologin|*/false) ;;
+        *) fail "existing Ingress account must use a non-login shell" ;;
+    esac
+    usermod -a -G docker "$INGRESS_USER"
 }
 
 install_directories() {
@@ -125,10 +149,13 @@ install_directories() {
         install -d -o root -g root -m 0755 "$OPT_DIR" "$RELEASES_DIR"
         install -d -o root -g "$AGENT_GROUP" -m 0750 "$CONFIG_DIR"
         install -d -o "$AGENT_USER" -g "$AGENT_GROUP" -m 0700 "$STATE_DIR" "$IDENTITY_DIR"
+        install -d -o "$INGRESS_USER" -g "$AGENT_GROUP" -m 0700 \
+            "$INGRESS_STATE_DIR" "$INGRESS_DATA_DIR" "$INGRESS_CONFIG_DIR"
         install -d -o root -g root -m 0755 "$(dirname "$UNIT_PATH")" "$(dirname "$MANAGER_PATH")"
     else
         install -d -m 0755 "$OPT_DIR" "$RELEASES_DIR" "$CONFIG_DIR"
         install -d -m 0700 "$STATE_DIR" "$IDENTITY_DIR"
+        install -d -m 0700 "$INGRESS_STATE_DIR" "$INGRESS_DATA_DIR" "$INGRESS_CONFIG_DIR"
         install -d -m 0755 "$(dirname "$UNIT_PATH")" "$(dirname "$MANAGER_PATH")"
     fi
 }
@@ -186,6 +213,10 @@ verify_installed_release() {
     verify_checksum "$release/owndock-agent" "$release/owndock-agent.sha256"
     verify_version "$release/owndock-agent" "$version"
     [ -f "$release/owndock-agent.service" ] && [ ! -L "$release/owndock-agent.service" ] || fail "installed Agent service unit is unsafe"
+    for ingress_file in owndock-ingress.service owndock-ingress.compose.yaml owndock-ingress-bootstrap.json owndock-ingress-image.json; do
+        [ -f "$release/$ingress_file" ] && [ ! -L "$release/$ingress_file" ] ||
+            fail "installed Ingress package file is unsafe"
+    done
 }
 
 acquire_lock() {
@@ -238,6 +269,15 @@ service_active() {
     [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$SERVICE"
 }
 
+ingress_service_active() {
+    [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$INGRESS_SERVICE"
+}
+
+restart_ingress_stably() {
+    systemctl restart "$INGRESS_SERVICE" || return 1
+    [ -S /run/owndock-ingress/admin.sock ] && systemctl is-active --quiet "$INGRESS_SERVICE"
+}
+
 restart_service_stably() {
     systemctl restart "$SERVICE" || return 1
     sleep "$SERVICE_STARTUP_GRACE_SECONDS"
@@ -259,9 +299,13 @@ install_release() {
     binary=$SCRIPT_DIR/owndock-agent
     checksum=$SCRIPT_DIR/owndock-agent.sha256
     unit=$SCRIPT_DIR/owndock-agent.service
+    ingress_unit=$SCRIPT_DIR/owndock-ingress.service
+    ingress_compose=$SCRIPT_DIR/owndock-ingress.compose.yaml
+    ingress_bootstrap=$SCRIPT_DIR/owndock-ingress-bootstrap.json
+    ingress_image_lock=$SCRIPT_DIR/owndock-ingress-image.json
     example=$SCRIPT_DIR/agent.yaml.example
     manager=$SCRIPT_DIR/owndock-agentctl
-    for required in "$unit" "$example" "$manager"; do
+    for required in "$unit" "$ingress_unit" "$ingress_compose" "$ingress_bootstrap" "$ingress_image_lock" "$example" "$manager"; do
         [ -f "$required" ] && [ ! -L "$required" ] || fail "package file is missing or unsafe: $(basename "$required")"
     done
     verify_checksum "$binary" "$checksum"
@@ -278,13 +322,26 @@ install_release() {
         package_digest=$(read_expected_checksum "$checksum")
         installed_digest=$(read_expected_checksum "$release/owndock-agent.sha256")
         [ "$package_digest" = "$installed_digest" ] || fail "this version is already installed with different content"
-        [ "$(sha256_file "$unit")" = "$(sha256_file "$release/owndock-agent.service")" ] || fail "this version is already installed with a different service unit"
+        for package_file in \
+            owndock-agent.service \
+            owndock-ingress.service \
+            owndock-ingress.compose.yaml \
+            owndock-ingress-bootstrap.json \
+            owndock-ingress-image.json
+        do
+            [ "$(sha256_file "$SCRIPT_DIR/$package_file")" = "$(sha256_file "$release/$package_file")" ] ||
+                fail "this version is already installed with different package content"
+        done
     else
         temporary=$RELEASES_DIR/.${version}.$$
         install -d -m 0755 "$temporary"
         install -m 0755 "$binary" "$temporary/owndock-agent"
         install -m 0644 "$checksum" "$temporary/owndock-agent.sha256"
         install -m 0644 "$unit" "$temporary/owndock-agent.service"
+        install -m 0644 "$ingress_unit" "$temporary/owndock-ingress.service"
+        install -m 0640 "$ingress_compose" "$temporary/owndock-ingress.compose.yaml"
+        install -m 0640 "$ingress_bootstrap" "$temporary/owndock-ingress-bootstrap.json"
+        install -m 0644 "$ingress_image_lock" "$temporary/owndock-ingress-image.json"
         install -m 0644 "$SCRIPT_DIR/VERSION" "$temporary/VERSION"
         verify_version "$temporary/owndock-agent" "$version"
         mv "$temporary" "$release"
@@ -293,19 +350,41 @@ install_release() {
     if [ -e "$UNIT_PATH" ] && [ ! -L "$UNIT_PATH" ]; then
         fail "existing systemd unit is not an OwnDock-managed symlink"
     fi
+    if [ -e "$INGRESS_UNIT_PATH" ] && [ ! -L "$INGRESS_UNIT_PATH" ]; then
+        fail "existing Ingress systemd unit is not an OwnDock-managed symlink"
+    fi
     install -m 0640 "$example" "$CONFIG_DIR/agent.yaml.example"
     install -m 0755 "$manager" "$MANAGER_PATH"
     atomic_link /opt/owndock-agent/current/owndock-agent.service "$UNIT_PATH"
+    atomic_link /opt/owndock-agent/current/owndock-ingress.service "$INGRESS_UNIT_PATH"
     atomic_switch "$version"
     if [ "$INSTALL_ROOT" = / ]; then
         chown root:"$AGENT_GROUP" "$CONFIG_DIR/agent.yaml.example"
+        ingress_uid=$(id -u "$INGRESS_USER")
+        ingress_gid=$(getent group "$AGENT_GROUP" | awk -F: '{print $3}')
+        temporary_env=$CONFIG_DIR/.ingress.env.$$
+        (umask 0027; printf 'OWNDOCK_INGRESS_UID=%s\nOWNDOCK_INGRESS_GID=%s\n' \
+            "$ingress_uid" "$ingress_gid" > "$temporary_env")
+        chown root:"$AGENT_GROUP" "$temporary_env"
+        chmod 0640 "$temporary_env"
+        mv -f "$temporary_env" "$INGRESS_ENV"
         systemctl daemon-reload
         was_active=false
         service_active && was_active=true
+        was_ingress_active=false
+        ingress_service_active && was_ingress_active=true
+        if [ "$was_ingress_active" = true ] && ! restart_ingress_stably; then
+            restore_target "$previous"
+            systemctl daemon-reload
+            restart_ingress_stably || fail "Ingress upgrade failed and the previous release could not be restored"
+            fail "Ingress upgrade failed; previous release was restored"
+        fi
         if [ "$was_active" = true ] || [ "$start" = true ]; then
             [ -f "$CONFIG_DIR/agent.yaml" ] && [ ! -L "$CONFIG_DIR/agent.yaml" ] || {
                 restore_target "$previous"
                 systemctl daemon-reload
+                [ "$was_ingress_active" != true ] || restart_ingress_stably ||
+                    fail "Agent restart failed and the previous Ingress release could not be restored"
                 fail "create /etc/owndock/agent.yaml before starting the service"
             }
             if ! restart_service_stably; then
@@ -336,6 +415,11 @@ enroll_agent() {
     valid_version "$version" || fail "current Agent release is invalid"
     verify_installed_release "$version"
     [ -L "$UNIT_PATH" ] || fail "install the Agent systemd unit before enrollment"
+    [ -L "$INGRESS_UNIT_PATH" ] || fail "install the Ingress systemd unit before enrollment"
+    enable_ingress=false
+    for argument in "$@"; do
+        [ "$argument" != --enable-ingress ] || enable_ingress=true
+    done
     "$CURRENT_LINK/owndock-agent" enroll "$@"
     for installed in "$CONFIG_DIR/agent.yaml" "$CONFIG_DIR/agent-ca.pem"; do
         [ -f "$installed" ] && [ ! -L "$installed" ] || fail "Agent enrollment did not install required files"
@@ -349,6 +433,13 @@ enroll_agent() {
     chown "$AGENT_USER":"$AGENT_GROUP" "$identity" "$instance"
     chmod 0600 "$identity" "$instance"
     systemctl daemon-reload
+    if [ "$enable_ingress" = true ]; then
+        [ -x /usr/bin/docker ] || fail "Docker must be installed at /usr/bin/docker for managed ingress"
+        docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is required for managed ingress"
+        if ! systemctl enable --now "$INGRESS_SERVICE"; then
+            fail "Agent enrollment completed but the managed Ingress Gateway failed to start"
+        fi
+    fi
     if ! restart_service_stably; then
         fail "Agent enrollment completed but the service failed to start; credentials were retained"
     fi
@@ -381,13 +472,23 @@ rollback_release() {
     }
     was_active=false
     service_active && was_active=true
+    was_ingress_active=false
+    ingress_service_active && was_ingress_active=true
     atomic_switch "$version"
     if [ "$INSTALL_ROOT" = / ]; then
         systemctl daemon-reload
+        if [ "$was_ingress_active" = true ] && ! restart_ingress_stably; then
+            restore_target "$previous"
+            systemctl daemon-reload
+            restart_ingress_stably || fail "rollback failed and the previous Ingress release could not be restored"
+            fail "Ingress rollback failed; previous release was restored"
+        fi
         if [ "$was_active" = true ]; then
             if ! restart_service_stably; then
                 restore_target "$previous"
                 systemctl daemon-reload
+                [ "$was_ingress_active" != true ] || restart_ingress_stably ||
+                    fail "rollback failed and the previous Ingress release could not be restored"
                 restart_service_stably || fail "rollback failed and the previous release could not be restored"
                 fail "rollback restart failed; previous release was restored"
             fi

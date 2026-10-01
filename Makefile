@@ -203,9 +203,14 @@ test-release-candidate: check test-community-deployment
 test-agent-package:
 	go test ./packaging/agent ./internal/tools/agentpackage -count=1
 	sh -n packaging/agent/owndock-agentctl
+	sh -n packaging/agent/systemd_integration_test.sh
 	sh -n packaging/agent/enrollment_process_integration_test.sh
 	sh -n packaging/agent/rotation_process_integration_test.sh
 	sh -n packaging/agent/dual_control_process_integration_test.sh
+	@command -v docker >/dev/null 2>&1 || (echo "docker CLI is required to validate managed ingress packaging" >&2; exit 2)
+	@docker compose version >/dev/null 2>&1 || (echo "docker compose v2 is required to validate managed ingress packaging" >&2; exit 2)
+	@OWNDOCK_INGRESS_UID=10001 OWNDOCK_INGRESS_GID=10001 \
+		docker compose -f packaging/agent/owndock-ingress.compose.yaml config --quiet
 
 test-agent-release:
 	go test ./packaging/release ./internal/tools/releasemanifest -count=1

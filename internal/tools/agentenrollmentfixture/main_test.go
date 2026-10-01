@@ -108,7 +108,7 @@ func enrollmentOptions(endpoint, materials string, paths agentenrollment.Paths) 
 		ServerCAFile:       filepath.Join(materials, "ca.pem"),
 		InstanceID:         "conformance-instance",
 		AgentVersion:       "0.0.0-system",
-		Capabilities:       agentenrollment.StandardCapabilities(false),
+		Capabilities:       agentenrollment.StandardCapabilities(false, false),
 		RequestTimeout:     3 * time.Second,
 		Paths:              paths,
 	}

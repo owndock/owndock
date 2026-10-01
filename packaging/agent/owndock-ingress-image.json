@@ -1,0 +1,12 @@
+{
+  "repository": "docker.io/library/caddy",
+  "tag": "2.11.4-alpine",
+  "index_digest": "sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b",
+  "platforms": {
+    "linux/amd64": "sha256:040e9f7480b80b6d4a7e5013a21159b950a63dcbdb956e38abe2387fb28d9ec0",
+    "linux/arm64/v8": "sha256:c802bf2721a427e961b9fd6a194c3888a180de9990b43f8530a02bd6be017e17"
+  },
+  "upstream_release": "https://github.com/caddyserver/caddy/releases/tag/v2.11.4",
+  "registry_manifest": "https://registry-1.docker.io/v2/library/caddy/manifests/2.11.4-alpine",
+  "verified_at": "2026-10-01"
+}

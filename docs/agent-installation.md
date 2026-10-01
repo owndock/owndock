@@ -8,7 +8,7 @@
 
 当前安装器面向 `amd64` 或 `arm64`、使用 systemd 的 Linux 主机，并要求：
 
-- Docker Engine 已安装，本机存在 `docker` group 和 `/var/run/docker.sock`；
+- Docker Engine 已安装，本机存在 `docker` group 和 `/var/run/docker.sock`；启用 managed ingress 时还要求 Docker Compose v2，且宿主 80/443 未被占用；
 - 使用 root 执行安装管理器；Agent 进程使用安装器创建的 `owndock-agent` 系统账号；
 - Owner 已在控制面为这台 Managed Host 创建尚未过期的一次性 enrollment token；
 - 主机终端使用同一个低权限 `owndock-agent` 账号，不允许浏览器选择账号或提升为 root。
@@ -62,7 +62,17 @@ sudo owndock-agentctl enroll \
   --token-file /root/owndock-agent-enrollment.token
 ```
 
-安装器默认授权部署、Runtime Inventory 和容器终端能力，不授权主机终端。确实需要网页进入主机 Shell 时，由管理员显式增加 `--enable-host-terminal`；这只授予 Agent 身份能力上限，用户仍必须通过独立 RBAC、重新确认和审计门禁。
+安装器默认授权部署、Runtime Inventory 和容器终端能力，不授权主机终端或 managed ingress。确实需要网页进入主机 Shell 时，由管理员显式增加 `--enable-host-terminal`；这只授予 Agent 身份能力上限，用户仍必须通过独立 RBAC、重新确认和审计门禁。
+
+为该 Host 启用 managed HTTP/HTTPS 入口时，在首次 enrollment 增加 `--enable-ingress`。安装器会把 `ingress.reconcile` 同时写入机器身份授权和本机配置，启动固定 digest 的独立 Caddy Gateway，再启动 Agent；Gateway 失败时不会以只启动 Agent 的方式伪装成功：
+
+```bash
+sudo owndock-agentctl enroll \
+  --enrollment-endpoint https://console.example.com/api/v1/agent/enrollments:exchange \
+  --control-endpoint https://control.example.com:8443/api/v1/agent/connect \
+  --token-file /root/owndock-agent-enrollment.token \
+  --enable-ingress
+```
 
 如果管理 API 使用企业私有 HTTPS CA，可增加 `--server-ca-file /root/management-ca.pem`。该 CA 只用于验证 enrollment HTTPS Server；控制流使用 Server 在响应中返回并经证书链校验的独立 Agent CA。安装器不支持跳过 TLS 校验、不跟随重定向，也不读取系统代理环境变量，避免 token 被发送到非目标服务。
 
@@ -88,6 +98,10 @@ sudo owndock-agentctl enroll --recover
 | `/var/lib/owndock-agent/instance-id` | `owndock-agent`, `0600` | 安装实例的稳定随机身份；重试时不重新生成 |
 | `/var/lib/owndock-agent` | `owndock-agent`, `0700` | 命令结果、部署水位、终端撤销记录和轮换状态 |
 | `/etc/systemd/system/owndock-agent.service` | root 管理的 symlink | 跟随 `current` 的版本化安全加固服务单元 |
+| `/var/lib/owndock-ingress/data` | `owndock-ingress:owndock-agent`, `0700` | ACME 账号和证书持久状态；不能随普通升级删除 |
+| `/var/lib/owndock-ingress/config` | `owndock-ingress:owndock-agent`, `0700` | Caddy 最后成功 autosave，用于 Gateway 重启 resume |
+| `/run/owndock-ingress/admin.sock` | `owndock-ingress:owndock-agent`, `0660` | Agent 到 Gateway 的本机管理通道，不监听 TCP admin |
+| `/etc/systemd/system/owndock-ingress.service` | root 管理的 symlink | 固定 digest Compose Gateway 的版本化 unit |
 
 配置和 CA 与可写机器身份分开。这样证书轮换只需要写 Agent 私有状态目录，不能覆盖启动配置或改变信任根。
 
@@ -112,7 +126,7 @@ sudo ./owndock-agentctl install
 
 Linux CI 使用真实 systemd 覆盖首次启动、相邻测试版本升级、启动即崩溃版本的自动恢复、显式回滚和状态文件保留；普通离线安装测试和真实 systemd fixture 都会显式保留 `terminal-executions.json`，防止升级或回滚丢失仍需回收的 Docker exec。fixture 还会确认服务进程不是 root、`ProtectSystem=strict` 阻止写 `/etc`，同时 `/var/lib/owndock-agent` 保持可写。独立的真实 enrollment 进程门禁覆盖 HTTPS 响应丢失后的同 CSR 重试、符号链接拒绝后的无 token 本地恢复，以及 token 不落入状态和日志。两项系统门禁都会先拒绝 runner 上任何既有 OwnDock 路径，再只清理本次创建的固定路径；它们仍不替代真实 Agent 与 Server、Docker Engine 和两台客户等价主机的灰度验收。
 
-升级不会覆盖 `/etc/owndock/agent.yaml`、CA、identity bundle、结果缓存、部署 cutover 水位或终端撤销记录。协议兼容仍由 Server 的版本协商失败关闭；当前还需要相邻 Agent/Server 版本的真实节点矩阵验收。
+升级不会覆盖 `/etc/owndock/agent.yaml`、CA、identity bundle、结果缓存、部署 cutover 水位、Ingress fence、Caddy autosave/证书数据或终端撤销记录。managed ingress 已运行时，安装器会先用新 release 的固定 Compose/boot config 重启并等待 Unix Socket；失败则恢复旧 `current` 并重启旧 Gateway，随后才重启 Agent。协议兼容仍由 Server 的版本协商失败关闭；该路径还需要客户等价 Linux 主机真实执行后才能关闭验收项。
 
 ```mermaid
 sequenceDiagram
@@ -157,6 +171,8 @@ sudo owndock-agentctl rollback --version 0.1.0
 
 ## systemd 安全边界
 
-正式 unit 使用 `NoNewPrivileges`、只读系统文件、私有临时目录/设备、空 capability set、namespace/kernel/control-group 防护、地址族白名单、进程数与文件描述符上限。唯一声明的可写路径是 `/var/lib/owndock-agent`。
+Agent unit 使用 `NoNewPrivileges`、只读系统文件、私有临时目录/设备、空 capability set、namespace/kernel/control-group 防护、地址族白名单、进程数与文件描述符上限。唯一声明的可写路径是 `/var/lib/owndock-agent`。
+
+Ingress unit 以独立 non-login 账号运行固定 Compose 文件，只写 `/run/owndock-ingress` 和 `/var/lib/owndock-ingress`。Caddy 容器本身为 non-root、只读根、无 Linux capabilities、无 Docker Socket；容器使用 8080/8443，因此不需要 `CAP_NET_BIND_SERVICE`，Docker 仅做精确的宿主 80/443 端口映射。Agent 与 Gateway 共享的只有 Unix Socket group，不共享证书目录。
 
 主机终端也继承这些限制。即使如此，Agent 仍可通过 Docker Socket 管理容器，因此生产开放前仍必须完成真实主机、升级中断、网络分区和秘密扫描验收。

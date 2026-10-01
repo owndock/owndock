@@ -420,7 +420,8 @@ func (k AgentCommandKind) DurableResult() bool {
 	case AgentCommandInventoryPrepare,
 		AgentCommandInventoryChunk,
 		AgentCommandInventoryRelease,
-		AgentCommandInventoryEvents:
+		AgentCommandInventoryEvents,
+		AgentCommandIngressReconcile:
 		return false
 	default:
 		return k.Valid()

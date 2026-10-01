@@ -28,6 +28,8 @@ const (
 	defaultMaxConcurrentCommands  = 4
 	defaultResultCacheSize        = 256
 	defaultCutoverWatermarkSize   = 16384
+	defaultIngressFenceSize       = 16384
+	defaultIngressRequestTimeout  = 10 * time.Second
 	defaultBootIDFile             = "/proc/sys/kernel/random/boot_id"
 	defaultDockerSocket           = "/var/run/docker.sock"
 	defaultStateDirectory         = "/var/lib/owndock-agent"
@@ -43,6 +45,7 @@ var ErrInvalidConfig = errors.New("Agent configuration is invalid")
 type Config struct {
 	Control             Control             `json:"control" yaml:"control"`
 	Runtime             Runtime             `json:"runtime" yaml:"runtime"`
+	Ingress             Ingress             `json:"ingress" yaml:"ingress"`
 	HostTerminal        HostTerminal        `json:"host_terminal" yaml:"host_terminal"`
 	CertificateRotation CertificateRotation `json:"certificate_rotation" yaml:"certificate_rotation"`
 }
@@ -72,6 +75,12 @@ type Runtime struct {
 	StateDirectory       string `json:"state_directory" yaml:"state_directory"`
 	ResultCacheSize      int    `json:"result_cache_size" yaml:"result_cache_size"`
 	CutoverWatermarkSize int    `json:"cutover_watermark_size" yaml:"cutover_watermark_size"`
+}
+
+type Ingress struct {
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	FenceSize      int    `json:"fence_size" yaml:"fence_size"`
+	RequestTimeout string `json:"request_timeout" yaml:"request_timeout"`
 }
 
 type HostTerminal struct {
@@ -108,6 +117,10 @@ func Defaults() Config {
 			StateDirectory:       defaultStateDirectory,
 			ResultCacheSize:      defaultResultCacheSize,
 			CutoverWatermarkSize: defaultCutoverWatermarkSize,
+		},
+		Ingress: Ingress{
+			FenceSize:      defaultIngressFenceSize,
+			RequestTimeout: defaultIngressRequestTimeout.String(),
 		},
 		HostTerminal: HostTerminal{
 			Shell:            defaultHostTerminalShell,
@@ -268,6 +281,21 @@ func (c Config) Validate() error {
 			ErrInvalidConfig,
 		)
 	}
+	ingressCapability := capabilityEnabled(c.Control.Capabilities,
+		agentprotocol.CapabilityIngressReconcile)
+	if ingressCapability != c.Ingress.Enabled {
+		return fmt.Errorf(
+			"%w: ingress.reconcile capability and ingress.enabled must match",
+			ErrInvalidConfig,
+		)
+	}
+	if c.Ingress.FenceSize < 1 || c.Ingress.FenceSize > 65536 {
+		return fmt.Errorf("%w: ingress.fence_size", ErrInvalidConfig)
+	}
+	ingressTimeout, err := c.Ingress.RequestTimeoutDuration()
+	if err != nil || ingressTimeout < time.Second || ingressTimeout > time.Minute {
+		return fmt.Errorf("%w: ingress.request_timeout", ErrInvalidConfig)
+	}
 	if c.CertificateRotation.Enabled {
 		if c.Control.ClientCertificateFile != c.Control.ClientPrivateKeyFile {
 			return fmt.Errorf("%w: certificate_rotation requires one identity bundle", ErrInvalidConfig)
@@ -375,6 +403,10 @@ func supportedHostShell(value string) bool {
 
 func (c Control) HandshakeTimeoutDuration() (time.Duration, error) {
 	return parseDuration(c.HandshakeTimeout, defaultHandshakeTimeout)
+}
+
+func (c Ingress) RequestTimeoutDuration() (time.Duration, error) {
+	return parseDuration(c.RequestTimeout, defaultIngressRequestTimeout)
 }
 
 func (c Control) ServerSilenceTimeoutDuration() (time.Duration, error) {

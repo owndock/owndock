@@ -207,6 +207,8 @@ func (e *DockerExecutor) reconcileIngress(ctx context.Context, command agentprot
 		code = "ingress_fence_conflict"
 	case errors.Is(err, ErrIngressStoreFull):
 		code = "ingress_state_full"
+	case errors.Is(err, ErrIngressPortConflict):
+		code = "ingress_port_conflict"
 	case errors.Is(err, ErrInvalidIngressStore), errors.Is(err, ErrIngressConfiguration):
 		code = "ingress_configuration"
 	}

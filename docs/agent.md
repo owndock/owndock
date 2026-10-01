@@ -1,6 +1,6 @@
 # Agent 运行与配置
 
-> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY；Agent Ingress 的类型化协议与跨重启 fence 也已实现，但 capability 默认关闭，固定 Gateway 与生产 wiring 尚未完成。Agent 支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、Ingress、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
+> 状态：`owndock-agent` 已可构建并能通过自动 enrollment 获得机器证书、连接 OwnDock Server，可执行 `runtime.probe`、两阶段 Docker Deployment、Runtime Inventory 内存分块、有界 Event 续读、受限容器终端和固定身份主机 PTY。Agent Ingress 已具备类型化协议、跨重启 fence、固定 Caddy JSON 生成器、Unix Socket `/load` 客户端和显式配置 wiring；安装包也包含固定多架构 digest 的最小权限 Gateway，但 capability 默认关闭，真实 Linux 80/443、自动 HTTPS 与升级回滚门禁尚未通过。Agent 支持首次响应丢失恢复、证书到期前自动轮换和短时双证书过渡。仓库已提供带 checksum 的版本包、Sigstore keyless 签名/离线验签、systemd 安全单元、原子升级和二进制回滚；仓内还使用两个真实 Agent 进程和两个固定 digest 的独立 Docker Engine 验证了身份/运行时隔离、单 Host Engine 故障、进程不停机恢复、双 Host 两阶段同名容器部署不串线，以及双 Host Inventory 快照传输与归属隔离，执行器门禁另覆盖切换中断和延迟旧命令拒绝。首个正式 Tag，以及客户等价主机上的部署、Inventory、Ingress、轮换和终端验收尚未完成，因此这不代表 Agent 模式已经生产就绪。
 
 OwnDock Agent 安装在需要纳管的 Linux 主机上。它主动向 Server 建立出站连接，再访问主机本地的 Docker Unix Socket。管理员不需要把 Docker TCP API 或 SSH 端口暴露给控制面。
 
@@ -102,6 +102,11 @@ runtime:
   state_directory: /var/lib/owndock-agent
   result_cache_size: 256
   cutover_watermark_size: 16384
+
+ingress:
+  enabled: false
+  fence_size: 16384
+  request_timeout: 10s
 ```
 
 关键边界：
@@ -115,7 +120,7 @@ runtime:
 - Runtime Inventory manifest/chunk/release/events 不写入持久结果缓存。安全快照只在内存保留 10 分钟，最多 2 份、每份 32 MiB；manifest 和 Event poll 每批最多携带 64 条规范化 Event，不含 Actor attributes，达到上限只要求 Server 再次全量采集；Agent 重启后由 Server 放弃 open observation 并重新全量采集；
 - 部署切换水位只保存稳定容器槽位、最高 cutover sequence 和对应 Deployment ID，不保存完整命令或秘密；它独立于可淘汰的结果缓存，因此 Agent 重启或容器缺失后仍能拒绝旧命令；
 - `cutover_watermark_size` 是失败关闭的槽位上限：达到上限后拒绝新槽位，不按时间或容量淘汰旧水位。Runtime Target `DELETE` 已接入 `retiring → canceling/drain → deployment.runtime.remove → deployment.cutover.release → 删除元数据` 的持久后台链路；
-- Ingress fence 独立保存 Host revision/config digest，以及所有见过的 Route revision、Deployment/cutover 水位和 active tombstone；完整配置移除 Route 后仍不淘汰该高水位。当前生产配置没有 `ingress.reconcile`，固定 Gateway 与显式容量配置接入前不要手工启用；
+- Ingress fence 独立保存 Host revision/config digest，以及所有见过的 Route revision、Deployment/cutover 水位和 active tombstone；完整配置移除 Route 后仍不淘汰该高水位。`ingress.enabled` 必须与 `ingress.reconcile` capability 同时启用或关闭；推荐只通过安装器的 `enroll --enable-ingress` 完成配套授权、Gateway 启动和配置生成；
 - `max_frame_bytes`、并发命令数、结果缓存和切换水位都有上限，慢连接不能造成无界内存增长。
 - 当前二进制从共享协议清单上报精确 capabilities；Server 会同时验证它们没有超出 enrollment 时授予该 Agent Identity 的范围。
 - Agent 只上报配置中的 capability 子集。安装器必须把同一列表同时写入 enrollment 和本机配置；四项 `runtime.inventory.*` 必须一起启用，任一 `runtime.inventory.*`、`terminal.container` 或 `terminal.host` 要求 `max_frame_bytes >= 65536`。`terminal.host` 必须与 `host_terminal.enabled` 同时启用或同时关闭。配置中的 `user` 必须等于 Agent 进程的有效系统账号，Agent 不负责创建账号或切换身份。旧配置未声明 `capabilities` 时只启用原有 probe/部署基线；`ingress.reconcile` 也不会因二进制升级自动加入，避免在本机 Gateway 尚未配置时扩大机器身份权限。

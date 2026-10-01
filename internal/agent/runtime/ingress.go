@@ -11,6 +11,7 @@ import (
 var (
 	ErrIngressGatewayUnavailable = errors.New("Agent ingress gateway is unavailable")
 	ErrIngressConfiguration      = errors.New("Agent ingress gateway configuration was rejected")
+	ErrIngressPortConflict       = errors.New("Agent ingress public ports are unavailable")
 )
 
 type IngressGateway interface {
@@ -40,10 +41,6 @@ func (e *IngressExecutor) Reconcile(ctx context.Context, command agentprotocol.I
 	if err != nil {
 		return agentprotocol.IngressResult{}, err
 	}
-	if idempotent {
-		return agentprotocol.IngressResult{HostRevision: command.HostRevision,
-			ConfigDigest: command.ConfigDigest}, nil
-	}
 	digest, err := e.gateway.Apply(ctx, command)
 	if err != nil {
 		return agentprotocol.IngressResult{}, err
@@ -51,8 +48,10 @@ func (e *IngressExecutor) Reconcile(ctx context.Context, command agentprotocol.I
 	if digest != command.ConfigDigest {
 		return agentprotocol.IngressResult{}, ErrIngressConfiguration
 	}
-	if err := e.store.Commit(command); err != nil {
-		return agentprotocol.IngressResult{}, err
+	if !idempotent {
+		if err := e.store.Commit(command); err != nil {
+			return agentprotocol.IngressResult{}, err
+		}
 	}
 	return agentprotocol.IngressResult{HostRevision: command.HostRevision,
 		ConfigDigest: command.ConfigDigest}, nil

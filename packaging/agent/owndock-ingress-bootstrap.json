@@ -1,0 +1,13 @@
+{
+  "@id": "owndock-ingress-bootstrap",
+  "admin": {
+    "listen": "unix//run/owndock-ingress/admin.sock|0660",
+    "config": {
+      "persist": true
+    }
+  },
+  "storage": {
+    "module": "file_system",
+    "root": "/data/caddy"
+  }
+}

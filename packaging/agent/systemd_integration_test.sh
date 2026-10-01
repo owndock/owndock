@@ -20,25 +20,32 @@ for protected_path in \
     /opt/owndock-agent \
     /etc/owndock \
     /etc/systemd/system/owndock-agent.service \
+    /etc/systemd/system/owndock-ingress.service \
     /var/lib/owndock-agent \
+    /var/lib/owndock-ingress \
     /usr/local/sbin/owndock-agentctl; do
     [ ! -e "$protected_path" ] && [ ! -L "$protected_path" ] || \
         fail "refusing to overwrite existing path: $protected_path"
 done
 id owndock-agent >/dev/null 2>&1 && fail "refusing to reuse existing owndock-agent account"
+id owndock-ingress >/dev/null 2>&1 && fail "refusing to reuse existing owndock-ingress account"
 
 workspace=$(mktemp -d /tmp/owndock-agent-systemd.XXXXXX)
 cleanup() {
     systemctl disable --now owndock-agent.service >/dev/null 2>&1 || true
+    systemctl disable --now owndock-ingress.service >/dev/null 2>&1 || true
     rm -f /etc/systemd/system/owndock-agent.service
+    rm -f /etc/systemd/system/owndock-ingress.service
     rm -f /usr/local/sbin/owndock-agentctl
     rm -rf /opt/owndock-agent
     rm -rf /etc/owndock
     rm -rf /var/lib/owndock-agent
+    rm -rf /var/lib/owndock-ingress
     rm -f /etc/owndock-agent-systemd-escape
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl reset-failed owndock-agent.service >/dev/null 2>&1 || true
     userdel owndock-agent >/dev/null 2>&1 || true
+    userdel owndock-ingress >/dev/null 2>&1 || true
     rm -rf "$workspace"
 }
 trap cleanup EXIT HUP INT TERM
@@ -52,6 +59,10 @@ create_package() {
     install -m 0755 "$fixture" "$package/owndock-agent"
     install -m 0755 "$repository/packaging/agent/owndock-agentctl" "$package/owndock-agentctl"
     install -m 0644 "$repository/packaging/agent/owndock-agent.service" "$package/owndock-agent.service"
+    install -m 0644 "$repository/packaging/agent/owndock-ingress.service" "$package/owndock-ingress.service"
+    install -m 0640 "$repository/packaging/agent/owndock-ingress.compose.yaml" "$package/owndock-ingress.compose.yaml"
+    install -m 0640 "$repository/packaging/agent/owndock-ingress-bootstrap.json" "$package/owndock-ingress-bootstrap.json"
+    install -m 0644 "$repository/packaging/agent/owndock-ingress-image.json" "$package/owndock-ingress-image.json"
     install -m 0640 "$repository/configs/agent.yaml" "$package/agent.yaml.example"
     printf '%s\n' "$version" > "$package/VERSION"
     sha256sum "$package/owndock-agent" | awk '{ print $1 }' > "$package/owndock-agent.sha256"

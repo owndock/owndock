@@ -182,6 +182,9 @@ func TestIngressReconcileCommandIsTypedBoundedAndRoundTrips(t *testing.T) {
 	if err := command.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	if command.Kind.DurableResult() {
+		t.Fatal("ingress reconcile must reach the persistent fence and actual Gateway on replay")
+	}
 	roundTrip := NewCommandDocument(command).Domain()
 	if !command.Equivalent(roundTrip) {
 		t.Fatalf("round trip = %+v", roundTrip)

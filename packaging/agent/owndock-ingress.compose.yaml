@@ -1,0 +1,58 @@
+name: owndock-ingress
+
+services:
+  gateway:
+    image: caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b
+    container_name: owndock-ingress
+    user: "${OWNDOCK_INGRESS_UID:?required}:${OWNDOCK_INGRESS_GID:?required}"
+    command:
+      - caddy
+      - run
+      - --resume
+      - --config
+      - /etc/caddy/owndock-bootstrap.json
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:8080/tcp"
+      - "443:8443/tcp"
+    environment:
+      XDG_DATA_HOME: /data
+      XDG_CONFIG_HOME: /config
+    volumes:
+      - type: bind
+        source: /opt/owndock-agent/current/owndock-ingress-bootstrap.json
+        target: /etc/caddy/owndock-bootstrap.json
+        read_only: true
+      - type: bind
+        source: /var/lib/owndock-ingress/data
+        target: /data
+      - type: bind
+        source: /var/lib/owndock-ingress/config
+        target: /config
+      - type: bind
+        source: /run/owndock-ingress
+        target: /run/owndock-ingress
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m,mode=0700
+    networks:
+      - ingress
+    pids_limit: 256
+    mem_limit: 512m
+    stop_grace_period: 35s
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+networks:
+  ingress:
+    name: owndock-ingress
+    driver: bridge
+    internal: false

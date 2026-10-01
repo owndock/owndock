@@ -36,6 +36,11 @@ runtime:
   result_cache_size: 256
   cutover_watermark_size: 16384
 
+ingress:
+  enabled: false
+  fence_size: 16384
+  request_timeout: 10s
+
 host_terminal:
   enabled: true
   user: owndock-agent

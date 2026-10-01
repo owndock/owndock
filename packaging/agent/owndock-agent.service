@@ -2,7 +2,7 @@
 Description=OwnDock Agent
 Documentation=https://owndock.net/docs/agent
 Wants=network-online.target
-After=network-online.target docker.service
+After=network-online.target docker.service owndock-ingress.service
 ConditionPathIsExecutable=/opt/owndock-agent/current/owndock-agent
 ConditionPathExists=/etc/owndock/agent.yaml
 ConditionPathExists=/etc/owndock/agent-ca.pem

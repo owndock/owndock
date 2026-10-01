@@ -23,14 +23,18 @@ var (
 )
 
 type packageConfig struct {
-	Binary        string
-	Manager       string
-	ServiceUnit   string
-	ConfigExample string
-	OutputDir     string
-	Version       string
-	GOOS          string
-	GOARCH        string
+	Binary           string
+	Manager          string
+	ServiceUnit      string
+	IngressUnit      string
+	IngressCompose   string
+	IngressBootstrap string
+	IngressImageLock string
+	ConfigExample    string
+	OutputDir        string
+	Version          string
+	GOOS             string
+	GOARCH           string
 }
 
 type packageEntry struct {
@@ -44,6 +48,10 @@ func main() {
 	flag.StringVar(&config.Binary, "binary", "", "path to the owndock-agent binary")
 	flag.StringVar(&config.Manager, "manager", "packaging/agent/owndock-agentctl", "path to owndock-agentctl")
 	flag.StringVar(&config.ServiceUnit, "service-unit", "packaging/agent/owndock-agent.service", "path to the systemd unit")
+	flag.StringVar(&config.IngressUnit, "ingress-service-unit", "packaging/agent/owndock-ingress.service", "path to the ingress systemd unit")
+	flag.StringVar(&config.IngressCompose, "ingress-compose", "packaging/agent/owndock-ingress.compose.yaml", "path to the ingress Compose file")
+	flag.StringVar(&config.IngressBootstrap, "ingress-bootstrap", "packaging/agent/owndock-ingress-bootstrap.json", "path to the ingress bootstrap config")
+	flag.StringVar(&config.IngressImageLock, "ingress-image-lock", "packaging/agent/owndock-ingress-image.json", "path to the ingress image lock")
 	flag.StringVar(&config.ConfigExample, "config-example", "configs/agent.yaml", "path to the Agent configuration example")
 	flag.StringVar(&config.OutputDir, "output", "dist", "output directory")
 	flag.StringVar(&config.Version, "version", "", "release version")
@@ -80,6 +88,10 @@ func buildPackage(config packageConfig) (string, string, error) {
 		{name: "owndock-agent", path: config.Binary, mode: 0o755},
 		{name: "owndock-agentctl", path: config.Manager, mode: 0o755},
 		{name: "owndock-agent.service", path: config.ServiceUnit, mode: 0o644},
+		{name: "owndock-ingress.service", path: config.IngressUnit, mode: 0o644},
+		{name: "owndock-ingress.compose.yaml", path: config.IngressCompose, mode: 0o640},
+		{name: "owndock-ingress-bootstrap.json", path: config.IngressBootstrap, mode: 0o640},
+		{name: "owndock-ingress-image.json", path: config.IngressImageLock, mode: 0o644},
 		{name: "agent.yaml.example", path: config.ConfigExample, mode: 0o640},
 	}
 	entries := make([]packageEntry, 0, len(inputs)+3)

@@ -98,6 +98,8 @@ func mapAgentIngressResultError(code string) error {
 		return applicationroutebiz.ErrGatewayFenceConflict
 	case "ingress_state_full":
 		return applicationroutebiz.ErrGatewayStateFull
+	case "ingress_port_conflict":
+		return applicationroutebiz.ErrGatewayPortConflict
 	case "ingress_configuration":
 		return applicationroutebiz.ErrGatewayConfiguration
 	default:

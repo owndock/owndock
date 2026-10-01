@@ -114,6 +114,29 @@ func run(ctx context.Context, arguments []string) error {
 	if err := executor.WithTerminalExecutionStore(terminalExecutions); err != nil {
 		return fmt.Errorf("configure Agent terminal recovery: %w", err)
 	}
+	if config.Ingress.Enabled {
+		ingressFences, ingressErr := agentruntime.NewFileIngressFenceStore(
+			config.Runtime.StateDirectory,
+			config.Ingress.FenceSize,
+		)
+		if ingressErr != nil {
+			return fmt.Errorf("create Agent ingress fence store: %w", ingressErr)
+		}
+		ingressTimeout, _ := config.Ingress.RequestTimeoutDuration()
+		gateway, gatewayErr := agentruntime.NewCaddyGateway(agentruntime.CaddyGatewayConfig{
+			AdminSocket: agentruntime.DefaultCaddyAdminSocket, RequestTimeout: ingressTimeout,
+		})
+		if gatewayErr != nil {
+			return fmt.Errorf("create Agent ingress gateway: %w", gatewayErr)
+		}
+		ingressExecutor, ingressErr := agentruntime.NewIngressExecutor(ingressFences, gateway)
+		if ingressErr != nil {
+			return fmt.Errorf("create Agent ingress executor: %w", ingressErr)
+		}
+		if ingressErr := executor.WithIngress(ingressExecutor); ingressErr != nil {
+			return fmt.Errorf("configure Agent ingress executor: %w", ingressErr)
+		}
+	}
 	terminalRecoveryContext, cancelTerminalRecovery := context.WithTimeout(ctx, 10*time.Second)
 	err = executor.RecoverContainerTerminals(terminalRecoveryContext)
 	cancelTerminalRecovery()

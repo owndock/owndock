@@ -2,6 +2,7 @@ package agentconfig
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -32,6 +33,7 @@ func TestLoadCheckedInAgentConfig(t *testing.T) {
 		len(config.Control.Capabilities) != 13 ||
 		config.Runtime.ResultCacheSize != 256 ||
 		config.Runtime.CutoverWatermarkSize != 16384 ||
+		config.Ingress.Enabled || config.Ingress.FenceSize != 16384 ||
 		!config.HostTerminal.Enabled ||
 		config.HostTerminal.User != "owndock-agent" ||
 		config.Control.CACertificateFile != "/etc/owndock/agent-ca.pem" ||
@@ -161,7 +163,9 @@ runtime: {}
 		config.Runtime.StateDirectory != defaultStateDirectory ||
 		config.Runtime.ResultCacheSize != defaultResultCacheSize ||
 		config.Runtime.CutoverWatermarkSize !=
-			defaultCutoverWatermarkSize {
+			defaultCutoverWatermarkSize ||
+		config.Ingress.Enabled || config.Ingress.FenceSize != defaultIngressFenceSize ||
+		config.Ingress.RequestTimeout != defaultIngressRequestTimeout.String() {
 		t.Fatalf("defaults = %#v", config)
 	}
 }
@@ -188,6 +192,39 @@ runtime: {}
 	}
 	if _, err := Load(path); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("partial inventory capabilities error = %v", err)
+	}
+}
+
+func TestLoadRequiresIngressCapabilityAndGatewayTogether(t *testing.T) {
+	base := `
+control:
+  endpoint: https://control.example.com:8443/api/v1/agent/connect
+  organization_id: organization-1
+  managed_host_id: host-1
+  identity_id: identity-1
+  instance_id: instance-1
+  ca_certificate_file: /etc/owndock/agent-ca.pem
+  client_certificate_file: /etc/owndock/agent.pem
+  client_private_key_file: /etc/owndock/agent-key.pem
+  capabilities:
+    - runtime.probe
+    - ingress.reconcile
+runtime: {}
+ingress:
+  enabled: %s
+`
+	for _, enabled := range []string{"false", "true"} {
+		path := filepath.Join(t.TempDir(), "agent.yaml")
+		if err := os.WriteFile(path, []byte(fmt.Sprintf(base, enabled)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if enabled == "false" && !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("disabled ingress with capability error = %v", err)
+		}
+		if enabled == "true" && err != nil {
+			t.Fatalf("enabled ingress error = %v", err)
+		}
 	}
 }
 

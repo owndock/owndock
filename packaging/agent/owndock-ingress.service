@@ -1,0 +1,54 @@
+[Unit]
+Description=OwnDock managed ingress gateway
+Documentation=https://owndock.net/docs/application-ingress
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+ConditionPathExists=/etc/owndock/ingress.env
+ConditionPathExists=/opt/owndock-agent/current/owndock-ingress.compose.yaml
+ConditionPathExists=/opt/owndock-agent/current/owndock-ingress-bootstrap.json
+StartLimitIntervalSec=60s
+StartLimitBurst=3
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+User=owndock-ingress
+Group=owndock-agent
+SupplementaryGroups=docker
+EnvironmentFile=/etc/owndock/ingress.env
+RuntimeDirectory=owndock-ingress
+RuntimeDirectoryMode=0770
+ExecStartPre=/usr/bin/docker compose --project-name owndock-ingress --env-file /etc/owndock/ingress.env -f /opt/owndock-agent/current/owndock-ingress.compose.yaml config --quiet
+ExecStart=/usr/bin/docker compose --project-name owndock-ingress --env-file /etc/owndock/ingress.env -f /opt/owndock-agent/current/owndock-ingress.compose.yaml up --detach --remove-orphans
+ExecStartPost=/bin/sh -ec 'attempt=0; while [ "$attempt" -lt 30 ]; do [ -S /run/owndock-ingress/admin.sock ] && exit 0; attempt=$((attempt + 1)); sleep 1; done; exit 1'
+ExecReload=/usr/bin/docker compose --project-name owndock-ingress --env-file /etc/owndock/ingress.env -f /opt/owndock-agent/current/owndock-ingress.compose.yaml up --detach --remove-orphans
+ExecStop=/usr/bin/docker compose --project-name owndock-ingress --env-file /etc/owndock/ingress.env -f /opt/owndock-agent/current/owndock-ingress.compose.yaml stop --timeout 35
+TimeoutStartSec=90s
+TimeoutStopSec=60s
+UMask=0007
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/run/owndock-ingress /var/lib/owndock-ingress
+
+[Install]
+WantedBy=multi-user.target

@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent 已具备类型化 `ingress.reconcile` 协议、Server adapter，以及跨重启保留的 Host/Route fence，但 capability 默认关闭，固定 Caddy Gateway、生产 wiring 和 Deployment 切流编排尚未实现。因此当前版本仍只交付容器，不绑定宿主端口，也不应宣称自动低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent 已具备类型化 `ingress.reconcile` 协议、Server adapter、跨重启 Host/Route fence、固定 Caddy JSON/Unix Socket Gateway adapter 和显式运行配置；Agent 包也携带固定 digest 的 Gateway 安装材料。真实 Linux Gateway 门禁和 Deployment 切流编排尚未完成，因此当前版本仍只交付容器，也不应宣称自动低停机流量切换。
 
 ## 目标模式
 
@@ -29,7 +29,9 @@ sequenceDiagram
     S->>A: ingress.reconcile(host revision + digest + complete routes)
     A->>F: reject stale/conflicting host and route watermarks
     alt idempotent committed config
-        F-->>A: exact replay
+        F-->>A: exact replay is allowed
+        A->>G: verify digest metadata ID; reload if resume state is absent
+        G-->>A: current or reloaded digest
         A-->>S: committed revision + digest
     else newer safe config
         A->>G: apply typed complete config
@@ -42,6 +44,14 @@ sequenceDiagram
         end
     end
 ```
+
+## 固定 Gateway 包
+
+首个 Gateway 锁定为 `caddy:2.11.4-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b`。镜像锁文件同时记录 linux/amd64 和 linux/arm64/v8 子 manifest digest；Compose 不接受 `latest` 或浮动 tag。
+
+Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、只读根文件系统、drop all capabilities、`no-new-privileges`，只映射宿主 80→容器 8080 和 443→8443。它不挂载 Docker Socket；唯一控制入口是共享运行目录中的 `0660` Unix Socket。证书数据 `/data` 与 Caddy autosave `/config` 分别持久化，启动时 `--resume` 先恢复最后成功配置；Agent 再通过 config digest 对应的 Caddy `@id` 检查当前配置，不一致才提交完整 `/load`。开发环境全部为 `tls=disabled` 时不会监听容器 HTTPS 端口。
+
+代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 
 ## 资源边界
 

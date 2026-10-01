@@ -33,6 +33,7 @@ func runEnrollment(ctx context.Context, arguments []string) error {
 	var instanceID string
 	var recoverPending bool
 	var enableHostTerminal bool
+	var enableIngress bool
 	var requestTimeout time.Duration
 	flags.StringVar(
 		&enrollmentEndpoint, "enrollment-endpoint", "",
@@ -59,6 +60,10 @@ func runEnrollment(ctx context.Context, arguments []string) error {
 		"grant and enable audited host terminal support for this Agent identity",
 	)
 	flags.BoolVar(
+		&enableIngress, "enable-ingress", false,
+		"grant and enable the fixed local managed ingress Gateway",
+	)
+	flags.BoolVar(
 		&recoverPending, "recover", false,
 		"finish installing a locally persisted enrollment response without a token",
 	)
@@ -74,7 +79,7 @@ func runEnrollment(ctx context.Context, arguments []string) error {
 	}
 	if recoverPending {
 		if enrollmentEndpoint != "" || controlEndpoint != "" || tokenFile != "" ||
-			serverCAFile != "" || instanceID != "" || enableHostTerminal {
+			serverCAFile != "" || instanceID != "" || enableHostTerminal || enableIngress {
 			return errors.New("--recover does not accept enrollment inputs")
 		}
 		result, err := agentenrollment.Recover(productionEnrollmentPaths, time.Now())
@@ -94,8 +99,9 @@ func runEnrollment(ctx context.Context, arguments []string) error {
 		ServerCAFile:       serverCAFile,
 		InstanceID:         instanceID,
 		AgentVersion:       version,
-		Capabilities:       agentenrollment.StandardCapabilities(enableHostTerminal),
+		Capabilities:       agentenrollment.StandardCapabilities(enableHostTerminal, enableIngress),
 		HostTerminal:       enableHostTerminal,
+		Ingress:            enableIngress,
 		RequestTimeout:     requestTimeout,
 		Paths:              productionEnrollmentPaths,
 	}, token)

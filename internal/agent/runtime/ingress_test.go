@@ -30,8 +30,8 @@ func TestIngressExecutorCommitsOnlyMatchingAppliedConfig(t *testing.T) {
 	if _, err := executor.Reconcile(context.Background(), command); err != nil {
 		t.Fatal(err)
 	}
-	if gateway.calls != 2 {
-		t.Fatalf("gateway calls = %d, want mismatch + one committed apply", gateway.calls)
+	if gateway.calls != 3 {
+		t.Fatalf("gateway calls = %d, want mismatch + committed apply + reconciliation", gateway.calls)
 	}
 }
 
