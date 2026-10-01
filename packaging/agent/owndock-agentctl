@@ -34,6 +34,7 @@ Usage:
   owndock-agentctl enroll --enrollment-endpoint <https-url> \
     --control-endpoint <https-url> --token-file <absolute-private-file>
   owndock-agentctl enroll --recover
+  owndock-agentctl preflight
   owndock-agentctl rollback --version <version>
   owndock-agentctl status
 
@@ -49,6 +50,9 @@ private key locally, validates the returned certificate identity, installs the
 configuration and starts the service. --recover completes a response already
 persisted locally after an interrupted installation, restores its exact feature
 selection and does not reuse a token.
+
+preflight verifies the exact first-release production host baseline without
+printing host identity, configuration or credential paths.
 EOF
 }
 
@@ -280,6 +284,15 @@ service_active() {
     [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$SERVICE"
 }
 
+run_preflight() {
+    binary=$SCRIPT_DIR/owndock-agent
+    if [ ! -f "$binary" ] || [ -L "$binary" ]; then
+        binary=$CURRENT_LINK/owndock-agent
+    fi
+    [ -f "$binary" ] && [ ! -L "$binary" ] || fail "Agent binary is unavailable for host preflight"
+    "$binary" preflight || fail "host preflight failed"
+}
+
 ingress_service_active() {
     [ "$INSTALL_ROOT" = / ] && systemctl is-active --quiet "$INGRESS_SERVICE"
 }
@@ -332,6 +345,7 @@ install_release() {
     verify_checksum "$binary" "$checksum"
     if [ "$INSTALL_ROOT" = / ]; then
         require_production_host
+        "$binary" preflight || fail "host preflight failed before installation"
         create_account
     fi
     install_directories
@@ -428,6 +442,7 @@ install_release() {
 enroll_agent() {
     [ "$INSTALL_ROOT" = / ] || fail "Agent enrollment is unavailable in offline staging mode"
     require_production_host
+    run_preflight
     create_account
     install_directories
     acquire_lock
@@ -545,6 +560,7 @@ command=${1:-}
 case "$command" in
     install) install_release "$@" ;;
     enroll) enroll_agent "$@" ;;
+    preflight) [ "$#" -eq 0 ] || fail "preflight does not accept options"; run_preflight ;;
     rollback) rollback_release "$@" ;;
     status) [ "$#" -eq 0 ] || fail "status does not accept options"; show_status ;;
     -h|--help|help) usage ;;

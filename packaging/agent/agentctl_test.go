@@ -127,6 +127,32 @@ func TestSystemdUnitKeepsConfigurationReadOnlyAndIdentityWritable(t *testing.T) 
 	}
 }
 
+func TestAgentManagerFailsClosedOnPreflightWithoutBlockingRollback(t *testing.T) {
+	repository := repositoryRoot(t)
+	value, err := os.ReadFile(filepath.Join(repository, "packaging/agent/owndock-agentctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(value)
+	installOrder := `require_production_host
+        "$binary" preflight || fail "host preflight failed before installation"
+        create_account`
+	enrollmentOrder := `require_production_host
+    run_preflight
+    create_account`
+	if !strings.Contains(script, installOrder) || !strings.Contains(script, enrollmentOrder) {
+		t.Fatal("production install or enrollment does not run preflight before host mutation")
+	}
+	rollbackStart := strings.Index(script, "rollback_release() {")
+	rollbackEnd := strings.Index(script, "show_status() {")
+	if rollbackStart < 0 || rollbackEnd <= rollbackStart {
+		t.Fatal("could not locate rollback function")
+	}
+	if strings.Contains(script[rollbackStart:rollbackEnd], "preflight") {
+		t.Fatal("rollback must remain available when the host drifts outside the support matrix")
+	}
+}
+
 func createPackage(t *testing.T, repository, version, marker string) string {
 	t.Helper()
 	directory := t.TempDir()

@@ -13,6 +13,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) == 2 && os.Args[1] == "preflight" {
+		_, _ = fmt.Println(`{"status":"passed","os":"ubuntu","os_version":"24.04","architecture":"amd64","docker_engine":"29.6.1","docker_api":"fixture","docker_cgroup":"2","systemd":true,"cgroup_v2":true,"docker_socket":true}`)
+		return
+	}
 	showVersion := flag.Bool("version", false, "print version")
 	flag.String("conf", "", "ignored test configuration")
 	flag.Parse()

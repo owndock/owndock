@@ -6,11 +6,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	agentpreflight "github.com/owndock/owndock/internal/agent/preflight"
 )
 
 func TestSupportMatrixTracksLockedBaselines(t *testing.T) {
 	root := repositoryRoot(t)
 	matrix := readSupportFile(t, filepath.Join(root, "docs", "support-matrix.md"))
+	dockerImage := sourceImage(t, filepath.Join(root, "internal", "agent", "runtime", "docker_probe_integration_test.go"), "docker:")
+	if !strings.HasPrefix(dockerImage, "docker:"+agentpreflight.SupportedDockerVersion+"-dind@sha256:") {
+		t.Fatalf("Agent preflight Docker %s does not match integration image %s",
+			agentpreflight.SupportedDockerVersion, dockerImage)
+	}
 
 	for _, baseline := range []struct {
 		name   string
@@ -21,7 +28,8 @@ func TestSupportMatrixTracksLockedBaselines(t *testing.T) {
 		{name: "Kratos", value: requiredModuleVersion(t, filepath.Join(root, "go.mod"), "github.com/go-kratos/kratos/v2"), source: "go.mod"},
 		{name: "MongoDB Go Driver", value: requiredModuleVersion(t, filepath.Join(root, "go.mod"), "go.mongodb.org/mongo-driver/v2"), source: "go.mod"},
 		{name: "MongoDB", value: composeImage(t, filepath.Join(root, "deploy", "community.compose.yaml"), "mongo:"), source: "deploy/community.compose.yaml"},
-		{name: "Docker integration Engine", value: sourceImage(t, filepath.Join(root, "internal", "agent", "runtime", "docker_probe_integration_test.go"), "docker:"), source: "internal/agent/runtime/docker_probe_integration_test.go"},
+		{name: "supported operating system", value: "Ubuntu Server " + agentpreflight.SupportedOSVersion, source: "Agent preflight"},
+		{name: "Docker integration Engine", value: dockerImage, source: "internal/agent/runtime/docker_probe_integration_test.go"},
 		{name: "Managed ingress", value: ingressImage(t, filepath.Join(root, "packaging", "agent", "owndock-ingress-image.json")), source: "packaging/agent/owndock-ingress-image.json"},
 	} {
 		if baseline.value == "" {

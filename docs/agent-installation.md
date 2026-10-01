@@ -8,6 +8,7 @@
 
 当前安装器面向 `amd64` 或 `arm64`、使用 systemd 的 Linux 主机，并要求：
 
+- 首发生产认证候选必须是 Ubuntu Server 24.04 LTS、cgroup v2 与 Docker Engine 29.6.1；
 - Docker Engine 已安装，本机存在 `docker` group 和 `/var/run/docker.sock`；启用 managed ingress 时还要求 Docker Compose v2，且宿主 80/443 未被占用；
 - 使用 root 执行安装管理器；Agent 进程使用安装器创建的 `owndock-agent` 系统账号；
 - Owner 已在控制面为这台 Managed Host 创建尚未过期的一次性 enrollment token；
@@ -31,6 +32,14 @@ make package-agent VERSION=0.1.0 AGENT_GOOS=linux AGENT_GOARCH=amd64
 dist/owndock-agent_0.1.0_linux_amd64.tar.gz
 dist/owndock-agent_0.1.0_linux_amd64.tar.gz.sha256
 ```
+
+写入系统前可以显式执行主机预检；生产安装和 enrollment 也会自动重复同一检查：
+
+```bash
+sudo ./owndock-agentctl preflight
+```
+
+成功时只输出操作系统版本、CPU、Docker Engine/API 和布尔能力的 JSON，不输出主机名、Socket 内容、身份或凭据路径。不满足精确首发矩阵时安装会在创建账号或写入系统目录前失败；已安装版本的回滚不受预检阻断，以免在环境漂移时失去恢复路径。正式支持与认证状态见[支持与认证矩阵](support-matrix.md)。
 
 构建默认嵌入完整 Git SHA 和该 commit 的稳定时间；打包器固定文件顺序、时间、所有者和权限。相同 commit、版本和目标架构会生成相同 archive；包内还保存 Agent 二进制自己的 SHA-256。外层 checksum 用于发现下载损坏，包内 checksum 在切换版本前再次验证二进制。
 

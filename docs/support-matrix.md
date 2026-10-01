@@ -28,6 +28,8 @@
 
 Docker Engine 首发不声明一个未经验证的宽版本区间。29.6.1 是当前固定集成 Engine 和首个生产认证候选；后续补丁或大版本必须在独立兼容性 PR 中更新精确版本、执行相同矩阵并留下发布证据。客户端保留 API 协商只是连接机制，不代表所有可协商 Engine 都受支持。
 
+Agent 安装包提供 `owndock-agentctl preflight`，生产安装和 enrollment 会在写入前重复执行。预检失败关闭地核对上表中的 OS、CPU、systemd、cgroup v2、Docker Engine 和本地 Unix Socket；回滚刻意不受预检阻断，避免主机环境漂移后失去恢复路径。
+
 ## 仓库锁定基线
 
 | 组件 | 精确基线 | 仓库来源 |

@@ -10,12 +10,21 @@ fail() {
 fixture=$1
 [ "$(uname -s)" = Linux ] || fail "this test requires Linux"
 [ "$(id -u)" -eq 0 ] || fail "this test requires root"
+[ "$(awk -F= '$1 == "ID" { gsub(/\"/, "", $2); print $2 }' /etc/os-release)" = ubuntu ] || \
+    fail "this test requires Ubuntu"
+[ "$(awk -F= '$1 == "VERSION_ID" { gsub(/\"/, "", $2); print $2 }' /etc/os-release)" = 24.04 ] || \
+    fail "this test requires Ubuntu 24.04"
+[ -s /sys/fs/cgroup/cgroup.controllers ] || fail "this test requires cgroup v2"
 [ -f "$fixture" ] && [ ! -L "$fixture" ] && [ -x "$fixture" ] || \
     fail "fixture must be an executable regular file"
 command -v systemctl >/dev/null 2>&1 || fail "systemctl is unavailable"
 systemctl show-environment >/dev/null 2>&1 || fail "systemd is not running"
 getent group docker >/dev/null 2>&1 || fail "docker group is unavailable"
 [ -x /usr/bin/docker ] || fail "Docker must be installed at /usr/bin/docker"
+[ "$(docker version --format '{{.Server.Version}}')" = 29.6.1 ] || \
+    fail "this test requires Docker Engine 29.6.1"
+[ "$(docker info --format '{{.CgroupVersion}}')" = 2 ] || \
+    fail "this test requires Docker cgroup v2"
 docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is unavailable"
 
 ingress_project=owndock-ingress
