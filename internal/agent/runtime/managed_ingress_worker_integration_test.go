@@ -197,8 +197,10 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 	if !errors.Is(err, applicationroutebiz.ErrGatewayBackendUnhealthy) {
 		t.Fatalf("failed cutover error = %v", err)
 	}
-	if !serverStore.aborted {
-		t.Fatal("failed cutover transaction was not aborted")
+	if !serverStore.aborted ||
+		serverStore.failure != applicationroutebiz.FailureBackendUnhealthy {
+		t.Fatalf("failed cutover transaction = aborted %t failure %q",
+			serverStore.aborted, serverStore.failure)
 	}
 	assertManagedIngressRuntimeOwner(t, ctx, inspection, stableName, plans[1])
 	assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusOK, "")
@@ -292,6 +294,7 @@ type managedIngressIntegrationCutoverStore struct {
 	exists      bool
 	finished    bool
 	aborted     bool
+	failure     applicationroutebiz.FailureCode
 }
 
 func (s *managedIngressIntegrationCutoverStore) configure(
@@ -299,7 +302,7 @@ func (s *managedIngressIntegrationCutoverStore) configure(
 ) {
 	s.desired = desired
 	s.transaction = applicationroutebiz.CutoverTransaction{}
-	s.exists, s.finished, s.aborted = false, false, false
+	s.exists, s.finished, s.aborted, s.failure = false, false, false, ""
 }
 
 func (*managedIngressIntegrationCutoverStore) Required(
@@ -375,11 +378,12 @@ func (s *managedIngressIntegrationCutoverStore) Finish(
 }
 
 func (s *managedIngressIntegrationCutoverStore) Abort(
-	context.Context,
-	applicationroutebiz.CutoverTransaction,
-	applicationroutebiz.FailureCode,
+	_ context.Context,
+	_ applicationroutebiz.CutoverTransaction,
+	failure applicationroutebiz.FailureCode,
 ) error {
 	s.exists, s.aborted = false, true
+	s.failure = failure
 	return nil
 }
 
