@@ -2,7 +2,7 @@
 
 OwnDock 将应用入口定义为稳定 hostname 到某个 Application、Environment 和 Runtime Target 当前成功 Deployment 的路由。Release 端口只是容器内部声明；容器运行或改名不代表用户流量已经切换。
 
-该能力已经形成产品和架构基线，但尚未作为可用 API 发布。当前版本仍只交付容器，不绑定宿主端口，也不应宣称自动低停机流量切换。
+`ApplicationRoute` 的 desired-state 领域、MongoDB Repository、RBAC、审计和 HTTP/OpenAPI 已实现；创建或更新只接受为 `pending`，不代表公网入口已配置。Agent capability、Host fence、Gateway 和 Deployment 切流编排尚未实现，因此当前版本仍只交付容器，不绑定宿主端口，也不应宣称自动低停机流量切换。
 
 ## 目标模式
 
@@ -13,7 +13,9 @@ managed ingress 首期只支持 Agent Runtime Target。网关不会挂载 Docker
 
 ## 资源边界
 
-计划中的 `ApplicationRoute` 属于 Project，固定 Application、Environment、Runtime Target、规范化 hostname、Release 命名 HTTP 端口和 TLS 模式。同一 Organization 中 hostname 唯一。
+`ApplicationRoute` 属于 Project，固定 Application、Environment、Runtime Target、规范化 hostname、Release 命名 HTTP 端口和 TLS 模式。同一 Organization 中活动 hostname 唯一。API 只允许 Agent Runtime Target；`disabled` TLS 只允许 development Environment，staging/production 强制 `automatic`。一个 Project 最多保留 128 条活动 Route。
+
+控制面开放 `GET/POST /api/v1/projects/{project_id}/application-routes` 与 `GET/PATCH /api/v1/projects/{project_id}/application-routes/{route_id}`。Application、Environment 和 Runtime Target 绑定创建后不可修改；PATCH 使用 `expected_version` 乐观锁，成功后回到 `pending`。删除会依赖真实网关清理和 fence，因此在执行面完成前不开放。
 
 首期不包括 wildcard、path routing、任意 Header 改写、用户插件、自带证书、DNS-01、TCP/UDP、多 Target 负载均衡或跨主机高可用。
 
@@ -50,6 +52,10 @@ sequenceDiagram
 首次上线没有旧 route 可回退。证书或私有探测失败时，Route 保持 provisioning/degraded，不能展示为入口 ready。单主机 managed ingress 也不等于高可用。
 
 ## 验收门槛
+
+已进入自动门禁的控制面范围：领域规范化与状态转换、角色权限、绑定不可变、非开发环境 TLS 底线、Project 配额、OpenAPI/实现一致性，以及 Mongo hostname 唯一、跨 Organization 隔离和 revision 冲突。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像。
+
+以下仍是执行面与联合验收门槛：
 
 - 多 Application 在同一 Host 按 Host/SNI 隔离；
 - 并发 hostname 创建、更新和过期命令有持久 fence；

@@ -20,18 +20,30 @@ import (
 const apiV1 = "/api/v1"
 
 type ProductAPI struct {
-	identity             http.Handler
-	agentEnrollment      http.Handler
-	protected            http.Handler
-	protectedDeployment  http.Handler
-	protectedManagedHost http.Handler
-	protectedInventory   http.Handler
-	protectedBuild       http.Handler
-	protectedSupplyChain http.Handler
-	protectedTerminal    http.Handler
-	terminal             http.Handler
-	build                http.Handler
-	ingress              http.Handler
+	identity                  http.Handler
+	agentEnrollment           http.Handler
+	protected                 http.Handler
+	protectedDeployment       http.Handler
+	protectedManagedHost      http.Handler
+	protectedInventory        http.Handler
+	protectedBuild            http.Handler
+	protectedSupplyChain      http.Handler
+	protectedApplicationRoute http.Handler
+	protectedTerminal         http.Handler
+	terminal                  http.Handler
+	build                     http.Handler
+	ingress                   http.Handler
+}
+
+func (p *ProductAPI) WithApplicationRoutes(
+	applicationRouteAPI http.Handler,
+	authenticate func(http.Handler) http.Handler,
+) error {
+	if applicationRouteAPI == nil || authenticate == nil {
+		return fmt.Errorf("product application-route API is required")
+	}
+	p.protectedApplicationRoute = authenticate(applicationRouteAPI)
+	return nil
 }
 
 func (p *ProductAPI) WithSupplyChain(
@@ -163,6 +175,8 @@ func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 		p.protectedTerminal.ServeHTTP(w, r)
 	case p.protectedSupplyChain != nil && isSupplyChainPath(r.URL.Path):
 		p.protectedSupplyChain.ServeHTTP(w, r)
+	case p.protectedApplicationRoute != nil && isApplicationRoutePath(r.URL.Path):
+		p.protectedApplicationRoute.ServeHTTP(w, r)
 	case p.protectedBuild != nil && isProjectBuildPath(r.URL.Path):
 		p.protectedBuild.ServeHTTP(w, r)
 	case p.protectedDeployment != nil && isProjectDeploymentPath(r.URL.Path):
@@ -180,6 +194,13 @@ func (p *ProductAPI) route(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpx.ErrorRequest(w, r, http.StatusNotFound, "not_found")
 	}
+}
+
+func isApplicationRoutePath(path string) bool {
+	segments := strings.Split(strings.Trim(path, "/"), "/")
+	return (len(segments) == 5 || len(segments) == 6) && segments[0] == "api" &&
+		segments[1] == "v1" && segments[2] == "projects" && segments[3] != "" &&
+		segments[4] == "application-routes" && (len(segments) == 5 || segments[5] != "")
 }
 
 func isTerminalPath(path string) bool {

@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: OwnDock API
   version: 0.1.0
-  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, digest-bound Artifact Evidence, vulnerability waivers, versioned restricted Deployment Policies and immutable admission snapshots, Release handoff, Environment, Runtime Target, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Application, Environment, and Deployment operations exist only under an authenticated Project scope.
+  description: Pre-release browser, management, and automation HTTP contract. Identity, the read-only built-in Template catalog, Managed Host and Agent enrollment, Project-scoped Application, Release, Registry Credential, Source Repository connection, Build Configuration, manual, token, and signed Webhook Build trigger/query, bounded incremental Build logs, Artifact, digest-bound Artifact Evidence, vulnerability waivers, versioned restricted Deployment Policies and immutable admission snapshots, Release handoff, Environment, Runtime Target, Application Route desired state, Deployment lifecycle, Runtime Inventory, controlled Terminal Session, and Audit operations form the implemented product slice when product mode is enabled. Application Route pending state does not claim that a Gateway, certificate, DNS, or public traffic is ready. Every formal Product API operation is subject to shared source and installation-wide ingress admission and can return 429 rate_limited or fail-closed 503 ingress_protection_unavailable with Retry-After. Browser access is same-origin by default; configured cross-origin clients use exact origins without REST authentication cookies, and every `/api/` response is non-cacheable. Terminal connection tickets are short-lived, one-time, path-scoped Secure HttpOnly cookies and are never returned in a URL or JSON body. The separate mTLS Agent Control v1 transport is documented outside this OpenAPI; its typed commands and Agent Runtime Gateway are internal transports. Application, Environment, Application Route, and Deployment operations exist only under an authenticated Project scope.
   x-owndock-stability: pre-release
 servers:
   - url: /
@@ -27,6 +27,7 @@ tags:
   - name: Artifacts
   - name: Artifact Evidence
   - name: Deployment Policies
+  - name: Application Routes
   - name: Vulnerability Waivers
   - name: Audit
   - name: Applications
@@ -2277,6 +2278,95 @@ paths:
         "422": { $ref: "#/components/responses/APIError" }
         "503": { $ref: "#/components/responses/APIError" }
         "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/application-routes:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+    get:
+      tags: [Application Routes]
+      operationId: listApplicationRoutes
+      summary: List managed public routes for a Project
+      description: Viewer or above. The collection is bounded to 128 active routes per Project. A route binds one immutable Application, Environment, and Agent Runtime Target tuple to an Organization-unique hostname.
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/ApplicationRouteList" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    post:
+      tags: [Application Routes]
+      operationId: createApplicationRoute
+      summary: Create a managed public application route
+      description: Maintainer or Owner. Only an Agent Runtime Target can be selected. Automatic TLS is required outside development. Acceptance creates a pending desired state; it does not claim that DNS, certificates, or gateway convergence are ready.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApplicationRouteRequest" }
+      responses:
+        "201": { $ref: "#/components/responses/ApplicationRouteResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+  /api/v1/projects/{project_id}/application-routes/{application_route_id}:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+      - $ref: "#/components/parameters/ProjectID"
+      - name: application_route_id
+        in: path
+        required: true
+        schema: { type: string, minLength: 1, maxLength: 128 }
+    get:
+      tags: [Application Routes]
+      operationId: getApplicationRoute
+      summary: Get one managed public application route
+      security:
+        - bearerAuth: []
+      responses:
+        "200": { $ref: "#/components/responses/ApplicationRouteResponse" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
+    patch:
+      tags: [Application Routes]
+      operationId: updateApplicationRoute
+      summary: Update route hostname, port, or TLS mode using optimistic locking
+      description: Maintainer or Owner. Application, Environment, and Runtime Target bindings are immutable. A successful update returns the route to pending until a later gateway reconciliation completes.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/ApplicationRouteRequest"
+                - type: object
+                  required: [expected_version]
+      responses:
+        "200": { $ref: "#/components/responses/ApplicationRouteResponse" }
+        "400": { $ref: "#/components/responses/APIError" }
+        "401": { $ref: "#/components/responses/APIError" }
+        "403": { $ref: "#/components/responses/APIError" }
+        "404": { $ref: "#/components/responses/APIError" }
+        "409": { $ref: "#/components/responses/APIError" }
+        "415": { $ref: "#/components/responses/APIError" }
+        "422": { $ref: "#/components/responses/APIError" }
+        "503": { $ref: "#/components/responses/APIError" }
+        "500": { $ref: "#/components/responses/APIError" }
   /api/v1/projects/{project_id}/signature-trust-policies:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -3722,6 +3812,28 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/DeploymentPolicy" }
+    ApplicationRouteList:
+      description: Bounded active application route collection in stable creation order.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [items]
+            properties:
+              items:
+                type: array
+                maxItems: 128
+                items: { $ref: "#/components/schemas/ApplicationRoute" }
+    ApplicationRouteResponse:
+      description: One versioned desired managed route. Pending and provisioning do not imply public reachability.
+      headers:
+        X-Request-ID: { $ref: "#/components/headers/RequestID" }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ApplicationRoute" }
     SignatureTrustPolicyList:
       description: Versioned Project signature trust policies without private signing key material.
       headers:
@@ -4383,6 +4495,79 @@ components:
           schema:
             $ref: "#/components/schemas/TerminalCredential"
   schemas:
+    ApplicationRouteRequest:
+      type: object
+      additionalProperties: false
+      required: [application_id, environment_id, runtime_target_id, hostname, port_name, tls_mode]
+      properties:
+        application_id: { type: string, minLength: 1, maxLength: 128 }
+        environment_id: { type: string, minLength: 1, maxLength: 128 }
+        runtime_target_id: { type: string, minLength: 1, maxLength: 128 }
+        hostname:
+          type: string
+          minLength: 1
+          maxLength: 253
+          pattern: '^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?$'
+          description: Exact public hostname without scheme, port, path, wildcard, or trailing dot. Stored in lowercase and unique across the Organization.
+        port_name:
+          type: string
+          minLength: 1
+          maxLength: 32
+          pattern: '^[a-z][a-z0-9-]{0,31}$'
+          description: Named TCP port from the selected Application Release runtime specification.
+        tls_mode:
+          type: string
+          enum: [automatic, disabled]
+          description: Disabled is accepted only for a development Environment. Staging and production require automatic HTTPS.
+        expected_version:
+          type: integer
+          format: int64
+          minimum: 1
+          description: Required only for update and rejected during create.
+    ApplicationRoute:
+      type: object
+      additionalProperties: false
+      required: [id, organization_id, project_id, application_id, environment_id, runtime_target_id, hostname, port_name, tls_mode, status, revision, version, created_by, updated_by, created_at, updated_at]
+      properties:
+        id: { type: string, minLength: 1, maxLength: 128 }
+        organization_id: { type: string, minLength: 1, maxLength: 128 }
+        project_id: { type: string, minLength: 1, maxLength: 128 }
+        application_id: { type: string, minLength: 1, maxLength: 128 }
+        environment_id: { type: string, minLength: 1, maxLength: 128 }
+        runtime_target_id: { type: string, minLength: 1, maxLength: 128 }
+        hostname: { type: string, minLength: 1, maxLength: 253 }
+        port_name: { type: string, minLength: 1, maxLength: 32 }
+        tls_mode: { type: string, enum: [automatic, disabled] }
+        status:
+          type: string
+          enum: [pending, provisioning, ready, degraded, retiring, retired]
+          readOnly: true
+        revision:
+          type: integer
+          format: int64
+          minimum: 1
+          readOnly: true
+          description: Desired route specification revision. It changes only when hostname, port, or TLS mode changes.
+        version: { type: integer, format: int64, minimum: 1, readOnly: true }
+        observation:
+          $ref: "#/components/schemas/ApplicationRouteObservation"
+        created_by: { type: string, minLength: 1, maxLength: 128, readOnly: true }
+        updated_by: { type: string, minLength: 1, maxLength: 128, readOnly: true }
+        created_at: { type: string, format: date-time, readOnly: true }
+        updated_at: { type: string, format: date-time, readOnly: true }
+    ApplicationRouteObservation:
+      type: object
+      additionalProperties: false
+      readOnly: true
+      description: Last gateway state proven by an Agent private probe. It may describe an older revision while a newer desired revision is pending.
+      required: [revision, deployment_id, cutover_sequence, config_digest, certificate_status, observed_at]
+      properties:
+        revision: { type: integer, format: int64, minimum: 1 }
+        deployment_id: { type: string, minLength: 1, maxLength: 128 }
+        cutover_sequence: { type: integer, format: int64, minimum: 1 }
+        config_digest: { type: string, pattern: '^sha256:[0-9a-f]{64}$' }
+        certificate_status: { type: string, enum: [pending, ready, failed, not_applicable] }
+        observed_at: { type: string, format: date-time }
     DeploymentPolicyRequirements:
       type: object
       additionalProperties: false

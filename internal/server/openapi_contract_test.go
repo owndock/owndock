@@ -506,6 +506,28 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "create application route", method: http.MethodPost,
+			target:  "/api/v1/projects/test-id/application-routes",
+			body:    `{"application_id":"test-id","environment_id":"test-id","runtime_target_id":"test-id","hostname":"api.example.com","port_name":"http","tls_mode":"automatic"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusCreated,
+		},
+		{
+			name: "list application routes", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/application-routes",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "get application route", method: http.MethodGet,
+			target:  "/api/v1/projects/test-id/application-routes/test-id",
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
+			name: "update application route", method: http.MethodPatch,
+			target:  "/api/v1/projects/test-id/application-routes/test-id",
+			body:    `{"application_id":"test-id","environment_id":"test-id","runtime_target_id":"test-id","hostname":"www.example.com","port_name":"http","tls_mode":"automatic","expected_version":1}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "create project deployment", method: http.MethodPost, target: "/api/v1/projects/test-id/deployments",
 			body: `{"release_id":"test-id","application_id":"test-id","environment_id":"test-id","runtime_target_id":"test-id"}`,
 			headers: map[string]string{

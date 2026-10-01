@@ -13,6 +13,9 @@ import (
 	"github.com/go-kratos/kratos/v2/transport"
 
 	serverapp "github.com/owndock/owndock/internal/app"
+	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
+	applicationroutedata "github.com/owndock/owndock/internal/modules/applicationroute/data"
+	applicationrouteservice "github.com/owndock/owndock/internal/modules/applicationroute/service"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
@@ -363,6 +366,21 @@ func run() error {
 		)
 		if err != nil {
 			return fmt.Errorf("create product API: %w", err)
+		}
+		applicationRouteUseCase, err := applicationroutebiz.NewUseCase(
+			applicationroutedata.NewMongoRepository(mongoClient.Database()),
+			applicationroutedata.NewReferenceResolver(controlPlaneStore),
+			id.New,
+			time.Now,
+		)
+		if err != nil {
+			return fmt.Errorf("create application route use case: %w", err)
+		}
+		applicationRouteUseCase.WithAudit(mongoClient, auditStore)
+		if err := productAPI.WithApplicationRoutes(
+			applicationrouteservice.NewHTTP(applicationRouteUseCase), authenticateProject,
+		); err != nil {
+			return fmt.Errorf("mount application route API: %w", err)
 		}
 		terminalStore := terminaldata.NewMongoRepository(mongoClient.Database())
 		runtimeTargetInventoryConvergence :=

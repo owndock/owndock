@@ -19,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
+	applicationroutedata "github.com/owndock/owndock/internal/modules/applicationroute/data"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	builddata "github.com/owndock/owndock/internal/modules/build/data"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
@@ -312,6 +314,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	assertVulnerabilityObservationIndexes(t, ctx, client.Database())
 	assertVulnerabilityWaiverIndexes(t, ctx, client.Database())
 	assertDeploymentPolicyIndexes(t, ctx, client.Database())
+	assertApplicationRouteIndexes(t, ctx, client.Database())
 	assertArtifactIndexes(t, ctx, client.Database())
 	verifyIngressRateLimitIntegration(t, ctx, client.Database())
 	verifyTerminalPersistenceIntegration(t, ctx, client.Database())
@@ -324,6 +327,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	verifyVulnerabilityObservationIntegration(t, ctx, client.Database())
 	verifyVulnerabilityWaiverIntegration(t, ctx, client.Database())
 	verifyDeploymentPolicyIntegration(t, ctx, client.Database())
+	verifyApplicationRouteIntegration(t, ctx, client.Database())
 	verifyExternalArtifactPersistenceIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryIntegration(t, ctx, client.Database())
 	verifyRuntimeInventoryViewsIntegration(t, ctx, client.Database())
@@ -2238,6 +2242,30 @@ func assertDeploymentPolicyIndexes(t *testing.T, ctx context.Context, database *
 	}
 }
 
+func assertApplicationRouteIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	cursor, err := database.Collection("application_routes").Indexes().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cursor.Close(ctx)
+	var documents []bson.M
+	if err := cursor.All(ctx, &documents); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, document := range documents {
+		name, _ := document["name"].(string)
+		names[name] = true
+	}
+	for _, name := range []string{"uniq_application_route_hostname", "uniq_application_route_project_slot",
+		"idx_application_route_project_created", "idx_application_route_target_status"} {
+		if !names[name] {
+			t.Errorf("application route index %q is missing: %#v", name, names)
+		}
+	}
+}
+
 func assertArtifactIndexes(t *testing.T, ctx context.Context, database *drivermongo.Database) {
 	t.Helper()
 	cursor, err := database.Collection("artifacts").Indexes().List(ctx)
@@ -2825,6 +2853,53 @@ func verifyDeploymentPolicyIntegration(t *testing.T, ctx context.Context,
 	}
 	if _, err := repository.SaveDeploymentPolicy(ctx, projectPolicy, 1); !errors.Is(err, supplychainbiz.ErrDeploymentPolicyConflict) {
 		t.Fatalf("stale SaveDeploymentPolicy() error = %v", err)
+	}
+}
+
+func verifyApplicationRouteIntegration(t *testing.T, ctx context.Context, database *drivermongo.Database) {
+	t.Helper()
+	repository := applicationroutedata.NewMongoRepository(database)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	newRoute := func(id, hostname string) applicationroutebiz.ApplicationRoute {
+		item, err := applicationroutebiz.NewApplicationRoute(applicationroutebiz.Input{
+			ID: id, OrganizationID: "route-integration-organization", ProjectID: "route-integration-project",
+			ApplicationID: "route-integration-application", EnvironmentID: "route-integration-environment",
+			RuntimeTargetID: "route-integration-target", Hostname: hostname, PortName: "http",
+			TLSMode: applicationroutebiz.TLSModeAutomatic, Status: applicationroutebiz.StatusPending,
+			Revision: 1, Version: 1, CreatedBy: "route-integration-maintainer", UpdatedBy: "route-integration-maintainer",
+			CreatedAt: now, UpdatedAt: now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return item
+	}
+	route := newRoute("route-integration-primary", "api.integration.example.com")
+	if _, err := repository.Create(ctx, route); err != nil {
+		t.Fatal(err)
+	}
+	duplicate := newRoute("route-integration-duplicate", "api.integration.example.com")
+	if _, err := repository.Create(ctx, duplicate); !errors.Is(err, applicationroutebiz.ErrRouteConflict) {
+		t.Fatalf("duplicate hostname error = %v", err)
+	}
+	second := newRoute("route-integration-second", "admin.integration.example.com")
+	if _, err := repository.Create(ctx, second); err != nil {
+		t.Fatalf("allocate second route slot: %v", err)
+	}
+	items, err := repository.List(ctx, route.OrganizationID, route.ProjectID)
+	if err != nil || len(items) != 2 || items[0].ID != route.ID || items[1].ID != second.ID {
+		t.Fatalf("List() = %+v, %v", items, err)
+	}
+	if _, err := repository.Get(ctx, "another-organization", route.ProjectID, route.ID); !errors.Is(err, applicationroutebiz.ErrNotFound) {
+		t.Fatalf("cross-organization Get() error = %v", err)
+	}
+	route.Hostname, route.Version, route.UpdatedAt = "www.integration.example.com", 2, now.Add(time.Second)
+	updated, err := repository.Save(ctx, route, 1)
+	if err != nil || updated.Version != 2 || updated.Hostname != route.Hostname {
+		t.Fatalf("Save() = %+v, %v", updated, err)
+	}
+	if _, err := repository.Save(ctx, route, 1); !errors.Is(err, applicationroutebiz.ErrRouteConflict) {
+		t.Fatalf("stale Save() error = %v", err)
 	}
 }
 

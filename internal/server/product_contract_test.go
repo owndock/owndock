@@ -16,6 +16,8 @@ import (
 
 	"github.com/go-kratos/kratos/v2/log"
 
+	applicationroutebiz "github.com/owndock/owndock/internal/modules/applicationroute/biz"
+	applicationrouteservice "github.com/owndock/owndock/internal/modules/applicationroute/service"
 	buildbiz "github.com/owndock/owndock/internal/modules/build/biz"
 	buildservice "github.com/owndock/owndock/internal/modules/build/service"
 	controlplanebiz "github.com/owndock/owndock/internal/modules/controlplane/biz"
@@ -161,6 +163,21 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 	)
 	if err != nil {
 		t.Fatalf("NewProductAPI() error = %v", err)
+	}
+	applicationRouteRepository := &contractApplicationRouteRepository{
+		items: make(map[string]applicationroutebiz.ApplicationRoute),
+	}
+	applicationRouteUseCase, err := applicationroutebiz.NewUseCase(
+		applicationRouteRepository, contractApplicationRouteReferences{}, newID, now,
+	)
+	if err != nil {
+		t.Fatalf("New application route use case: %v", err)
+	}
+	applicationRouteUseCase.WithAudit(transaction.Passthrough{}, audits)
+	if err := productAPI.WithApplicationRoutes(
+		applicationrouteservice.NewHTTP(applicationRouteUseCase), identityHTTP.Authenticate,
+	); err != nil {
+		t.Fatalf("WithApplicationRoutes() error = %v", err)
 	}
 	runtimeInventoryUseCase, err := runtimeinventorybiz.NewViewUseCase(
 		contractRuntimeInventory{}, audits, newID, now,
@@ -317,6 +334,51 @@ func newProductContractHTTPHandler(t *testing.T) http.Handler {
 		t.Fatalf("NewHTTPServer() error = %v", err)
 	}
 	return srv
+}
+
+type contractApplicationRouteReferences struct{}
+
+func (contractApplicationRouteReferences) Resolve(context.Context, string, string, string, string, string) (applicationroutebiz.References, error) {
+	return applicationroutebiz.References{EnvironmentStage: "development", AgentTarget: true}, nil
+}
+
+type contractApplicationRouteRepository struct {
+	items map[string]applicationroutebiz.ApplicationRoute
+}
+
+func (r *contractApplicationRouteRepository) Create(_ context.Context, item applicationroutebiz.ApplicationRoute) (applicationroutebiz.ApplicationRoute, error) {
+	if _, exists := r.items[item.ID]; exists {
+		return applicationroutebiz.ApplicationRoute{}, applicationroutebiz.ErrRouteConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
+}
+
+func (r *contractApplicationRouteRepository) List(_ context.Context, organizationID, projectID string) ([]applicationroutebiz.ApplicationRoute, error) {
+	items := make([]applicationroutebiz.ApplicationRoute, 0, len(r.items))
+	for _, item := range r.items {
+		if item.OrganizationID == organizationID && item.ProjectID == projectID {
+			items = append(items, item)
+		}
+	}
+	return items, nil
+}
+
+func (r *contractApplicationRouteRepository) Get(_ context.Context, organizationID, projectID, routeID string) (applicationroutebiz.ApplicationRoute, error) {
+	item, exists := r.items[routeID]
+	if !exists || item.OrganizationID != organizationID || item.ProjectID != projectID {
+		return applicationroutebiz.ApplicationRoute{}, applicationroutebiz.ErrNotFound
+	}
+	return item, nil
+}
+
+func (r *contractApplicationRouteRepository) Save(_ context.Context, item applicationroutebiz.ApplicationRoute, expectedVersion uint64) (applicationroutebiz.ApplicationRoute, error) {
+	current, exists := r.items[item.ID]
+	if !exists || current.Version != expectedVersion {
+		return applicationroutebiz.ApplicationRoute{}, applicationroutebiz.ErrRouteConflict
+	}
+	r.items[item.ID] = item
+	return item, nil
 }
 
 type contractTerminalStore struct {
