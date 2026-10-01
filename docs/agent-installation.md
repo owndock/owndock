@@ -86,7 +86,7 @@ sudo owndock-agentctl enroll --recover
 | `/etc/owndock/agent-ca.pem` | `root:owndock-agent`, `0640` | 只读 Agent CA 信任根 |
 | `/var/lib/owndock-agent/identity/agent-identity.pem` | `owndock-agent`, `0600` | 可由证书轮换原子替换的机器身份 bundle |
 | `/var/lib/owndock-agent/instance-id` | `owndock-agent`, `0600` | 安装实例的稳定随机身份；重试时不重新生成 |
-| `/var/lib/owndock-agent` | `owndock-agent`, `0700` | 命令结果、部署水位和轮换状态 |
+| `/var/lib/owndock-agent` | `owndock-agent`, `0700` | 命令结果、部署水位、终端撤销记录和轮换状态 |
 | `/etc/systemd/system/owndock-agent.service` | root 管理的 symlink | 跟随 `current` 的版本化安全加固服务单元 |
 
 配置和 CA 与可写机器身份分开。这样证书轮换只需要写 Agent 私有状态目录，不能覆盖启动配置或改变信任根。
@@ -110,9 +110,9 @@ sudo ./owndock-agentctl install
 
 安装器不会只相信 `systemctl restart` 的瞬时返回值。每次启动、升级或回滚后都会等待 3 秒稳定观察窗并再次确认 unit 仍为 active；新进程在启动后立即退出时，会恢复旧 `current` 并验证旧版本确实重新运行。如果新旧版本都无法稳定启动，安装器明确失败并保留现场，不会输出误导性的成功结果。
 
-Linux CI 使用真实 systemd 覆盖首次启动、相邻测试版本升级、启动即崩溃版本的自动恢复、显式回滚和状态文件保留；fixture 还会确认服务进程不是 root、`ProtectSystem=strict` 阻止写 `/etc`，同时 `/var/lib/owndock-agent` 保持可写。独立的真实 enrollment 进程门禁覆盖 HTTPS 响应丢失后的同 CSR 重试、符号链接拒绝后的无 token 本地恢复，以及 token 不落入状态和日志。两项系统门禁都会先拒绝 runner 上任何既有 OwnDock 路径，再只清理本次创建的固定路径；它们仍不替代真实 Agent 与 Server、Docker Engine 和两台客户等价主机的灰度验收。
+Linux CI 使用真实 systemd 覆盖首次启动、相邻测试版本升级、启动即崩溃版本的自动恢复、显式回滚和状态文件保留；普通离线安装测试和真实 systemd fixture 都会显式保留 `terminal-executions.json`，防止升级或回滚丢失仍需回收的 Docker exec。fixture 还会确认服务进程不是 root、`ProtectSystem=strict` 阻止写 `/etc`，同时 `/var/lib/owndock-agent` 保持可写。独立的真实 enrollment 进程门禁覆盖 HTTPS 响应丢失后的同 CSR 重试、符号链接拒绝后的无 token 本地恢复，以及 token 不落入状态和日志。两项系统门禁都会先拒绝 runner 上任何既有 OwnDock 路径，再只清理本次创建的固定路径；它们仍不替代真实 Agent 与 Server、Docker Engine 和两台客户等价主机的灰度验收。
 
-升级不会覆盖 `/etc/owndock/agent.yaml`、CA、identity bundle、结果缓存或部署 cutover 水位。协议兼容仍由 Server 的版本协商失败关闭；当前还需要相邻 Agent/Server 版本的真实节点矩阵验收。
+升级不会覆盖 `/etc/owndock/agent.yaml`、CA、identity bundle、结果缓存、部署 cutover 水位或终端撤销记录。协议兼容仍由 Server 的版本协商失败关闭；当前还需要相邻 Agent/Server 版本的真实节点矩阵验收。
 
 ```mermaid
 sequenceDiagram

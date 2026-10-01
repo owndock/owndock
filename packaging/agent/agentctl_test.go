@@ -27,6 +27,7 @@ func TestAgentManagerInstallsUpgradesAndRollsBackAtomically(t *testing.T) {
 		"etc/owndock/agent.yaml":                                      "operator-config",
 		"var/lib/owndock-agent/identity/agent-identity.pem":           "machine-identity",
 		"var/lib/owndock-agent/deployment-cutover-watermarks-v1.json": "monotonic-state",
+		"var/lib/owndock-agent/terminal-executions.json":              "{\"version\":1,\"entries\":[]}",
 	}
 	for path, value := range preserved {
 		if err := os.WriteFile(filepath.Join(root, path), []byte(value), 0o600); err != nil {

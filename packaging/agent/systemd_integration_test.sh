@@ -43,7 +43,7 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-repository=$(CDPATH= cd "$(dirname "$0")/../.." && pwd -P)
+repository=$(CDPATH='' cd "$(dirname "$0")/../.." && pwd -P)
 
 create_package() {
     version=$1
@@ -82,6 +82,10 @@ install -o owndock-agent -g owndock-agent -m 0600 /dev/null \
 systemctl is-active --quiet owndock-agent.service || fail "initial service is not active"
 wait_for_version 1.0.0
 printf '%s\n' preserved-state > /var/lib/owndock-agent/systemd-preserved-state
+printf '%s\n' '{"version":1,"entries":[]}' > \
+    /var/lib/owndock-agent/terminal-executions.json
+chown owndock-agent:owndock-agent /var/lib/owndock-agent/terminal-executions.json
+chmod 0600 /var/lib/owndock-agent/terminal-executions.json
 
 package_two=$(create_package 1.1.0)
 "$package_two/owndock-agentctl" install
@@ -98,12 +102,18 @@ systemctl is-active --quiet owndock-agent.service || fail "previous service was 
 wait_for_version 1.1.0
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/systemd-preserved-state)" = preserved-state ] || \
     fail "runtime state changed during upgrade recovery"
+[ "$(tr -d '\r\n' < /var/lib/owndock-agent/terminal-executions.json)" = \
+    '{"version":1,"entries":[]}' ] || \
+    fail "terminal recovery state changed during upgrade recovery"
 
 /usr/local/sbin/owndock-agentctl rollback --version 1.0.0
 systemctl is-active --quiet owndock-agent.service || fail "rolled back service is not active"
 wait_for_version 1.0.0
 [ "$(tr -d '\r\n' < /var/lib/owndock-agent/systemd-preserved-state)" = preserved-state ] || \
     fail "runtime state changed during rollback"
+[ "$(tr -d '\r\n' < /var/lib/owndock-agent/terminal-executions.json)" = \
+    '{"version":1,"entries":[]}' ] || \
+    fail "terminal recovery state changed during rollback"
 
 [ "$(systemctl show owndock-agent.service -p User --value)" = owndock-agent ] || \
     fail "systemd user hardening is missing"
