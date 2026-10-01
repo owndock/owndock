@@ -73,6 +73,49 @@ func TestBootstrapLoginAuthenticateAndLogout(t *testing.T) {
 	}
 }
 
+func TestChangePasswordKeepsCurrentSessionAndRevokesOthers(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	repository := &fakeRepository{
+		user: User{ID: "user-1", OrganizationID: "organization-1",
+			Email: "owner@example.com", EmailNormalized: "owner@example.com",
+			PasswordHash: "hash:current-password", Role: security.RoleOwner},
+		sessions: map[string]Session{
+			"current-token": {ID: "session-current", UserID: "user-1", TokenHash: "current-token",
+				CreatedAt: now, ExpiresAt: now.Add(time.Hour)},
+			"other-token": {ID: "session-other", UserID: "user-1", TokenHash: "other-token",
+				CreatedAt: now, ExpiresAt: now.Add(time.Hour)},
+		},
+	}
+	audits := &fakeAudit{}
+	useCase := NewUseCase(repository, transaction.Passthrough{}, audits,
+		fakePasswords{}, fakeTokens{}, func() (string, error) { return "audit-1", nil },
+		func() time.Time { return now }, time.Hour)
+	principal := security.Principal{UserID: "user-1", OrganizationID: "organization-1",
+		Email: "owner@example.com", Role: security.RoleOwner, SessionID: "session-current"}
+	revoked, err := useCase.ChangePassword(
+		t.Context(), principal, "current-password", "replacement-password", "request-1",
+	)
+	if err != nil || revoked != 1 || repository.user.PasswordHash != "hash:replacement-password" ||
+		len(repository.sessions) != 1 || repository.sessions["current-token"].ID != "session-current" {
+		t.Fatalf("ChangePassword() = %d, %v; user=%+v sessions=%+v",
+			revoked, err, repository.user, repository.sessions)
+	}
+	if len(audits.events) != 1 || audits.events[0].Action != "identity.password_changed" ||
+		audits.events[0].ResourceID != "user-1" {
+		t.Fatalf("password audit = %+v", audits.events)
+	}
+	if _, err := useCase.ChangePassword(
+		t.Context(), principal, "current-password", "another-password", "request-2",
+	); !errors.Is(err, ErrCurrentPassword) {
+		t.Fatalf("old current password error = %v", err)
+	}
+	if _, err := useCase.ChangePassword(
+		t.Context(), principal, "replacement-password", "replacement-password", "request-3",
+	); !errors.Is(err, ErrPasswordUnchanged) {
+		t.Fatalf("unchanged password error = %v", err)
+	}
+}
+
 func TestLoginProtectionUsesHashedKeyAndResetsAfterSuccess(
 	t *testing.T,
 ) {
@@ -460,11 +503,40 @@ func (r *fakeRepository) RevokeInvitation(_ context.Context, revoked Invitation,
 func (r *fakeRepository) CreateSession(
 	_ context.Context,
 	session Session,
+	_ string,
 	_ time.Time,
 	_ int,
 ) error {
 	r.sessions[session.TokenHash] = session
 	return nil
+}
+
+func (r *fakeRepository) GetUserCredential(
+	_ context.Context, organizationID, userID string,
+) (User, error) {
+	if r.user.ID != userID || r.user.OrganizationID != organizationID {
+		return User{}, ErrNotFound
+	}
+	return r.user, nil
+}
+
+func (r *fakeRepository) ChangePassword(
+	_ context.Context,
+	organizationID, userID, expectedHash, newHash, currentSessionID string,
+) (int64, error) {
+	if r.user.ID != userID || r.user.OrganizationID != organizationID ||
+		r.user.PasswordHash != expectedHash {
+		return 0, ErrPasswordConflict
+	}
+	r.user.PasswordHash = newHash
+	var revoked int64
+	for tokenHash, session := range r.sessions {
+		if session.UserID == userID && session.ID != currentSessionID {
+			delete(r.sessions, tokenHash)
+			revoked++
+		}
+	}
+	return revoked, nil
 }
 
 func (r *fakeRepository) FindSession(_ context.Context, tokenHash string, now time.Time) (Session, User, error) {

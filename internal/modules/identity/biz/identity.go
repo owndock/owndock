@@ -17,6 +17,9 @@ var (
 	ErrInvalidEmail        = errors.New("email is invalid")
 	ErrInvalidName         = errors.New("organization name is invalid")
 	ErrInvalidPassword     = errors.New("password must contain between 12 and 128 characters")
+	ErrCurrentPassword     = errors.New("current password is invalid")
+	ErrPasswordUnchanged   = errors.New("new password must differ from current password")
+	ErrPasswordConflict    = errors.New("password changed concurrently")
 	ErrLoginGuardMissing   = errors.New("login protection is unavailable")
 	ErrLoginRateLimited    = errors.New("login attempt rate limit exceeded")
 	ErrNotFound            = errors.New("identity was not found")
@@ -82,10 +85,12 @@ type Repository interface {
 	HasUsers(context.Context) (bool, error)
 	CreateBootstrap(context.Context, Organization, User, Session) error
 	FindUserByEmail(context.Context, string) (User, error)
-	CreateSession(context.Context, Session, time.Time, int) error
+	GetUserCredential(context.Context, string, string) (User, error)
+	CreateSession(context.Context, Session, string, time.Time, int) error
 	FindSession(context.Context, string, time.Time) (Session, User, error)
 	ListSessions(context.Context, string, time.Time) ([]Session, error)
 	DeleteSession(context.Context, string, string) error
+	ChangePassword(context.Context, string, string, string, string, string) (int64, error)
 }
 
 type UserInvitationRepository interface {

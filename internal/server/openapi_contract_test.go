@@ -53,6 +53,11 @@ func TestHTTPImplementationMatchesOpenAPI(t *testing.T) {
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
 		},
 		{
+			name: "change password", method: http.MethodPut, target: "/api/v1/auth/password",
+			body:    `{"current_password":"long-enough-password","new_password":"replacement-password"}`,
+			headers: bearerHeaders(), wantStatus: http.StatusOK,
+		},
+		{
 			name: "list current user sessions", method: http.MethodGet,
 			target:  "/api/v1/auth/sessions",
 			headers: bearerHeaders(), wantStatus: http.StatusOK,
@@ -777,6 +782,7 @@ func assertContractResponseDoesNotEchoSecrets(
 	for _, sentinel := range []string{
 		"bootstrap-secret",
 		"long-enough-password",
+		"replacement-password",
 		"member-long-password",
 		"secret://registry-password",
 		"secret://git-token",

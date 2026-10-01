@@ -1305,6 +1305,60 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 	if removedMemberResponse.Code != http.StatusNotFound {
 		t.Fatalf("removed member API status=%d body=%s", removedMemberResponse.Code, removedMemberResponse.Body.String())
 	}
+	memberBeforeRotation, err := identityRepository.FindUserByEmail(ctx, "member@example.com")
+	if err != nil {
+		t.Fatalf("load member credential before password rotation: %v", err)
+	}
+	otherMemberSession, err := identityUseCase.Login(
+		ctx, "member@example.com", "member-integration-password", "member-second-login-request",
+	)
+	if err != nil {
+		t.Fatalf("create second member session: %v", err)
+	}
+	revokedByPasswordChange, err := identityUseCase.ChangePassword(
+		ctx, memberPrincipal, "member-integration-password", "rotated-member-password",
+		"member-password-change-request",
+	)
+	if err != nil || revokedByPasswordChange != 1 {
+		t.Fatalf("change member password = %d/%v, want one revoked session", revokedByPasswordChange, err)
+	}
+	if _, err := identityUseCase.Authenticate(ctx, memberCredentials.AccessToken); err != nil {
+		t.Fatalf("password rotation revoked current member session: %v", err)
+	}
+	if _, err := identityUseCase.Authenticate(ctx, otherMemberSession.AccessToken); !errors.Is(err, security.ErrUnauthenticated) {
+		t.Fatalf("password rotation left another member session valid: %v", err)
+	}
+	staleSessionID, err := id.New()
+	if err != nil {
+		t.Fatalf("create stale password session ID: %v", err)
+	}
+	if err := client.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		return identityRepository.CreateSession(transactionContext, identitybiz.Session{
+			ID: staleSessionID, UserID: memberPrincipal.UserID,
+			TokenHash: "stale-password-session-" + staleSessionID,
+			CreatedAt: identityNow, ExpiresAt: identityNow.Add(time.Hour),
+		}, memberBeforeRotation.PasswordHash, identityNow, 3)
+	}); !errors.Is(err, identitybiz.ErrInvalidCredentials) {
+		t.Fatalf("stale password session creation error = %v", err)
+	}
+	if _, err := identityUseCase.Login(
+		ctx, "member@example.com", "member-integration-password", "member-old-password-request",
+	); !errors.Is(err, identitybiz.ErrInvalidCredentials) {
+		t.Fatalf("old member password login error = %v", err)
+	}
+	rotatedMemberLogin, err := identityUseCase.Login(
+		ctx, "member@example.com", "rotated-member-password", "member-rotated-login-request",
+	)
+	if err != nil {
+		t.Fatalf("login with rotated member password: %v", err)
+	}
+	rotatedMemberPrincipal, err := identityUseCase.Authenticate(ctx, rotatedMemberLogin.AccessToken)
+	if err != nil {
+		t.Fatalf("authenticate rotated member login: %v", err)
+	}
+	if err := identityUseCase.Logout(ctx, rotatedMemberPrincipal, "member-rotated-logout-request"); err != nil {
+		t.Fatalf("logout rotated member login: %v", err)
+	}
 	memberSessions, err := identityUseCase.ListUserSessions(ctx, principal, memberCredentials.User.ID)
 	if err != nil || len(memberSessions) != 1 || memberSessions[0].TokenHash != "" {
 		t.Fatalf("administrative member sessions = %+v/%v", memberSessions, err)
@@ -1319,6 +1373,10 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 		t.Fatalf("revoked member session authentication error = %v", err)
 	}
 	const concurrentSessionCreates = 8
+	loginUser, err := identityRepository.FindUserByEmail(ctx, principal.Email)
+	if err != nil {
+		t.Fatalf("load identity credential for concurrent sessions: %v", err)
+	}
 	var sessionCreateWait sync.WaitGroup
 	sessionCreateErrors := make(
 		chan error,
@@ -1351,6 +1409,7 @@ func TestMongoReplicaSetIntegration(t *testing.T) {
 					return identityRepository.CreateSession(
 						transactionContext,
 						session,
+						loginUser.PasswordHash,
 						identityNow,
 						3,
 					)

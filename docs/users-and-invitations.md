@@ -74,6 +74,40 @@ Content-Type: application/json
 
 无效、过期、已撤销、已接受或邮箱已经存在的邀请统一返回 `401 invalid_invitation`，避免匿名调用方用错误差异探测账号。密码不符合 12～128 字符规则时返回普通字段校验错误。
 
+## 用户自行修改密码
+
+已登录用户可以提交当前密码和新密码：
+
+```http
+PUT /api/v1/auth/password
+Authorization: Bearer <current-session>
+Content-Type: application/json
+
+{"current_password":"<current-password>","new_password":"<new-password>"}
+```
+
+服务端重新校验当前密码，新密码必须为 12～128 个字符且不能与当前密码相同。成功时，密码 hash 更新、其他 Session 删除和 `identity.password_changed` 审计在同一 MongoDB 事务中提交；响应返回 `revoked_sessions` 数量并固定为 `Cache-Control: no-store`。当前 Session 保留，其他设备和客户端立即失效。登录写 Session 时以校验过的旧 password hash 作为并发条件，因此密码轮换提交后，并发的旧密码登录不能补写 Session。
+
+当前密码错误返回 `403 current_password_invalid`；并发密码修改返回 `409 password_conflict`，客户端必须重新输入当前密码。当前版本不提供邮件找回或管理员重置，避免在没有邮件域验证、恢复码、二次认证和唯一 Owner 恢复策略前建立弱恢复入口。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as Current user
+    participant API as Identity API
+    participant DB as MongoDB Transaction
+    participant A as Audit Store
+
+    U->>API: PUT /auth/password<br/>current + new password
+    API->>API: Authenticate current Bearer Session
+    API->>API: Verify current hash and hash new password
+    API->>DB: Conditional update by old password hash
+    DB->>DB: Keep current Session; delete all other user Sessions
+    API->>A: identity.password_changed
+    DB-->>API: Commit atomically
+    API-->>U: revoked_sessions
+```
+
 ## 用户元数据
 
 Owner 可以读取 Organization 的安全用户列表：

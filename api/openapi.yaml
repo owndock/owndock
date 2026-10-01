@@ -548,6 +548,39 @@ paths:
                 $ref: "#/components/schemas/ErrorResponse"
         "500":
           $ref: "#/components/responses/APIError"
+  /api/v1/auth/password:
+    parameters:
+      - $ref: "#/components/parameters/RequestID"
+    put:
+      tags: [Identity]
+      operationId: changePassword
+      summary: Change the current user's local password
+      description: Verifies the current password, rotates its Argon2id hash, and atomically revokes every other active Session. The authenticated Session remains valid.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PasswordChangeRequest"
+      responses:
+        "200":
+          $ref: "#/components/responses/PasswordChanged"
+        "400":
+          $ref: "#/components/responses/APIError"
+        "401":
+          $ref: "#/components/responses/APIError"
+        "403":
+          $ref: "#/components/responses/APIError"
+        "409":
+          $ref: "#/components/responses/APIError"
+        "415":
+          $ref: "#/components/responses/APIError"
+        "422":
+          $ref: "#/components/responses/APIError"
+        "500":
+          $ref: "#/components/responses/APIError"
   /api/v1/auth/me:
     parameters:
       - $ref: "#/components/parameters/RequestID"
@@ -3540,6 +3573,15 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/IdentityUser"
+    PasswordChanged:
+      description: Password changed and all other active Sessions revoked. The current Session remains valid and the response is no-store.
+      headers:
+        X-Request-ID:
+          $ref: "#/components/headers/RequestID"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/PasswordChangeResult"
     SessionList:
       description: Active session metadata. No bearer token or token hash is returned and the response is no-store.
       headers:
@@ -5151,6 +5193,28 @@ components:
           type: string
           minLength: 1
           maxLength: 128
+    PasswordChangeRequest:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password:
+          type: string
+          minLength: 1
+          maxLength: 128
+        new_password:
+          type: string
+          minLength: 12
+          maxLength: 128
+    PasswordChangeResult:
+      type: object
+      additionalProperties: false
+      required: [revoked_sessions]
+      properties:
+        revoked_sessions:
+          type: integer
+          format: int64
+          minimum: 0
     CreateUserInvitationRequest:
       type: object
       additionalProperties: false

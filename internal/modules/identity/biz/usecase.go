@@ -405,6 +405,7 @@ func (u *UseCase) Login(ctx context.Context, email, password, requestID string) 
 		if err := u.repository.CreateSession(
 			transactionContext,
 			session,
+			user.PasswordHash,
 			now,
 			u.maxSessions,
 		); err != nil {
@@ -420,6 +421,61 @@ func (u *UseCase) Login(ctx context.Context, email, password, requestID string) 
 		return Credentials{}, err
 	}
 	return Credentials{AccessToken: rawToken, ExpiresAt: session.ExpiresAt, User: user}, nil
+}
+
+// ChangePassword verifies the current secret, atomically rotates the hash and
+// revokes every other Session. The authenticated Session remains valid so a
+// successful response cannot strand the caller.
+func (u *UseCase) ChangePassword(
+	ctx context.Context,
+	principal security.Principal,
+	currentPassword, newPassword, requestID string,
+) (int64, error) {
+	if !principal.Valid() {
+		return 0, security.ErrUnauthenticated
+	}
+	if err := ValidatePassword(newPassword); err != nil {
+		return 0, err
+	}
+	user, err := u.repository.GetUserCredential(
+		ctx, principal.OrganizationID, principal.UserID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if !u.passwords.Verify(currentPassword, user.PasswordHash) {
+		return 0, ErrCurrentPassword
+	}
+	if u.passwords.Verify(newPassword, user.PasswordHash) {
+		return 0, ErrPasswordUnchanged
+	}
+	passwordHash, err := u.passwords.Hash(newPassword)
+	if err != nil {
+		return 0, err
+	}
+	auditID, err := u.newID()
+	if err != nil {
+		return 0, err
+	}
+	now := u.now().UTC()
+	var revoked int64
+	err = u.transaction.WithinTransaction(ctx, func(transactionContext context.Context) error {
+		var changeErr error
+		revoked, changeErr = u.repository.ChangePassword(
+			transactionContext, principal.OrganizationID, principal.UserID,
+			user.PasswordHash, passwordHash, principal.SessionID,
+		)
+		if changeErr != nil {
+			return changeErr
+		}
+		return u.audit.Record(transactionContext, sharedaudit.Event{
+			ID: auditID, OrganizationID: principal.OrganizationID,
+			ActorID: principal.UserID, Action: "identity.password_changed",
+			ResourceType: "user", ResourceID: principal.UserID,
+			RequestID: strings.TrimSpace(requestID), CreatedAt: now,
+		})
+	})
+	return revoked, err
 }
 
 func (u *UseCase) ListSessions(

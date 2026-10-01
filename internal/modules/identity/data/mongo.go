@@ -192,6 +192,23 @@ func (r *MongoRepository) FindUserByEmail(ctx context.Context, normalizedEmail s
 	return document.domain(), nil
 }
 
+func (r *MongoRepository) GetUserCredential(
+	ctx context.Context,
+	organizationID, userID string,
+) (biz.User, error) {
+	var document userDocument
+	err := r.users.FindOne(ctx, bson.D{
+		{Key: "_id", Value: userID}, {Key: "organization_id", Value: organizationID},
+	}).Decode(&document)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return biz.User{}, biz.ErrNotFound
+	}
+	if err != nil {
+		return biz.User{}, fmt.Errorf("find user credential: %w", err)
+	}
+	return document.domain(), nil
+}
+
 func (r *MongoRepository) GetOrganizationUser(
 	ctx context.Context, organizationID, userID string,
 ) (biz.User, error) {
@@ -213,6 +230,7 @@ func (r *MongoRepository) GetOrganizationUser(
 func (r *MongoRepository) CreateSession(
 	ctx context.Context,
 	session biz.Session,
+	expectedPasswordHash string,
 	now time.Time,
 	maximumActive int,
 ) error {
@@ -224,7 +242,8 @@ func (r *MongoRepository) CreateSession(
 	// the cap and commit more than maximumActive sessions (write skew).
 	lock, err := r.users.UpdateOne(
 		ctx,
-		bson.D{{Key: "_id", Value: session.UserID}},
+		bson.D{{Key: "_id", Value: session.UserID},
+			{Key: "password_hash", Value: expectedPasswordHash}},
 		bson.D{{Key: "$inc", Value: bson.D{
 			{Key: "session_revision", Value: 1},
 		}}},
@@ -233,7 +252,7 @@ func (r *MongoRepository) CreateSession(
 		return fmt.Errorf("lock user session set: %w", err)
 	}
 	if lock.MatchedCount != 1 {
-		return biz.ErrNotFound
+		return biz.ErrInvalidCredentials
 	}
 	if err := r.createSession(ctx, session); err != nil {
 		return err
@@ -278,6 +297,32 @@ func (r *MongoRepository) CreateSession(
 		return fmt.Errorf("remove excess sessions: %w", err)
 	}
 	return nil
+}
+
+func (r *MongoRepository) ChangePassword(
+	ctx context.Context,
+	organizationID, userID, expectedPasswordHash, newPasswordHash, currentSessionID string,
+) (int64, error) {
+	result, err := r.users.UpdateOne(ctx, bson.D{
+		{Key: "_id", Value: userID}, {Key: "organization_id", Value: organizationID},
+		{Key: "password_hash", Value: expectedPasswordHash},
+	}, bson.D{
+		{Key: "$set", Value: bson.D{{Key: "password_hash", Value: newPasswordHash}}},
+		{Key: "$inc", Value: bson.D{{Key: "session_revision", Value: 1}}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("change password: %w", err)
+	}
+	if result.MatchedCount != 1 {
+		return 0, biz.ErrPasswordConflict
+	}
+	revoked, err := r.sessions.DeleteMany(ctx, bson.D{
+		{Key: "user_id", Value: userID}, {Key: "_id", Value: bson.D{{Key: "$ne", Value: currentSessionID}}},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("revoke sessions after password change: %w", err)
+	}
+	return revoked.DeletedCount, nil
 }
 
 func (r *MongoRepository) createSession(ctx context.Context, session biz.Session) error {

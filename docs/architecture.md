@@ -35,7 +35,7 @@ internal/modules/<domain>/
 
 这些规则由 `internal/architecture` 中的可执行测试守护。新增领域不能让 `biz` 直接导入其他领域、Kratos transport、数据库驱动或运行时 SDK，也不能直接把领域实体作为 HTTP JSON 契约。
 
-Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `LoginGuard`，Mongo adapter 以 normalized email 的 SHA-256 键和 revision 条件更新提供跨 Server 共享限制。阈值与窗口来自 Server 安全配置；达到阈值或极端并发重试耗尽时失败关闭，正确登录清理记录，TTL migration 回收过期状态。来源 IP 和全局连接限制属于可信入口职责，不能用该账号维度保护替代。
+Identity 模块的登录尝试保护同样遵循端口边界：`biz` 只依赖 `LoginGuard`，Mongo adapter 以 normalized email 的 SHA-256 键和 revision 条件更新提供跨 Server 共享限制。阈值与窗口来自 Server 安全配置；达到阈值或极端并发重试耗尽时失败关闭，正确登录清理记录，TTL migration 回收过期状态。来源 IP 和全局连接限制属于可信入口职责，不能用该账号维度保护替代。已认证密码轮换以旧 password hash 做条件更新，并在同一事务中写新 Argon2id hash、撤销其他 Session 和记录审计；Session 创建也按刚校验的 hash 锁定用户，阻止并发旧密码登录在轮换后补写会话。当前调用 Session 被保留，邮件找回和管理员重置不属于当前安全边界。
 
 ## 本地化边界
 

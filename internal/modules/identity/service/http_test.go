@@ -109,6 +109,28 @@ func TestIdentityHTTPBootstrapAuthenticationAndLogout(t *testing.T) {
 			revoke.Body.String(),
 		)
 	}
+	changePassword := request(
+		handler,
+		http.MethodPut,
+		"/api/v1/auth/password",
+		`{"current_password":"long-enough-password","new_password":"replacement-password"}`,
+		rawToken,
+	)
+	if changePassword.Code != http.StatusOK ||
+		!strings.Contains(changePassword.Body.String(), `"revoked_sessions":0`) ||
+		changePassword.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("change password status=%d body=%s", changePassword.Code, changePassword.Body.String())
+	}
+	oldPasswordLogin := request(handler, http.MethodPost, "/api/v1/auth/login",
+		`{"email":"owner@example.com","password":"long-enough-password"}`, "")
+	if oldPasswordLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("old password login status=%d body=%s", oldPasswordLogin.Code, oldPasswordLogin.Body.String())
+	}
+	newPasswordLogin := request(handler, http.MethodPost, "/api/v1/auth/login",
+		`{"email":"owner@example.com","password":"replacement-password"}`, "")
+	if newPasswordLogin.Code != http.StatusOK {
+		t.Fatalf("new password login status=%d body=%s", newPasswordLogin.Code, newPasswordLogin.Body.String())
+	}
 
 	meRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/me", nil)
 	meRequest.Header.Set("Authorization", "Bearer "+rawToken)
@@ -388,11 +410,46 @@ func (r *memoryIdentityRepository) RevokeInvitation(_ context.Context, revoked b
 func (r *memoryIdentityRepository) CreateSession(
 	_ context.Context,
 	session biz.Session,
+	_ string,
 	_ time.Time,
 	_ int,
 ) error {
 	r.sessions[session.TokenHash] = session
 	return nil
+}
+
+func (r *memoryIdentityRepository) GetUserCredential(
+	_ context.Context, organizationID, userID string,
+) (biz.User, error) {
+	user, ok := r.usersByID[userID]
+	if !ok || user.OrganizationID != organizationID {
+		return biz.User{}, biz.ErrNotFound
+	}
+	return user, nil
+}
+
+func (r *memoryIdentityRepository) ChangePassword(
+	_ context.Context,
+	organizationID, userID, expectedHash, newHash, currentSessionID string,
+) (int64, error) {
+	user, ok := r.usersByID[userID]
+	if !ok || user.OrganizationID != organizationID || user.PasswordHash != expectedHash {
+		return 0, biz.ErrPasswordConflict
+	}
+	user.PasswordHash = newHash
+	r.usersByID[userID] = user
+	r.users[user.EmailNormalized] = user
+	if r.user.ID == userID {
+		r.user = user
+	}
+	var revoked int64
+	for tokenHash, session := range r.sessions {
+		if session.UserID == userID && session.ID != currentSessionID {
+			delete(r.sessions, tokenHash)
+			revoked++
+		}
+	}
+	return revoked, nil
 }
 
 func (r *memoryIdentityRepository) FindSession(_ context.Context, tokenHash string, now time.Time) (biz.Session, biz.User, error) {

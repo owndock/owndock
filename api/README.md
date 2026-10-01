@@ -48,6 +48,7 @@ Agent 长连接使用独立 mTLS 端口和 NDJSON full-duplex 协议，不属于
 | Meta | `GET /api/v1/meta/version` | 查询服务版本、提交和构建时间 |
 | Identity | `POST /api/v1/auth/bootstrap` | 使用安装配置的 bootstrap token 创建首个 Organization、Owner 和 Session |
 | Identity | `POST /api/v1/auth/login` | 创建本地 Bearer Session；账号尝试超过共享阈值时返回 `429` 与 `Retry-After` |
+| Identity | `PUT /api/v1/auth/password` | 校验当前密码并原子更新密码；保留当前 Session，立即撤销其他 Session |
 | Identity | `GET /api/v1/auth/me`、`POST /api/v1/auth/logout` | 查询当前身份或注销 Session |
 | Identity | `GET /api/v1/auth/sessions`、`DELETE /api/v1/auth/sessions/{session_id}` | 查询当前用户的活跃 Session，或撤销一个属于自己的 Session |
 | Identity | `GET/DELETE /api/v1/auth/users/{user_id}/sessions` | Owner 查询同 Organization 用户的安全会话摘要，或紧急撤销该用户全部 Session |

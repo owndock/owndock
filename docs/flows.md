@@ -100,6 +100,37 @@ sequenceDiagram
 
 Owner 还可以使用 `/api/v1/auth/users/{user_id}/sessions` 查看和紧急撤销同一 Organization 成员的会话；列表同样不含 Token/hash，撤销和管理员审计在同一事务中提交。完整时序见[本地用户邀请与会话治理](users-and-invitations.md)。
 
+已登录用户通过 `PUT /api/v1/auth/password` 提交当前密码和新密码。服务端重新校验当前密码，并在一个 MongoDB 事务中以旧 password hash 作为并发条件写入新 Argon2id hash、递增用户的 Session revision、删除除当前 Session 外的所有 Session，并记录 `identity.password_changed` 审计。当前 Session 保留，避免成功响应丢失时将操作者锁在系统外；其他浏览器和自动化客户端的下一次请求立即失效。登录创建 Session 时也以读取到的 password hash 为条件锁定用户，因此与密码修改并发的旧密码登录不能在轮换提交后补写新 Session。当前版本不提供邮件找回或管理员重置，忘记密码恢复属于需要单独安全设计的后续能力。
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as 已登录用户
+    participant API as Identity API
+    participant K as Password Security
+    participant M as MongoDB Transaction
+    participant A as Audit Store
+
+    U->>API: PUT /api/v1/auth/password<br/>current_password + new_password
+    API->>API: 认证当前 Bearer Session
+    API->>M: 读取当前用户 password hash
+    API->>K: 校验 current_password 和新旧不同
+    alt 当前密码错误或新密码不合规
+        API-->>U: 403 或 422
+    else 校验成功
+        API->>K: Argon2id hash(new_password)
+        API->>M: 开始事务，按旧 hash 条件更新用户
+        M->>M: 删除 user 的其他 Session，保留当前 Session
+        API->>A: 写 identity.password_changed
+        alt 旧 hash 已被其他请求修改
+            M-->>API: 回滚并返回 409
+        else 全部成功
+            M-->>API: 提交事务
+            API-->>U: 200 + revoked_sessions
+        end
+    end
+```
+
 ```mermaid
 sequenceDiagram
     autonumber

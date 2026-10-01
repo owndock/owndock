@@ -38,6 +38,8 @@ func (s *HTTP) Handle(w http.ResponseWriter, r *http.Request) {
 		s.login(w, r)
 	case "/api/v1/auth/logout":
 		s.authenticated(s.logout).ServeHTTP(w, r)
+	case "/api/v1/auth/password":
+		s.authenticated(s.changePassword).ServeHTTP(w, r)
 	case "/api/v1/auth/me":
 		s.authenticated(s.me).ServeHTTP(w, r)
 	case "/api/v1/auth/sessions":
@@ -294,6 +296,30 @@ func (s *HTTP) logout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *HTTP) changePassword(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
+		return
+	}
+	var request struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if !decodeRequest(w, r, &request) {
+		return
+	}
+	principal, _ := security.PrincipalFromContext(r.Context())
+	revoked, err := s.useCase.ChangePassword(
+		r.Context(), principal, request.CurrentPassword, request.NewPassword,
+		httpx.RequestIDFromContext(r.Context()),
+	)
+	if writeIdentityError(w, r, err) {
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.JSON(w, http.StatusOK, map[string]any{"revoked_sessions": revoked})
+}
+
 func (s *HTTP) me(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpx.ErrorRequest(w, r, http.StatusMethodNotAllowed, "method_not_allowed")
@@ -429,6 +455,12 @@ func writeIdentityError(w http.ResponseWriter, r *http.Request, err error) bool 
 		httpx.ErrorRequest(w, r, http.StatusConflict, "already_bootstrapped")
 	case errors.Is(err, biz.ErrInvalidCredentials):
 		unauthenticated(w, r)
+	case errors.Is(err, biz.ErrCurrentPassword):
+		httpx.ErrorRequest(w, r, http.StatusForbidden, "current_password_invalid")
+	case errors.Is(err, biz.ErrPasswordUnchanged):
+		httpx.ErrorRequest(w, r, http.StatusUnprocessableEntity, "password_unchanged")
+	case errors.Is(err, biz.ErrPasswordConflict):
+		httpx.ErrorRequest(w, r, http.StatusConflict, "password_conflict")
 	case errors.Is(err, biz.ErrLoginRateLimited):
 		var rateLimit *biz.LoginRateLimitError
 		if errors.As(err, &rateLimit) {

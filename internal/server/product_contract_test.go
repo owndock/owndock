@@ -610,6 +610,16 @@ func (r *contractIdentityRepository) FindUserByEmail(_ context.Context, email st
 	return r.user, nil
 }
 
+func (r *contractIdentityRepository) GetUserCredential(
+	_ context.Context, organizationID, userID string,
+) (identitybiz.User, error) {
+	user, ok := r.usersByID[userID]
+	if !ok || user.OrganizationID != organizationID {
+		return identitybiz.User{}, identitybiz.ErrNotFound
+	}
+	return user, nil
+}
+
 func (r *contractIdentityRepository) ListUsers(_ context.Context, organizationID string) ([]identitybiz.User, error) {
 	var result []identitybiz.User
 	for _, user := range r.users {
@@ -697,11 +707,40 @@ func (r *contractIdentityRepository) RevokeInvitation(_ context.Context, revoked
 func (r *contractIdentityRepository) CreateSession(
 	_ context.Context,
 	session identitybiz.Session,
+	expectedPasswordHash string,
 	_ time.Time,
 	_ int,
 ) error {
+	user, ok := r.usersByID[session.UserID]
+	if !ok || user.PasswordHash != expectedPasswordHash {
+		return identitybiz.ErrInvalidCredentials
+	}
 	r.sessions[session.TokenHash] = session
 	return nil
+}
+
+func (r *contractIdentityRepository) ChangePassword(
+	_ context.Context,
+	organizationID, userID, expectedPasswordHash, newPasswordHash, currentSessionID string,
+) (int64, error) {
+	user, ok := r.usersByID[userID]
+	if !ok || user.OrganizationID != organizationID || user.PasswordHash != expectedPasswordHash {
+		return 0, identitybiz.ErrPasswordConflict
+	}
+	user.PasswordHash = newPasswordHash
+	r.usersByID[userID] = user
+	r.users[user.EmailNormalized] = user
+	if r.user.ID == userID {
+		r.user = user
+	}
+	var revoked int64
+	for hash, session := range r.sessions {
+		if session.UserID == userID && session.ID != currentSessionID {
+			delete(r.sessions, hash)
+			revoked++
+		}
+	}
+	return revoked, nil
 }
 
 func (r *contractIdentityRepository) FindSession(
