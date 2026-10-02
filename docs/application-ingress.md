@@ -61,7 +61,7 @@ Gateway 使用独立 `owndock-ingress` 系统账号，容器显式 non-root、�
 
 代码生成器已经用 Caddy 2.11.4 官方二进制执行 `caddy validate`。这证明 JSON schema/模块可加载，不等于主机端口、Docker 网络、ACME 或流量行为已经通过系统验收。
 
-仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy、三个静态后端和两个协议后端，通过实际 Unix admin socket 与流量验证多 Host 隔离、HTTP/1.1、WebSocket、长响应、prepare 切流、旧连接有界保留、新连接进入新后端、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。生产 Worker 组合链还断言坏后端最终只记录有界 `backend_unhealthy`，同时保留旧路由、旧稳定容器并清理候选。候选刚启动但 marker 尚未出现时，私有探测会在原请求超时预算内以 100 毫秒间隔重试；连接、TLS、上下文错误仍立即失败关闭。协议后端是门禁运行时由仓库源码构建的静态 Go 二进制，复制进固定 digest 容器，不引入浮动测试镜像。该门禁已在一次性 Linux arm64 容器与隔离 Docker Engine 中完整通过；这属于 Linux 内核执行证据，不替代原生 Ubuntu/systemd、宿主 80/443、公网 DNS/ACME 或客户物理主机认证。
+仓库还提供 `make test-ingress-integration` Linux 门禁：它以固定 digest 启动受限 Caddy、三个静态后端和两个协议后端，通过实际 Unix admin socket 与流量验证多 Host 隔离、HTTP/1.1、WebSocket、长响应、prepare 切流、旧连接有界保留、新连接进入新后端、abort 恢复、commit 固化、坏后端私有探测回滚，以及 Gateway 重启从 autosave 恢复。生产 Worker 组合链还断言坏后端最终只记录有界 `backend_unhealthy`，同时保留旧路由、旧稳定容器并清理候选；随后以真实 Caddy 完成 Route 退役并观察 404，再针对仍在运行的稳定 Deployment 主动调和同一 Route、验证流量恢复与幂等重放，最后再次退役并观察 404，全程不重新部署或改变稳定容器归属。候选刚启动但 marker 尚未出现时，私有探测会在原请求超时预算内以 100 毫秒间隔重试；连接、TLS、上下文错误仍立即失败关闭。协议后端是门禁运行时由仓库源码构建的静态 Go 二进制，复制进固定 digest 容器，不引入浮动测试镜像。该门禁已在一次性 Linux arm64 容器与隔离 Docker Engine 中完整通过；这属于 Linux 内核执行证据，不替代原生 Ubuntu/systemd、宿主 80/443、公网 DNS/ACME 或客户物理主机认证。
 
 ## 资源边界
 
@@ -191,7 +191,7 @@ Server 从 `/metrics` 暴露 `owndock_managed_ingress_operations_total{phase,res
 
 ## 验收门槛
 
-已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非 development 环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，已有成功 Deployment 上的 Route 主动调和、Server Host revision/持久事务/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Replica Set 用例还会把成功响应视为丢失，以新的 Store/Coordinator 重复主动调和和退役，以及 Deployment prepare、控制面提交、Gateway commit、finish、restore 与 abort，验证重放仍使用原始运行身份。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像；测试代码编译通过不等于已获得 Replica Set 实跑证据。
+已进入自动门禁的范围：领域规范化与状态转换、角色权限、绑定不可变、非 development 环境 TLS 底线、Project 配额、OpenAPI/实现一致性、Mongo hostname 唯一/隔离/revision 冲突，已有成功 Deployment 上的 Route 主动调和、Server Host revision/持久事务/Route observation 与 Deployment `committing` 接管，以及 Agent wire canonicalization、完整配置 digest、Host/Route/Deployment/cutover fence、原子状态恢复和失败关闭。Replica Set 用例还会把成功响应视为丢失，以新的 Store/Coordinator 重复主动调和和退役，以及 Deployment prepare、控制面提交、Gateway commit、finish、restore 与 abort，验证重放仍使用原始运行身份；Linux 组合门禁则把主动调和与两次退役落实到真实 Engine、Caddy 和 HTTP 流量。Mongo 实测需要 `OWNDOCK_RUN_MONGO_INTEGRATION=1`，并使用仓库固定的非 `latest` MongoDB 镜像；测试代码编译通过不等于已获得 Replica Set 实跑证据。
 
 以下仍是执行面与联合验收门槛：
 

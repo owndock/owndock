@@ -86,7 +86,7 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	caddy.probeClient = ingressIntegrationHTTPClient(publicAddress)
+	caddy.probeClient = managedIngressDiagnosticHTTPClient(t, publicAddress)
 	ingressStateDirectory := restrictedTempDirectory(t)
 	ingressStore, err := NewFileIngressFenceStore(ingressStateDirectory, 8)
 	if err != nil {
@@ -249,6 +249,75 @@ func TestManagedIngressDeploymentWorkerEngineAndGatewayIntegration(t *testing.T)
 			retirementStore.committed, retirementStore.finished)
 	}
 	assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusNotFound, "")
+	lateRoute, err := applicationroutebiz.NewApplicationRoute(applicationroutebiz.Input{
+		ID: "worker-route", OrganizationID: "integration-organization",
+		ProjectID: plans[1].ProjectID, ApplicationID: plans[1].ApplicationID,
+		EnvironmentID: plans[1].EnvironmentID, RuntimeTargetID: plans[1].RuntimeTargetID,
+		Hostname: hostname, PortName: "http", TLSMode: applicationroutebiz.TLSModeDisabled,
+		Status: applicationroutebiz.StatusPending, Revision: 1, Version: 1,
+		CreatedBy: "integration-owner", UpdatedBy: "integration-owner",
+		CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("create late managed Route fixture: %v", err)
+	}
+	reconciliationStore := &managedIngressIntegrationReconciliationStore{
+		transaction: applicationroutebiz.RouteReconciliationTransaction{
+			RouteID: lateRoute.ID, RouteRevision: lateRoute.Revision,
+			OrganizationID: lateRoute.OrganizationID,
+			Backend: applicationroutebiz.ActiveBackend{
+				OrganizationID: lateRoute.OrganizationID, ProjectID: lateRoute.ProjectID,
+				ApplicationID: lateRoute.ApplicationID, EnvironmentID: lateRoute.EnvironmentID,
+				RuntimeTargetID: lateRoute.RuntimeTargetID, ManagedHostID: hostID,
+				DeploymentID: plans[1].DeploymentID, CutoverSequence: plans[1].CutoverSequence,
+				Port: plans[1].RuntimeSpec.Ports[0].ContainerPort,
+			},
+			Desired: managedIngressIntegrationDesired(t, plans[1], hostname, 5),
+		},
+	}
+	reconciliation, err := applicationroutebiz.NewReconciliationCoordinator(
+		managedIngressIntegrationBackendResolver{backend: reconciliationStore.transaction.Backend},
+		reconciliationStore, routeGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		completed, reconcileErr := reconciliation.Reconcile(ctx, lateRoute)
+		if reconcileErr != nil || !completed {
+			t.Fatalf("reconcile late managed route attempt %d = %t, %v",
+				attempt+1, completed, reconcileErr)
+		}
+	}
+	if reconciliationStore.prepared != 1 || reconciliationStore.finished != 1 ||
+		reconciliationStore.aborted != 0 || reconciliationStore.degraded != 0 {
+		t.Fatalf("route reconciliation phases = prepared=%d finished=%d aborted=%d degraded=%d",
+			reconciliationStore.prepared, reconciliationStore.finished,
+			reconciliationStore.aborted, reconciliationStore.degraded)
+	}
+	assertManagedIngressRuntimeOwner(t, ctx, inspection, stableName, plans[1])
+	assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusOK, "")
+
+	finalRetirementStore := &managedIngressIntegrationRetirementStore{
+		transaction: applicationroutebiz.RouteRetirementTransaction{
+			RouteID: lateRoute.ID, OrganizationID: lateRoute.OrganizationID,
+			Desired: applicationroutebiz.HostDesiredConfig{
+				ManagedHostID: hostID, HostRevision: 6,
+				Routes: []applicationroutebiz.GatewayRoute{}, ProbeRouteIDs: []string{},
+			},
+		},
+	}
+	finalRetirement, err := applicationroutebiz.NewRetirementCoordinator(
+		finalRetirementStore, routeGateway,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed, err := finalRetirement.Retire(ctx, lateRoute.ID)
+	if err != nil || !completed {
+		t.Fatalf("retire reconciled managed route = %t, %v", completed, err)
+	}
+	assertIngressResponse(t, ctx, publicAddress, hostname, http.StatusNotFound, "")
 	assertManagedIngressSecretAbsent(
 		t, applicationSecret, stateDirectory, ingressStateDirectory, socketDirectory,
 	)
@@ -276,6 +345,26 @@ type managedIngressIntegrationDispatcher struct {
 type managedIngressDiagnosticEngine struct {
 	dockerDeploymentEngine
 	t *testing.T
+}
+
+type managedIngressDiagnosticTransport struct {
+	t         *testing.T
+	transport http.RoundTripper
+}
+
+func (d managedIngressDiagnosticTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := d.transport.RoundTrip(request)
+	if err != nil {
+		d.t.Logf("managed ingress HTTP probe %s failed: %v", request.URL, err)
+	}
+	return response, err
+}
+
+func managedIngressDiagnosticHTTPClient(t *testing.T, address string) *http.Client {
+	t.Helper()
+	client := ingressIntegrationHTTPClient(address)
+	client.Transport = managedIngressDiagnosticTransport{t: t, transport: client.Transport}
+	return client
 }
 
 func (e *managedIngressDiagnosticEngine) ContainerCreate(
@@ -404,6 +493,77 @@ type managedIngressIntegrationRetirementStore struct {
 	prepared    int
 	committed   int
 	finished    int
+}
+
+type managedIngressIntegrationBackendResolver struct {
+	backend applicationroutebiz.ActiveBackend
+}
+
+func (r managedIngressIntegrationBackendResolver) ResolveActiveBackend(
+	context.Context,
+	applicationroutebiz.ApplicationRoute,
+) (applicationroutebiz.ActiveBackend, bool, error) {
+	return r.backend, true, nil
+}
+
+type managedIngressIntegrationReconciliationStore struct {
+	transaction applicationroutebiz.RouteReconciliationTransaction
+	settled     bool
+	prepared    int
+	finished    int
+	aborted     int
+	degraded    int
+}
+
+func (s *managedIngressIntegrationReconciliationStore) Begin(
+	context.Context,
+	applicationroutebiz.ApplicationRoute,
+	applicationroutebiz.ActiveBackend,
+) (applicationroutebiz.RouteReconciliationTransaction, bool, error) {
+	return s.transaction, s.settled, nil
+}
+
+func (s *managedIngressIntegrationReconciliationStore) MarkPrepared(
+	_ context.Context,
+	transaction applicationroutebiz.RouteReconciliationTransaction,
+	observation applicationroutebiz.GatewayObservation,
+) error {
+	if transaction.Desired.HostRevision != observation.HostRevision {
+		return applicationroutebiz.ErrReconciliationConflict
+	}
+	s.prepared++
+	return nil
+}
+
+func (s *managedIngressIntegrationReconciliationStore) Complete(
+	_ context.Context,
+	transaction applicationroutebiz.RouteReconciliationTransaction,
+	observation applicationroutebiz.GatewayObservation,
+) error {
+	if transaction.Desired.HostRevision != observation.HostRevision {
+		return applicationroutebiz.ErrReconciliationConflict
+	}
+	s.finished++
+	s.settled = true
+	return nil
+}
+
+func (s *managedIngressIntegrationReconciliationStore) Abort(
+	context.Context,
+	applicationroutebiz.RouteReconciliationTransaction,
+	applicationroutebiz.FailureCode,
+) error {
+	s.aborted++
+	return nil
+}
+
+func (s *managedIngressIntegrationReconciliationStore) Degrade(
+	context.Context,
+	applicationroutebiz.ApplicationRoute,
+	applicationroutebiz.FailureCode,
+) error {
+	s.degraded++
+	return nil
 }
 
 func (s *managedIngressIntegrationRetirementStore) Begin(
@@ -710,3 +870,5 @@ var _ deploymentbiz.CredentialResolver = managedIngressIntegrationCredentialReso
 var _ deploymentbiz.FenceValidator = (*managedIngressIntegrationFence)(nil)
 var _ applicationroutebiz.CutoverStore = (*managedIngressIntegrationCutoverStore)(nil)
 var _ applicationroutebiz.RouteRetirementStore = (*managedIngressIntegrationRetirementStore)(nil)
+var _ applicationroutebiz.ActiveBackendResolver = managedIngressIntegrationBackendResolver{}
+var _ applicationroutebiz.RouteReconciliationStore = (*managedIngressIntegrationReconciliationStore)(nil)
